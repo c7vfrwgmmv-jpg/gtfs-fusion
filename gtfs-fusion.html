@@ -3060,36 +3060,134 @@ function getAllTripsForRoute() {
       return { trips, tripStopMaps, tripToVariant, patternToVariant, variantDetails };
     }
 
-function sortTripsByMostFrequentStop(trips, tripStopMaps) {
+function sortTripsByMostFrequentStop(trips, tripStopMaps, masterList = null) {
   if (!trips || trips.length === 0) return trips.slice();
-  const stopFrequency = new Map();
-  trips.forEach(trip => {
-    const stops = tripStopMaps[trip.trip_id];
-    if (!stops) return;
-    stops.forEach(stop => {
-      stopFrequency.set(stop.stop_id, (stopFrequency.get(stop.stop_id) || 0) + 1);
+  
+  // Jeśli brak masterList, użyj starej logiki (backward compatibility)
+  if (!masterList) {
+    const stopFrequency = new Map();
+    trips.forEach(trip => {
+      const stops = tripStopMaps[trip.trip_id];
+      if (!stops) return;
+      stops.forEach(stop => {
+        stopFrequency.set(stop.stop_id, (stopFrequency.get(stop.stop_id) || 0) + 1);
+      });
     });
-  });
-  let maxFrequency = 0, mostFrequentStopId = null;
-  stopFrequency.forEach((count, stopId) => {
-    if (count > maxFrequency) {
-      maxFrequency = count;
-      mostFrequentStopId = stopId;
-    }
-  });
-  if (!mostFrequentStopId) return trips.slice();
-  const tripTimes = new Map();
+    let maxFrequency = 0, mostFrequentStopId = null;
+    stopFrequency.forEach((count, stopId) => {
+      if (count > maxFrequency) {
+        maxFrequency = count;
+        mostFrequentStopId = stopId;
+      }
+    });
+    if (!mostFrequentStopId) return trips.slice();
+    const tripTimes = new Map();
+    trips.forEach(trip => {
+      const stops = tripStopMaps[trip.trip_id] || [];
+      const stop = stops.find(s => s.stop_id === mostFrequentStopId);
+      const lastStop = stops[stops.length - 1];
+      const timeStr = stop ? (stop.departure_time || stop.arrival_time)
+                           : (lastStop ? (lastStop.departure_time || lastStop.arrival_time) : null);
+      tripTimes.set(trip.trip_id, timeStr ? getTimeInMinutes(timeStr) : 999999);
+    });
+    return trips.slice().sort((a,b) =>
+      (tripTimes.get(a.trip_id) || 999999) - (tripTimes.get(b.trip_id) || 999999)
+    );
+  }
+  
+  // === NOWA LOGIKA: z wiedzą o merged stops ===
+  
+  // 1. Znajdź most frequent STATION (merged stop)
+  const stationCounts = new Map();
+  
   trips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
-    const stop = stops.find(s => s.stop_id === mostFrequentStopId);
-    const lastStop = stops[stops.length - 1];
-    const timeStr = stop ? (stop.departure_time || stop.arrival_time)
-                         : (lastStop ? (lastStop.departure_time || lastStop.arrival_time) : null);
-    tripTimes.set(trip.trip_id, timeStr ? getTimeInMinutes(timeStr) : 999999);
+    stops.forEach(s => {
+      // Znajdź stationId (id wiersza masterList) dla tego stop_id
+      let stationId = null;
+      
+      for (const mStop of masterList) {
+        const allStopIds = mStop.stopIds || [mStop.id];
+        if (allStopIds.includes(s.stop_id)) {
+          stationId = mStop.id;
+          break;
+        }
+      }
+      
+      if (stationId) {
+        stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
+      }
+    });
   });
-  return trips.slice().sort((a,b) =>
-    (tripTimes.get(a.trip_id) || 999999) - (tripTimes.get(b.trip_id) || 999999)
-  );
+  
+  // Znajdź most frequent station
+  let maxCount = 0;
+  let anchorStationId = null;
+  stationCounts.forEach((count, stId) => {
+    if (count > maxCount) {
+      maxCount = count;
+      anchorStationId = stId;
+    }
+  });
+  
+  if (!anchorStationId) {
+    // Fallback: sortuj chronologicznie
+    return trips.sort((a, b) => {
+      const aStops = tripStopMaps[a.trip_id] || [];
+      const bStops = tripStopMaps[b.trip_id] || [];
+      let aTime = aStops[0]?.departure_time || "99:99:99";
+      let bTime = bStops[0]?.departure_time || "99:99:99";
+      if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
+      if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
+      return aTime.localeCompare(bTime);
+    });
+  }
+  
+  // Znajdź wszystkie stop_ids dla anchor station (merged!)
+  const anchorStopIds = [];
+  for (const mStop of masterList) {
+    if (mStop.id === anchorStationId) {
+      anchorStopIds.push(...(mStop.stopIds || [mStop.id]));
+      break;
+    }
+  }
+  
+  // 2. Sortuj tripy według anchor station + czas + długość
+  const tripData = trips.map(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    // Znajdź pozycję KTÓREGOKOLWIEK z anchorStopIds
+    let anchorIndex = -1;
+    for (let i = 0; i < stops.length; i++) {
+      if (anchorStopIds.includes(stops[i].stop_id)) {
+        anchorIndex = i;
+        break;
+      }
+    }
+    
+    // Pierwszy czas odjazdu
+    let firstTime = stops[0]?.departure_time || "99:99:99";
+    if (String(firstTime).match(/^\d:/)) firstTime = "0" + firstTime;
+    
+    return {
+      trip,
+      anchorIndex,
+      firstTime,
+      totalStops: stops.length
+    };
+  });
+  
+  // Sortuj: anchorIndex DESC → firstTime ASC → totalStops DESC
+  tripData.sort((a, b) => {
+    if (a.anchorIndex !== b.anchorIndex) {
+      return b.anchorIndex - a.anchorIndex;
+    }
+    const timeComp = a.firstTime.localeCompare(b.firstTime);
+    if (timeComp !== 0) return timeComp;
+    return b.totalStops - a.totalStops;
+  });
+  
+  return tripData.map(td => td.trip);
 }
 
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
@@ -4918,7 +5016,28 @@ const processedTrips = trips.map(trip => {
   return { ...trip, pStops, hasPassenger };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
       if (processedTrips.length === 0) { tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; return; }
-let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps);
+
+// KROK 1: Zbuduj masterList najpierw (temporary chronological sort)
+const tempSorted = [...processedTrips].sort((a, b) => {
+  const aFirst = a.pStops[0];
+  const bFirst = b.pStops[0];
+  let aTime = aFirst?.departure_time || "99:99:99";
+  let bTime = bFirst?.departure_time || "99:99:99";
+  if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
+  if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
+  return aTime.localeCompare(bTime);
+});
+
+const tempTripStopMaps = {};
+tempSorted.forEach(t => {
+  tempTripStopMaps[t.trip_id] = t.pStops;
+});
+
+const masterList = buildMasterListWithProfile(tempSorted, tempTripStopMaps, state.gtfsData.stopsIndex);
+
+// KROK 2: Teraz sortuj tripy z wiedzą o merged stops
+let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tempTripStopMaps, masterList);
+
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
   let start = firstStop?.departure_time || "00:00:00";
@@ -4930,8 +5049,6 @@ const newTripStopMaps = {};
 sortedTrips.forEach(t => {
   newTripStopMaps[t.trip_id] = t.pStops;
 });
-
-const masterList = buildMasterListWithProfile(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
 // === POPULATE CACHED TIMETABLE DATA FOR MODAL ===
@@ -5004,35 +5121,37 @@ state.currentTimetableData.stopDepartures = stopDepartures;
 
         // FIX #8: Check if this is a merged stop for tooltips on time cells
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
-        let mergedStopTooltip = '';
-        
-        if (isMergedStop) {
-          // Build merged stop tooltip info: stop_id, stop_desc, platform_code
-          const firstStopId = mStop.stopIds[0];
-          const stopData = state.gtfsData.stopsIndex[firstStopId];
-          
-          if (stopData) {
-            const infoParts = [];
-            if (stopData.stop_id) infoParts.push(`ID: ${escapeHtml(stopData.stop_id)}`);
-            if (stopData.stop_desc) infoParts.push(escapeHtml(stopData.stop_desc));
-            if (stopData.platform_code) infoParts.push(`Peron: ${escapeHtml(stopData.platform_code)}`);
-            
-            if (infoParts.length > 0) {
-              mergedStopTooltip = infoParts.join('<br>');
-            }
-          }
-        }
 
         // Inner loop: generate time cells for each trip
         tripMappings.forEach((mapping, tripIdx) => {
           const stopMatch = mapping[mIdx];
           const trip = sortedTrips[tripIdx];
+          
           if (stopMatch) {
-            // FIX #8: Add tooltip ONLY for merged stops with stop_id, stop_desc, platform_code
-            if (isMergedStop && mergedStopTooltip) {
+            // Zbuduj tooltip dla TEGO KONKRETNEGO stop_id (nie pierwszego!)
+            let cellTooltip = '';
+            
+            if (isMergedStop) {
+              const actualStopId = stopMatch.stop_id;  // ← Właściwy stop_id dla TEJ komórki!
+              const stopData = state.gtfsData.stopsIndex[actualStopId];
+              
+              if (stopData) {
+                const infoParts = [];
+                if (stopData.stop_id) infoParts.push(`ID: ${escapeHtml(stopData.stop_id)}`);
+                if (stopData.stop_desc) infoParts.push(escapeHtml(stopData.stop_desc));
+                if (stopData.platform_code) infoParts.push(`Peron: ${escapeHtml(stopData.platform_code)}`);
+                
+                if (infoParts.length > 0) {
+                  cellTooltip = infoParts.join('<br>');
+                }
+              }
+            }
+            
+            // Renderuj komórkę z właściwym tooltipem
+            if (cellTooltip) {
               html += `<td class="p-1 text-center text-xs border border-gray-300 time-cell-with-tooltip">
                 ${formatTime(stopMatch.departure_time || stopMatch.arrival_time)}
-                <span class="tooltip-content">${mergedStopTooltip}</span>
+                <span class="tooltip-content">${cellTooltip}</span>
               </td>`;
             } else {
               // No tooltip for non-merged stops
