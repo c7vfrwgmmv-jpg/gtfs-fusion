@@ -1353,9 +1353,8 @@ function looksLikeGarbageLabel(s, shortName) {
     function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       return new Promise(async (resolve, reject) => {
         try {
-          // Get blob and process in chunks (cross-browser compatible).
-          const blob = await zipFileEntry.async('blob');
-          const arrayBuffer = await blob.arrayBuffer();
+          // Get arrayBuffer directly (cross-browser compatible).
+          const arrayBuffer = await zipFileEntry.async('arraybuffer');
           const decoder = new TextDecoder('utf-8');
           
           let buffer = '';
