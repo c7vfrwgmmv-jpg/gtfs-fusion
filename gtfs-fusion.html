@@ -1353,7 +1353,7 @@ function looksLikeGarbageLabel(s, shortName) {
     function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       return new Promise(async (resolve, reject) => {
         try {
-          // Get blob instead of string (doesn't load into memory yet)
+          // Get blob (more memory-efficient than string)
           const blob = await zipFileEntry.async('blob');
           const stream = blob.stream();
           const reader = stream.getReader();
@@ -1363,6 +1363,9 @@ function looksLikeGarbageLabel(s, shortName) {
           let lineCount = 0;
           let headers = null;
           const stopTimesIndex = Object.create(null);
+          
+          const PROGRESS_UPDATE_INTERVAL = 10000;
+          const ESTIMATED_LINES_FOR_PROGRESS = 100000;
           
           // Smart CSV split function to handle quoted fields
           const smartSplit = (line) => {
@@ -1396,6 +1399,12 @@ function looksLikeGarbageLabel(s, shortName) {
             return cols;
           };
           
+          // Safe access to optional columns
+          const getCol = (cols, idx) => {
+            if (idx === -1 || idx >= cols.length) return '';
+            return (cols[idx] || '').replace(/^"|"$/g, '').trim();
+          };
+          
           const processLine = (line) => {
             if (!line.trim()) return;
             
@@ -1422,6 +1431,11 @@ function looksLikeGarbageLabel(s, shortName) {
                 else if (normalized === 'pickup_type') headers.pickupIdx = i;
                 else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
               });
+              
+              // Validate required columns
+              if (headers.tripIdx === -1 || headers.stopIdx === -1) {
+                console.error('Missing required columns in stop_times.txt: trip_id or stop_id');
+              }
               return;
             }
             
@@ -1441,26 +1455,20 @@ function looksLikeGarbageLabel(s, shortName) {
               stopTimesIndex[tripId] = [];
             }
             
-            // Safe access to optional columns
-            const getCol = (idx) => {
-              if (idx === -1 || idx >= cols.length) return '';
-              return (cols[idx] || '').replace(/^"|"$/g, '').trim();
-            };
-            
             stopTimesIndex[tripId].push({
               stop_id: stopId,
-              arrival_time: getCol(headers.arrIdx),
-              departure_time: getCol(headers.depIdx),
-              stop_sequence: parseInt(getCol(headers.seqIdx) || '0', 10),
-              pickup_type: String(getCol(headers.pickupIdx) || '0'),
-              drop_off_type: String(getCol(headers.dropoffIdx) || '0')
+              arrival_time: getCol(cols, headers.arrIdx),
+              departure_time: getCol(cols, headers.depIdx),
+              stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
+              pickup_type: String(getCol(cols, headers.pickupIdx) || '0'),
+              drop_off_type: String(getCol(cols, headers.dropoffIdx) || '0')
             });
             
             lineCount++;
-            if (lineCount % 10000 === 0) {
+            if (lineCount % PROGRESS_UPDATE_INTERVAL === 0) {
               state.loadingProgress = lineCount;
               if (onProgress) {
-                onProgress(lineCount, Math.min(99, Math.round(lineCount / 100000 * 100)));
+                onProgress(lineCount, Math.min(99, Math.round(lineCount / ESTIMATED_LINES_FOR_PROGRESS * 100)));
               }
             }
           };
