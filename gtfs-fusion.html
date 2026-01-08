@@ -1352,6 +1352,7 @@ function looksLikeGarbageLabel(s, shortName) {
       if (lines.length === 0) return [];
       
       // Smart CSV split that respects quotes and handles escaped quotes
+      // Matches logic in parseStopTimesStreamWithWorker
       const smartSplit = (line) => {
         if (!line.includes('"')) {
           return line.split(',');
@@ -1373,13 +1374,13 @@ function looksLikeGarbageLabel(s, shortName) {
               inQuotes = !inQuotes;
             }
           } else if (char === ',' && !inQuotes) {
-            result.push(current);
+            result.push(current.trim());
             current = '';
           } else {
             current += char;
           }
         }
-        result.push(current);
+        result.push(current.trim());
         return result;
       };
       
@@ -1390,8 +1391,8 @@ function looksLikeGarbageLabel(s, shortName) {
       const rawHeaders = smartSplit(headerLine);
       const headers = rawHeaders.map(h => {
         if (!h) return '';
-        // Remove quotes and normalize
-        const cleaned = h.trim().replace(/^"|"$/g, '');
+        // Remove quotes and normalize (after trim in smartSplit)
+        const cleaned = h.replace(/^"|"$/g, '').trim();
         return normalizeKey(cleaned);
       });
       
@@ -1409,10 +1410,11 @@ function looksLikeGarbageLabel(s, shortName) {
           const header = headers[j];
           if (!header) continue;
           
+          // Process all fields including empty ones
           let value = '';
-          if (j < values.length && values[j]) {
-            // Remove quotes and trim
-            value = values[j].trim().replace(/^"|"$/g, '');
+          if (j < values.length) {
+            // Remove quotes and trim (matching parseStopTimesStreamWithWorker getCol logic)
+            value = (values[j] || '').replace(/^"|"$/g, '').trim();
           }
           
           obj[header] = value;
