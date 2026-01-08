@@ -1813,6 +1813,8 @@ function looksLikeGarbageLabel(s, shortName) {
 
     async function handleFileUpload(e) {
       const file = e.target.files[0]; if (!file) return;
+      const t0 = performance.now();
+      const log = (msg) => console.log(`⏱️  ${(performance.now()-t0).toFixed(0)}ms - ${msg}`);
       state.loading = true; state.loadingStep = 'Reading GTFS archive...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
@@ -1824,6 +1826,7 @@ function looksLikeGarbageLabel(s, shortName) {
           console.warn('fflate not available, using JSZip fallback');
           state.loadingStep = 'Decompressing ZIP (JSZip)...'; render();
           zip = await JSZip.loadAsync(file);
+          log('Unzipped');
           state.loadingStep = 'Extracting files...'; render();
           
           const files = ['routes.txt','trips.txt','stop_times.txt','stops.txt','calendar.txt','calendar_dates.txt','agency.txt','shapes.txt'];
@@ -1832,6 +1835,7 @@ function looksLikeGarbageLabel(s, shortName) {
           // Use fflate (fast path)
           state.loadingStep = 'Decompressing ZIP (fflate)...'; render();
           zip = await unzipWithFflate(file);
+          log('Unzipped');
           state.loadingStep = 'Extracting files...'; render();
           
           routesFile = findFile(zip.files, 'routes.txt');
@@ -1862,12 +1866,14 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
+        log('Parsed small files');
         state.loadingStep = 'Parsing stop_times (streaming with worker)...'; render();
         const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
           state.loadingStep = `Parsing stop_times: ${rowsProcessed.toLocaleString()} rows`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
+        log('Parsed stop_times');
         
         // Parse shapes.txt if available (optional)
         let shapesIndex = {};
@@ -1892,6 +1898,7 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
             
             shapesIndex = simplifiedShapes;
             console.log(`Loaded ${Object.keys(shapesIndex).length} shapes`);
+            log('Parsed shapes');
           } catch (err) {
             console.warn('Failed to parse shapes.txt:', err.message);
             // Continue without shapes - they're optional
@@ -1930,6 +1937,7 @@ state.gtfsData = {
   stops,
   shapesIndex
 };
+log('Built indexes');
 state.selectedRouteGroup = null;
         if (routes.length === 1) {
           state.selectedRoute = routes[0];
@@ -1964,6 +1972,8 @@ if (dates.length > 0) {
   
   state.selectedDate = selectedDate;
 }
+        log('DONE');
+        console.log(`\n📊 Total: ${((performance.now()-t0)/1000).toFixed(2)}s`);
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
       } catch(err) {
