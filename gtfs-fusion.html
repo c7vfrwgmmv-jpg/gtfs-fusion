@@ -961,22 +961,6 @@ function debounce(func, wait) {
       return out;
     }
 
-    function timeToMinutes(timeStr) {
-      if (!timeStr) return 0;
-      const parts = timeStr.split(':');
-      const h = parseInt(parts[0] || '0', 10);
-      const m = parseInt(parts[1] || '0', 10);
-      return h * 60 + m;
-    }
-
-    function minutesToTime(minutes) {
-      if (!minutes && minutes !== 0) return '';
-      const h = Math.floor(minutes / 60);
-      const m = minutes % 60;
-      const s = 0;
-      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-    }
-
     /**
      * Convert "HH:MM:SS" time string to minutes since midnight
      * @param {string} timeStr - Time in "HH:MM:SS" format
