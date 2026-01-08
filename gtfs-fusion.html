@@ -1353,222 +1353,108 @@ function looksLikeGarbageLabel(s, shortName) {
     function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       return new Promise(async (resolve, reject) => {
         try {
-          const text = await zipFileEntry.async('string');
+          // Get blob instead of string (doesn't load into memory yet)
+          const blob = await zipFileEntry.async('blob');
+          const stream = blob.stream();
+          const reader = stream.getReader();
+          const decoder = new TextDecoder('utf-8');
           
-          const workerCode = `
-            self.KEY_ALIAS = ${JSON.stringify(KEY_ALIAS)};
-            
-            function normalizeKey(k) {
-              if (k === null || k === undefined) return k;
-              let key = String(k).replace(/^\\uFEFF/,'').trim().toLowerCase();
-              if (self.KEY_ALIAS[key]) return self.KEY_ALIAS[key];
-              return key.replace(/\\s+/g,'_');
-            }
-            
-            function smartSplit(line) {
-              if (!line.includes('"')) {
-                return line.split(',');
-              }
-              
-              const cols = [];
-              let current = '';
-              let inQuotes = false;
-              
-              for (let i = 0; i < line.length; i++) {
-                const char = line[i];
-                
-                if (char === '"') {
-                  if (i + 1 < line.length && line[i+1] === '"') {
-                    current += '"';
-                    i++;
-                  } else {
-                    inQuotes = !inQuotes;
-                  }
-                } else if (char === ',' && !inQuotes) {
-                  cols.push(current.trim());
-                  current = '';
-                } else {
-                  current += char;
-                }
-              }
-              
-              cols.push(current.trim());
-              return cols;
-            }
-            
-            self.addEventListener('message', function(e) {
-              const { text } = e.data;
-              
-              try {
-                const lines = text.split('\\n');
-                
-                if (lines.length === 0) {
-                  postMessage({ type: 'error', error: 'Empty file' });
-                  return;
-                }
-                
-                const headerLine = lines[0].trim();
-                if (!headerLine) {
-                  postMessage({ type: 'error', error: 'Missing header' });
-                  return;
-                }
-                
-                const rawHeaders = smartSplit(headerLine);
-                const headers = rawHeaders.map(h => normalizeKey(h.replace(/"/g, '')));
-                
-                const tripIdx = headers.indexOf('trip_id');
-                const stopIdx = headers.indexOf('stop_id');
-                const seqIdx = headers.indexOf('stop_sequence');
-                const arrIdx = headers.indexOf('arrival_time');
-                const depIdx = headers.indexOf('departure_time');
-                const pickupIdx = headers.indexOf('pickup_type');
-                const dropoffIdx = headers.indexOf('drop_off_type');
-                
-                if (tripIdx === -1 || stopIdx === -1) {
-                  postMessage({ type: 'error', error: 'Missing required columns: trip_id or stop_id' });
-                  return;
-                }
-                
-                const batchSize = 5000;
-                let batch = [];
-                let processed = 0;
-                
-                for (let i = 1; i < lines.length; i++) {
-                  const line = lines[i].trim();
-                  if (!line) continue;
-                  
-                  const cols = smartSplit(line);
-                  
-                  const tripId = (cols[tripIdx] || '').replace(/"/g, '').trim();
-                  if (!tripId) continue;
-                  
-                  const stopId = (cols[stopIdx] || '').replace(/"/g, '').trim();
-                  const seqRaw = (cols[seqIdx] || '0').replace(/"/g, '').trim();
-                  const arrTime = (cols[arrIdx] || '').replace(/"/g, '').trim();
-                  const depTime = (cols[depIdx] || '').replace(/"/g, '').trim();
-                  const pickupRaw = (cols[pickupIdx] || '0').replace(/"/g, '').trim();
-                  const dropoffRaw = (cols[dropoffIdx] || '0').replace(/"/g, '').trim();
-                  
-                  // Use short keys for memory efficiency: t=trip_id, s=stop_id, q=sequence, a=arrival, d=departure, p=pickup, o=dropoff
-                  batch.push({
-                    t: tripId,
-                    s: stopId,
-                    q: parseInt(seqRaw, 10) || 0,
-                    a: arrTime,
-                    d: depTime,
-                    p: parseInt(pickupRaw, 10) || 0,
-                    o: parseInt(dropoffRaw, 10) || 0
-                  });
-                  
-                  processed++;
-                  
-                  if (batch.length >= batchSize) {
-                    postMessage({ 
-                      type: 'batch', 
-                      rows: batch, 
-                      processed: processed,
-                      total: lines.length - 1
-                    });
-                    batch = [];
-                  }
-                }
-                
-                if (batch.length > 0) {
-                  postMessage({ 
-                    type: 'batch', 
-                    rows: batch, 
-                    processed: processed,
-                    total: lines.length - 1
-                  });
-                }
-                
-                postMessage({ type: 'complete' });
-                
-              } catch(err) {
-                postMessage({ 
-                  type: 'error', 
-                  error: err && err.message ? err.message : String(err) 
-                });
-              }
-            });
-          `;
-          
-          const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
-          const workerUrl = URL.createObjectURL(workerBlob);
-          const worker = new Worker(workerUrl);
-          state.currentWorker = worker;
-          
+          let buffer = '';
+          let lineCount = 0;
+          let headers = null;
           const stopTimesIndex = Object.create(null);
-          let processedRows = 0;
-          let totalRows = 0;
           
-          const cleanup = () => {
-            try { worker.terminate(); } catch(e) {}
-            try { URL.revokeObjectURL(workerUrl); } catch(e) {}
-            state.currentWorker = null;
-          };
-          
-          worker.onmessage = function(evt) {
-            const msg = evt.data || {};
+          const processLine = (line) => {
+            if (!line.trim()) return;
             
-            if (msg.type === 'batch') {
-              const rows = msg.rows || [];
+            // Parse header
+            if (!headers) {
+              const rawHeaders = line.split(',');
+              headers = {
+                tripIdx: -1,
+                stopIdx: -1,
+                seqIdx: -1,
+                arrIdx: -1,
+                depIdx: -1,
+                pickupIdx: -1,
+                dropoffIdx: -1
+              };
               
-              for (let i = 0; i < rows.length; i++) {
-                const r = rows[i];
-                const tripId = r.t;
-                
-                if (!stopTimesIndex[tripId]) {
-                  stopTimesIndex[tripId] = [];
-                }
-                
-                // Convert short keys back to standard field names for backward compatibility
-                stopTimesIndex[tripId].push({
-                  stop_id: r.s,
-                  arrival_time: r.a,
-                  departure_time: r.d,
-                  stop_sequence: r.q,
-                  pickup_type: String(r.p),
-                  drop_off_type: String(r.o)
-                });
-              }
-              
-              processedRows = msg.processed || processedRows;
-              totalRows = msg.total || totalRows;
-              
-              if (totalRows > 0) {
-                state.loadingProgressPercent = Math.min(100, Math.round((processedRows / totalRows) * 100));
-              } else {
-                state.loadingProgressPercent = Math.min(99, Math.round((processedRows / 100000) * 100));
-              }
-              
-              state.loadingProgress = processedRows;
-              
-              if (typeof onProgress === 'function') {
-                onProgress(processedRows, state.loadingProgressPercent);
-              }
-              
-            } else if (msg.type === 'complete') {
-              Object.keys(stopTimesIndex).forEach(tripId => {
-                stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
+              rawHeaders.forEach((h, i) => {
+                const normalized = normalizeKey(h);
+                if (normalized === 'trip_id') headers.tripIdx = i;
+                else if (normalized === 'stop_id') headers.stopIdx = i;
+                else if (normalized === 'stop_sequence') headers.seqIdx = i;
+                else if (normalized === 'arrival_time') headers.arrIdx = i;
+                else if (normalized === 'departure_time') headers.depIdx = i;
+                else if (normalized === 'pickup_type') headers.pickupIdx = i;
+                else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
               });
-              
-              state.loadingProgressPercent = 100;
-              cleanup();
-              resolve(stopTimesIndex);
-              
-            } else if (msg.type === 'error') {
-              cleanup();
-              reject(new Error(msg.error || 'Unknown error in worker'));
+              return;
+            }
+            
+            // Parse data line
+            const cols = line.split(',').map(c => c.replace(/^"|"$/g, '').trim());
+            
+            const tripId = cols[headers.tripIdx];
+            const stopId = cols[headers.stopIdx];
+            
+            if (!tripId || !stopId) return;
+            
+            if (!stopTimesIndex[tripId]) {
+              stopTimesIndex[tripId] = [];
+            }
+            
+            stopTimesIndex[tripId].push({
+              stop_id: stopId,
+              arrival_time: cols[headers.arrIdx] || '',
+              departure_time: cols[headers.depIdx] || '',
+              stop_sequence: parseInt(cols[headers.seqIdx] || '0', 10),
+              pickup_type: String(cols[headers.pickupIdx] || '0'),
+              drop_off_type: String(cols[headers.dropoffIdx] || '0')
+            });
+            
+            lineCount++;
+            if (lineCount % 10000 === 0) {
+              state.loadingProgress = lineCount;
+              if (onProgress) {
+                onProgress(lineCount, Math.min(99, Math.round(lineCount / 100000 * 100)));
+              }
             }
           };
           
-          worker.onerror = function(ev) {
-            cleanup();
-            reject(new Error(ev.message || 'Worker parse error'));
-          };
+          // Stream processing loop
+          while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) {
+              // Process any remaining buffer
+              if (buffer.trim()) processLine(buffer);
+              break;
+            }
+            
+            // Decode chunk
+            const chunk = decoder.decode(value, { stream: true });
+            buffer += chunk;
+            
+            // Process all complete lines in buffer
+            let newlineIndex;
+            while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+              const line = buffer.substring(0, newlineIndex);
+              processLine(line);
+              buffer = buffer.substring(newlineIndex + 1);
+            }
+          }
           
-          worker.postMessage({ text: text });
+          // Sort each trip's stops by sequence
+          Object.keys(stopTimesIndex).forEach(tripId => {
+            stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
+          });
+          
+          state.loadingProgress = lineCount;
+          state.loadingProgressPercent = 100;
+          if (onProgress) onProgress(lineCount, 100);
+          resolve(stopTimesIndex);
           
         } catch(err) {
           reject(err);
@@ -1862,7 +1748,7 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
-        state.loadingStep = 'Parsing stop_times (streaming with worker)...'; render();
+        state.loadingStep = 'Parsing stop_times (streaming)...'; render();
         const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
           state.loadingStep = `Parsing stop_times: ${rowsProcessed.toLocaleString()} rows`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
