@@ -1380,7 +1380,7 @@ function parseCSV(text) {
   
   // Parse header
   const headerLine = lines[0]. replace(/^\uFEFF/, ''); // Remove BOM
-  const headers = headerLine.split(',').map(h => h.trim());
+  const headers = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
   
   const result = [];
   
