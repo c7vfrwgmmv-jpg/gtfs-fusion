@@ -955,7 +955,24 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
     function findRouteById(routeId) {
       return (state.gtfsData && state.gtfsData.routes || []).find(r => String(r.route_id) === String(routeId));
     }
-    // reuse existing selectRoute function (defined later) to keep behavior consistent
+
+    const KEY_ALIAS = {
+      'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
+      'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
+      'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
+      'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
+      'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
+      'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
+      'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
+      'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
+      'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
+      'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date'
+    };
+
+    function escapeHtml(s) {
+      if (s === null || s === undefined) return '';
+      return String(s).replace(/[&<>"']/g, function(m) { return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[m]; });
+    }
 
     function routeBadgeHtml(route, meta) {
       const label = escapeHtml(route.route_short_name || route.route_id || '');
@@ -977,18 +994,6 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
       </a>`;
     }
 
-    const KEY_ALIAS = {
-      'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
-      'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
-      'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
-      'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
-      'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
-      'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
-      'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
-      'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
-      'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
-      'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date'
-    };
     function normalizeKey(k) {
       if (k === null || k === undefined) return k;
       let key = String(k).replace(/^\uFEFF/,'').trim().toLowerCase();
@@ -3533,12 +3538,6 @@ function buildStopTooltip(stopId, stopsIndex) {
 // 12. UI RENDERING - TIMETABLE
 // ═══════════════════════════════════════════════════════════════
 function renderTimetable() {
-  // Local escapeHtml function to prevent XSS attacks
-  function escapeHtml(s) {
-    if (s === null || s === undefined) return '';
-    return String(s).replace(/[&<>"']/g, function(m) { return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[m]; });
-  }
-  
   const container = $('timetable-container'); 
   if (!container) return;
   container.innerHTML = `
@@ -4138,11 +4137,6 @@ function openStopTimetable(stopId) {
   document.addEventListener('keydown', handleEscape);
   $('stop-timetable-modal').onclick = (e) => { if (e.target.id === 'stop-timetable-modal') closeModal(); };
 }
-
-    function escapeHtml(s) {
-      if (s === null || s === undefined) return '';
-      return String(s).replace(/[&<>"']/g, function(m) { return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[m]; });
-    }
 
 async function updateMap() {
   const mapContainer = $('map-container');
