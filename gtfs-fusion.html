@@ -1364,12 +1364,44 @@ function looksLikeGarbageLabel(s, shortName) {
           let headers = null;
           const stopTimesIndex = Object.create(null);
           
+          // Smart CSV split function to handle quoted fields
+          const smartSplit = (line) => {
+            if (!line.includes('"')) {
+              return line.split(',');
+            }
+            
+            const cols = [];
+            let current = '';
+            let inQuotes = false;
+            
+            for (let i = 0; i < line.length; i++) {
+              const char = line[i];
+              
+              if (char === '"') {
+                if (i + 1 < line.length && line[i+1] === '"') {
+                  current += '"';
+                  i++;
+                } else {
+                  inQuotes = !inQuotes;
+                }
+              } else if (char === ',' && !inQuotes) {
+                cols.push(current.trim());
+                current = '';
+              } else {
+                current += char;
+              }
+            }
+            
+            cols.push(current.trim());
+            return cols;
+          };
+          
           const processLine = (line) => {
             if (!line.trim()) return;
             
             // Parse header
             if (!headers) {
-              const rawHeaders = line.split(',');
+              const rawHeaders = smartSplit(line);
               headers = {
                 tripIdx: -1,
                 stopIdx: -1,
@@ -1381,7 +1413,7 @@ function looksLikeGarbageLabel(s, shortName) {
               };
               
               rawHeaders.forEach((h, i) => {
-                const normalized = normalizeKey(h);
+                const normalized = normalizeKey(h.replace(/^"|"$/g, '').trim());
                 if (normalized === 'trip_id') headers.tripIdx = i;
                 else if (normalized === 'stop_id') headers.stopIdx = i;
                 else if (normalized === 'stop_sequence') headers.seqIdx = i;
@@ -1394,10 +1426,14 @@ function looksLikeGarbageLabel(s, shortName) {
             }
             
             // Parse data line
-            const cols = line.split(',').map(c => c.replace(/^"|"$/g, '').trim());
+            const cols = smartSplit(line);
             
-            const tripId = cols[headers.tripIdx];
-            const stopId = cols[headers.stopIdx];
+            // Validate we have minimum required columns
+            if (headers.tripIdx === -1 || headers.stopIdx === -1) return;
+            if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
+            
+            const tripId = (cols[headers.tripIdx] || '').replace(/^"|"$/g, '').trim();
+            const stopId = (cols[headers.stopIdx] || '').replace(/^"|"$/g, '').trim();
             
             if (!tripId || !stopId) return;
             
@@ -1405,13 +1441,19 @@ function looksLikeGarbageLabel(s, shortName) {
               stopTimesIndex[tripId] = [];
             }
             
+            // Safe access to optional columns
+            const getCol = (idx) => {
+              if (idx === -1 || idx >= cols.length) return '';
+              return (cols[idx] || '').replace(/^"|"$/g, '').trim();
+            };
+            
             stopTimesIndex[tripId].push({
               stop_id: stopId,
-              arrival_time: cols[headers.arrIdx] || '',
-              departure_time: cols[headers.depIdx] || '',
-              stop_sequence: parseInt(cols[headers.seqIdx] || '0', 10),
-              pickup_type: String(cols[headers.pickupIdx] || '0'),
-              drop_off_type: String(cols[headers.dropoffIdx] || '0')
+              arrival_time: getCol(headers.arrIdx),
+              departure_time: getCol(headers.depIdx),
+              stop_sequence: parseInt(getCol(headers.seqIdx) || '0', 10),
+              pickup_type: String(getCol(headers.pickupIdx) || '0'),
+              drop_off_type: String(getCol(headers.dropoffIdx) || '0')
             });
             
             lineCount++;
