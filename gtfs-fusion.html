@@ -977,7 +977,36 @@ function debounce(func, wait) {
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
+    /**
+     * Convert "HH:MM:SS" time string to minutes since midnight
+     * @param {string} timeStr - Time in "HH:MM:SS" format
+     * @returns {number} Minutes since midnight, or -1 if invalid
+     */
+    function timeToMinutes(timeStr) {
+      if (!timeStr || timeStr === '') return -1;
+      const cleaned = timeStr.replace(/^"|"$/g, '').trim();
+      if (!cleaned) return -1;
+      const parts = cleaned.split(':');
+      const h = parseInt(parts[0], 10) || 0;
+      const m = parseInt(parts[1], 10) || 0;
+      return h * 60 + m;
+    }
+
+    /**
+     * Convert minutes since midnight to "HH:MM:SS" time string
+     * @param {number} mins - Minutes since midnight
+     * @returns {string} Time in "HH:MM:SS" format, or empty string if invalid
+     */
+    function minutesToTime(mins) {
+      if (mins === null || mins === undefined || mins < 0) return '';
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
+    }
+
     function getTimeInMinutes(time) {
+      // Handle numeric input (already in minutes)
+      if (typeof time === 'number') return time;
       if (!time) return 0;
       const parts = String(time).split(':');
       const hours = parseInt(parts[0]||'0',10);
@@ -986,6 +1015,15 @@ function debounce(func, wait) {
     }
 
     function formatTime(time) {
+      // Handle numeric input (minutes since midnight)
+      if (typeof time === 'number') {
+        if (time < 0) return '<';
+        const h = Math.floor(time / 60);
+        const m = time % 60;
+        const displayHour = h >= 24 ? h - 24 : h;
+        return `${String(displayHour).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+      }
+      // Handle string input (legacy format)
       if (!time) return '<';
       const str = String(time);
       const parts = str.split(':');
@@ -1455,11 +1493,11 @@ function looksLikeGarbageLabel(s, shortName) {
             
             stopTimesIndex[tripId].push({
               stop_id: stopId,
-              arrival_time: getCol(cols, headers.arrIdx),
-              departure_time: getCol(cols, headers.depIdx),
+              arrival_time: timeToMinutes(cols[headers.arrIdx]),
+              departure_time: timeToMinutes(cols[headers.depIdx]),
               stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
-              pickup_type: String(getCol(cols, headers.pickupIdx) || '0'),
-              drop_off_type: String(getCol(cols, headers.dropoffIdx) || '0')
+              pickup_type: parseInt(getCol(cols, headers.pickupIdx) || '0', 10),
+              drop_off_type: parseInt(getCol(cols, headers.dropoffIdx) || '0', 10)
             });
             
             lineCount++;
@@ -4772,8 +4810,15 @@ const processedTrips = trips.map(trip => {
 let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps);
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
-  let start = firstStop?.departure_time || "00:00:00";
-  if (String(start).match(/^\d:/)) start = "0" + start;
+  let start = firstStop?.departure_time;
+  // Handle numeric time (convert to string for legacy compatibility)
+  if (typeof start === 'number') {
+    start = minutesToTime(start);
+  } else if (!start) {
+    start = "00:00:00";
+  } else if (String(start).match(/^\d:/)) {
+    start = "0" + start;
+  }
   return { ...t, start };
 });
 
@@ -5100,9 +5145,20 @@ function openStopTimetable(stopId) {
   const getTimesByHour = (departures) => {
     const hourGroups = {};
     departures.forEach(departure => {
-      if (!departure.time) return;
-      const [hourStr, minute] = departure.time.split(':');
-      let hour = parseInt(hourStr, 10);
+      if (!departure.time && departure.time !== 0) return;
+      
+      let hour, minute;
+      if (typeof departure.time === 'number') {
+        // Handle numeric time (minutes since midnight)
+        hour = Math.floor(departure.time / 60);
+        minute = String(departure.time % 60).padStart(2, '0');
+      } else {
+        // Handle string time (legacy format)
+        const [hourStr, minuteStr] = String(departure.time).split(':');
+        hour = parseInt(hourStr, 10);
+        minute = minuteStr || '00';
+      }
+      
       let displayHour = hour % 24;
       
       if ((hour >= 4 && hour < 24) || (hour >= 24 && hour < 28)) {
