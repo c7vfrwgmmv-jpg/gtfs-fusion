@@ -1353,10 +1353,9 @@ function looksLikeGarbageLabel(s, shortName) {
     function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       return new Promise(async (resolve, reject) => {
         try {
-          // Get blob (more memory-efficient than string).
+          // Get blob and process in chunks (cross-browser compatible).
           const blob = await zipFileEntry.async('blob');
-          const stream = blob.stream();
-          const reader = stream.getReader();
+          const arrayBuffer = await blob.arrayBuffer();
           const decoder = new TextDecoder('utf-8');
           
           let buffer = '';
@@ -1366,6 +1365,7 @@ function looksLikeGarbageLabel(s, shortName) {
           
           const PROGRESS_UPDATE_INTERVAL = 10000;
           const ESTIMATED_LINES_FOR_PROGRESS = 100000;
+          const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
           
           // Smart CSV split function to handle quoted fields
           const smartSplit = (line) => {
@@ -1472,19 +1472,16 @@ function looksLikeGarbageLabel(s, shortName) {
             }
           };
           
-          // Stream processing loop
-          while (true) {
-            const { done, value } = await reader.read();
+          // Process arrayBuffer in chunks
+          let offset = 0;
+          while (offset < arrayBuffer.byteLength) {
+            const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+            const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
             
-            if (done) {
-              // Process any remaining buffer
-              if (buffer.trim()) processLine(buffer);
-              break;
-            }
-            
-            // Decode chunk
-            const chunk = decoder.decode(value, { stream: true });
-            buffer += chunk;
+            // Decode chunk with streaming flag to handle multi-byte characters
+            const isLastChunk = chunkEnd === arrayBuffer.byteLength;
+            const text = decoder.decode(chunk, { stream: !isLastChunk });
+            buffer += text;
             
             // Process all complete lines in buffer
             let newlineIndex;
@@ -1493,7 +1490,12 @@ function looksLikeGarbageLabel(s, shortName) {
               processLine(line);
               buffer = buffer.substring(newlineIndex + 1);
             }
+            
+            offset = chunkEnd;
           }
+          
+          // Process any remaining buffer
+          if (buffer.trim()) processLine(buffer);
           
           // Sort each trip's stops by sequence
           Object.keys(stopTimesIndex).forEach(tripId => {
