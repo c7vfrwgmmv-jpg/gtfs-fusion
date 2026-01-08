@@ -1391,7 +1391,8 @@ function looksLikeGarbageLabel(s, shortName) {
       const rawHeaders = smartSplit(headerLine);
       const headers = rawHeaders.map(h => {
         if (!h) return '';
-        // Remove quotes and normalize (after trim in smartSplit)
+        // Double trim is intentional: once in smartSplit, once after quote removal
+        // Handles cases like ` "header" ` → "header" (first trim) → header (second trim)
         const cleaned = h.replace(/^"|"$/g, '').trim();
         return normalizeKey(cleaned);
       });
@@ -1411,11 +1412,9 @@ function looksLikeGarbageLabel(s, shortName) {
           if (!header) continue;
           
           // Process all fields including empty ones
-          let value = '';
-          if (j < values.length) {
-            // Remove quotes and trim (matching parseStopTimesStreamWithWorker getCol logic)
-            value = (values[j] || '').replace(/^"|"$/g, '').trim();
-          }
+          // Double trim is intentional: once after split, once after quote removal
+          // This matches parseStopTimesStreamWithWorker getCol logic
+          const value = (values[j] || '').replace(/^"|"$/g, '').trim();
           
           obj[header] = value;
         }
