@@ -981,7 +981,7 @@ function debounce(func, wait) {
     /**
      * Convert minutes since midnight to "HH:MM:SS" time string
      * @param {number} mins - Minutes since midnight
-     * @returns {string} Time in "HH:MM:SS" format, or empty string if invalid
+     * @returns {string} Time in "HH:MM:SS" format, or empty string for invalid/negative values
      */
     function minutesToTime(mins) {
       if (mins === null || mins === undefined || mins < 0) return '';
@@ -992,7 +992,7 @@ function debounce(func, wait) {
 
     function getTimeInMinutes(time) {
       // Handle numeric input (already in minutes)
-      if (typeof time === 'number') return time;
+      if (typeof time === 'number') return time >= 0 ? time : 0;
       if (!time) return 0;
       const parts = String(time).split(':');
       const hours = parseInt(parts[0]||'0',10);
@@ -5131,7 +5131,7 @@ function openStopTimetable(stopId) {
   const getTimesByHour = (departures) => {
     const hourGroups = {};
     departures.forEach(departure => {
-      if (!departure.time && departure.time !== 0) return;
+      if (departure.time === null || departure.time === undefined) return;
       
       let hour, minute;
       if (typeof departure.time === 'number') {
