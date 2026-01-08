@@ -1407,8 +1407,12 @@ function looksLikeGarbageLabel(s, shortName) {
             const cols = line.split(',');
             
             // Intern repeated strings to save memory
-            const tripId = intern(cols[headers.tripIdx]?.replace(/^"|"$/g, '').trim());
-            const stopId = intern(cols[headers.stopIdx]?.replace(/^"|"$/g, '').trim());
+            const tripId = headers.tripIdx >= 0 && cols[headers.tripIdx] 
+              ? intern(cols[headers.tripIdx].replace(/^"|"$/g, '').trim()) 
+              : '';
+            const stopId = headers.stopIdx >= 0 && cols[headers.stopIdx]
+              ? intern(cols[headers.stopIdx].replace(/^"|"$/g, '').trim())
+              : '';
             
             if (!tripId || !stopId) return;
             
@@ -1419,17 +1423,27 @@ function looksLikeGarbageLabel(s, shortName) {
             
             stopTimesIndex[tripId].push({
               stop_id: stopId,
-              arrival_time: cols[headers.arrIdx]?.replace(/^"|"$/g, '').trim() || '',
-              departure_time: cols[headers.depIdx]?.replace(/^"|"$/g, '').trim() || '',
-              stop_sequence: parseInt(cols[headers.seqIdx] || '0', 10),
-              pickup_type: cols[headers.pickupIdx]?.replace(/^"|"$/g, '').trim() || '0',
-              drop_off_type: cols[headers.dropoffIdx]?.replace(/^"|"$/g, '').trim() || '0'
+              arrival_time: headers.arrIdx >= 0 && cols[headers.arrIdx] 
+                ? cols[headers.arrIdx].replace(/^"|"$/g, '').trim() 
+                : '',
+              departure_time: headers.depIdx >= 0 && cols[headers.depIdx]
+                ? cols[headers.depIdx].replace(/^"|"$/g, '').trim()
+                : '',
+              stop_sequence: headers.seqIdx >= 0 && cols[headers.seqIdx]
+                ? parseInt(cols[headers.seqIdx].replace(/^"|"$/g, '').trim() || '0', 10)
+                : 0,
+              pickup_type: headers.pickupIdx >= 0 && cols[headers.pickupIdx]
+                ? cols[headers.pickupIdx].replace(/^"|"$/g, '').trim()
+                : '0',
+              drop_off_type: headers.dropoffIdx >= 0 && cols[headers.dropoffIdx]
+                ? cols[headers.dropoffIdx].replace(/^"|"$/g, '').trim()
+                : '0'
             });
             
             lineCount++;
             // Progress every 100k rows instead of 10k
-            if (lineCount % 100000 === 0 && onProgress) {
-              onProgress(lineCount, Math.min(99, Math.round(lineCount / 500000 * 100)));
+            if (lineCount % PROGRESS_UPDATE_INTERVAL === 0 && onProgress) {
+              onProgress(lineCount, Math.min(99, Math.round(lineCount / ESTIMATED_LINES_FOR_PROGRESS * 100)));
             }
           };
           
