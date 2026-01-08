@@ -910,12 +910,12 @@ let state = {
     stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
   }
 };
-    // ═══════════════════════════════════════════════════════════════
-    // 1.  CONSTANTS & CONFIGURATION
-    // ═══════════════════════════════════════════════════════════════
-    const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-    const SUNDAY = 0, WEDNESDAY = 3, SATURDAY = 6;
-    const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>` };
+// ═══════════════════════════════════════════════════════════════
+// 1. CONSTANTS & CONFIGURATION
+// ═══════════════════════════════════════════════════════════════
+const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+const SUNDAY = 0, WEDNESDAY = 3, SATURDAY = 6;
+const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>` };
 
     // Stałe widoków aplikacji
     const VIEW = {
@@ -928,9 +928,9 @@ let state = {
       ROUTE_TIMETABLE: 'route_timetable'
     };
 
-    // ═══════════════════════════════════════════════════════════════
-    // 9. MAP RENDERING
-    // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// 9. MAP RENDERING
+// ═══════════════════════════════════════════════════════════════
     // small utilities consolidated
     function resetMap() {
       if (window.leafletMap) {
@@ -1006,9 +1006,9 @@ let state = {
       });
       return out;
     }
-    // ═══════════════════════════════════════════════════════════════
-    // 4. DATA PARSING & LOADING
-    // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// 4. DATA PARSING & LOADING
+// ═══════════════════════════════════════════════════════════════
     function parseCSV(text) {
       const result = Papa.parse(text, {
         header: true, skipEmptyLines: true, dynamicTyping: false,
@@ -5317,9 +5317,9 @@ function updateDeparturesTable() {
   }
 }
 
-    // ═══════════════════════════════════════════════════════════════
-    // 13.  MAIN RENDER & VIEW CONTROL
-    // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// 13. MAIN RENDER & VIEW CONTROL
+// ═══════════════════════════════════════════════════════════════
     /**
      * Określa aktualny widok aplikacji na podstawie stanu
      * @returns {string} Jeden z VIEW.*
@@ -5979,9 +5979,9 @@ if (state.gtfsData && state.selectedRoute) {
   updateMap().catch(err => console.warn('updateMap error:', err)); 
 }
 }
-    // ═══════════════════════════════════════════════════════════════
-    // 14. GLOBAL EVENT HANDLERS & INITIALIZATION
-    // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// 14. GLOBAL EVENT HANDLERS & INITIALIZATION
+// ═══════════════════════════════════════════════════════════════
     // global delegated handlers (one-time) ---------------------------------------------------------
     // handle clicks on any .route-link (works for badges in stop detail, modal, lists)
     document.addEventListener('click', (e) => {
