@@ -1391,7 +1391,7 @@ function looksLikeGarbageLabel(s, shortName) {
               };
               
               rawHeaders.forEach((h, i) => {
-                const normalized = normalizeKey(h);
+                const normalized = normalizeKey(h.replace(/^"|"$/g, '').trim());
                 if (normalized === 'trip_id') headers.tripIdx = i;
                 else if (normalized === 'stop_id') headers.stopIdx = i;
                 else if (normalized === 'stop_sequence') headers.seqIdx = i;
@@ -1407,10 +1407,10 @@ function looksLikeGarbageLabel(s, shortName) {
             const cols = line.split(',');
             
             // Intern repeated strings to save memory
-            const tripId = headers.tripIdx >= 0 && cols[headers.tripIdx] 
+            const tripId = headers.tripIdx >= 0 && headers.tripIdx < cols.length && cols[headers.tripIdx] 
               ? intern(cols[headers.tripIdx].replace(/^"|"$/g, '').trim()) 
               : '';
-            const stopId = headers.stopIdx >= 0 && cols[headers.stopIdx]
+            const stopId = headers.stopIdx >= 0 && headers.stopIdx < cols.length && cols[headers.stopIdx]
               ? intern(cols[headers.stopIdx].replace(/^"|"$/g, '').trim())
               : '';
             
@@ -1423,19 +1423,19 @@ function looksLikeGarbageLabel(s, shortName) {
             
             stopTimesIndex[tripId].push({
               stop_id: stopId,
-              arrival_time: headers.arrIdx >= 0 && cols[headers.arrIdx] 
+              arrival_time: headers.arrIdx >= 0 && headers.arrIdx < cols.length && cols[headers.arrIdx] 
                 ? cols[headers.arrIdx].replace(/^"|"$/g, '').trim() 
                 : '',
-              departure_time: headers.depIdx >= 0 && cols[headers.depIdx]
+              departure_time: headers.depIdx >= 0 && headers.depIdx < cols.length && cols[headers.depIdx]
                 ? cols[headers.depIdx].replace(/^"|"$/g, '').trim()
                 : '',
-              stop_sequence: headers.seqIdx >= 0 && cols[headers.seqIdx]
+              stop_sequence: headers.seqIdx >= 0 && headers.seqIdx < cols.length && cols[headers.seqIdx]
                 ? parseInt(cols[headers.seqIdx].replace(/^"|"$/g, '').trim() || '0', 10)
                 : 0,
-              pickup_type: headers.pickupIdx >= 0 && cols[headers.pickupIdx]
+              pickup_type: headers.pickupIdx >= 0 && headers.pickupIdx < cols.length && cols[headers.pickupIdx]
                 ? cols[headers.pickupIdx].replace(/^"|"$/g, '').trim()
                 : '0',
-              drop_off_type: headers.dropoffIdx >= 0 && cols[headers.dropoffIdx]
+              drop_off_type: headers.dropoffIdx >= 0 && headers.dropoffIdx < cols.length && cols[headers.dropoffIdx]
                 ? cols[headers.dropoffIdx].replace(/^"|"$/g, '').trim()
                 : '0'
             });
