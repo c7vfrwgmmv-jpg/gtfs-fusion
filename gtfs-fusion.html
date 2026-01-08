@@ -967,12 +967,14 @@ function debounce(func, wait) {
      * @returns {number} Minutes since midnight, or -1 if invalid
      */
     function timeToMinutes(timeStr) {
-      if (!timeStr || timeStr === '') return -1;
+      if (!timeStr) return -1;
       const cleaned = timeStr.replace(/^"|"$/g, '').trim();
       if (!cleaned) return -1;
       const parts = cleaned.split(':');
-      const h = parseInt(parts[0], 10) || 0;
-      const m = parseInt(parts[1], 10) || 0;
+      const h = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      // If parsing fails, return -1 for invalid time
+      if (isNaN(h) || isNaN(m)) return -1;
       return h * 60 + m;
     }
 
@@ -1477,8 +1479,8 @@ function looksLikeGarbageLabel(s, shortName) {
             
             stopTimesIndex[tripId].push({
               stop_id: stopId,
-              arrival_time: timeToMinutes(cols[headers.arrIdx]),
-              departure_time: timeToMinutes(cols[headers.depIdx]),
+              arrival_time: timeToMinutes(getCol(cols, headers.arrIdx)),
+              departure_time: timeToMinutes(getCol(cols, headers.depIdx)),
               stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
               pickup_type: parseInt(getCol(cols, headers.pickupIdx) || '0', 10),
               drop_off_type: parseInt(getCol(cols, headers.dropoffIdx) || '0', 10)
