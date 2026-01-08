@@ -1443,11 +1443,11 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       const processLine = (line) => {
         if (!line. trim()) return;
         
-        if (! headers) {
-          const rawHeaders = line.split(',');  // ← Native split!
-          headers = {
-            tripIdx: -1,
-            stopIdx: -1,
+        if (!headers) {
+  const rawHeaders = line. split(',').map(h => h.replace(/^"|"$/g, '').trim());  // ← Dodaj .map()
+  headers = {
+    tripIdx: -1,
+    stopIdx: -1,
             seqIdx: -1,
             arrIdx: -1,
             depIdx: -1,
@@ -1455,8 +1455,8 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             dropoffIdx: -1
           };
           
-          rawHeaders.forEach((h, i) => {
-            const normalized = normalizeKey(h.replace(/^"|"$/g, '').trim());
+rawHeaders.forEach((h, i) => {
+    const normalized = normalizeKey(h);
             if (normalized === 'trip_id') headers.tripIdx = i;
             else if (normalized === 'stop_id') headers.stopIdx = i;
             else if (normalized === 'stop_sequence') headers.seqIdx = i;
