@@ -873,6 +873,11 @@ const CANONICAL_CATEGORIES = {
 // ═══════════════════════════════════════════════════════════════
 // 2. STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
+
+// Throttle render() during parsing to avoid excessive DOM updates
+let lastRenderTime = 0;
+const RENDER_THROTTLE_MS = 200; // Max 5 FPS
+
 let state = {
   gtfsData: null,
   selectedRoute: null,
@@ -5244,7 +5249,7 @@ function openStopTimetable(stopId) {
       return VIEW.ROUTE_TIMETABLE;
     }
 
-    function render() {
+    function renderImmediate() {
       const root = $('root');
       const currentView = getCurrentView();
       
@@ -5898,6 +5903,21 @@ if (state.gtfsData && state.selectedRoute) {
   updateMap().catch(err => console.warn('updateMap error:', err)); 
 }
 }
+
+    // Throttled render function to avoid excessive DOM updates during parsing
+    function render(force = false) {
+      const now = Date.now();
+      
+      // During loading, throttle renders to avoid excessive DOM updates
+      if (state.loading && !force) {
+        if (now - lastRenderTime < RENDER_THROTTLE_MS) {
+          return; // Skip render if called too soon
+        }
+      }
+      
+      lastRenderTime = now;
+      renderImmediate();
+    }
 
 // ═══════════════════════════════════════════════════════════════
 // 15. GLOBAL EVENT HANDLERS & INITIALIZATION
