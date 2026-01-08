@@ -1468,7 +1468,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
           });
           
           if (headers.tripIdx === -1 || headers.stopIdx === -1) {
-            throw new Error('Missing required columns in stop_times.txt');
+            throw new Error('Brakuje wymaganych kolumn w stop_times.txt: trip_id lub stop_id');
           }
           return;
         }
@@ -1788,7 +1788,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       const file = e.target.files[0]; if (!file) return;
       const t0 = performance.now();
       const log = (msg) => console.log(`⏱️  ${(performance.now()-t0).toFixed(0)}ms - ${msg}`);
-      state.loading = true; state.loadingStep = 'Reading GTFS archive...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
+      state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
         // Check if fflate is available
@@ -1796,20 +1796,20 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         let routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile;
         
         if (typeof fflate === 'undefined') {
-          console.warn('fflate not available, using JSZip fallback');
-          state.loadingStep = 'Decompressing ZIP (JSZip)...'; render();
+          console.warn('fflate niedostępne, używam JSZip jako fallback');
+          state.loadingStep = 'Rozpakowywanie ZIP (JSZip)...'; render();
           zip = await JSZip.loadAsync(file);
           log('Unzipped');
-          state.loadingStep = 'Extracting files...'; render();
+          state.loadingStep = 'Wyodrębnianie plików...'; render();
           
           const files = ['routes.txt','trips.txt','stop_times.txt','stops.txt','calendar.txt','calendar_dates.txt','agency.txt','shapes.txt'];
           [routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile] = files.map(f => zip.file(f));
         } else {
           // Use fflate (fast path)
-          state.loadingStep = 'Decompressing ZIP (fflate)...'; render();
+          state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
           zip = await unzipWithFflate(file);
           log('Unzipped');
-          state.loadingStep = 'Extracting files...'; render();
+          state.loadingStep = 'Wyodrębnianie plików...'; render();
           
           routesFile = findFile(zip.files, 'routes.txt');
           tripsFile = findFile(zip.files, 'trips.txt');
@@ -1823,7 +1823,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         
         // Walidacja wymaganych plików
         if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
-          throw new Error('Missing required GTFS files (routes.txt, trips.txt, stop_times.txt, stops.txt)');
+          throw new Error('Brakuje wymaganych plików GTFS (routes.txt, trips.txt, stop_times.txt, stops.txt)');
         }
 
 // ==========================================
@@ -1840,9 +1840,9 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
         log('Parsed small files');
-        state.loadingStep = 'Parsing stop_times (streaming)...'; render();
+        state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
         const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
-          state.loadingStep = `Parsing stop_times: ${rowsProcessed.toLocaleString()} rows`;
+          state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
@@ -1851,10 +1851,10 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
         // Parse shapes.txt if available (optional)
         let shapesIndex = {};
         if (shapesFile) {
-          state.loadingStep = 'Parsing shapes.txt (streaming with worker)...'; render();
+          state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
           try {
             const rawShapes = await parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
-              state.loadingStep = `Parsing shapes: ${rowsProcessed.toLocaleString()} points`;
+              state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
               state.loadingProgressPercent = percent || state.loadingProgressPercent;
               render();
             });
@@ -1864,7 +1864,7 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
             
             if (!simplifiedShapes) {
               // Simplify and cache
-              state.loadingStep = 'Simplifying shapes (Douglas-Peucker)...'; render();
+              state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
               simplifiedShapes = simplifyShapes(rawShapes, 0.0001);
               cacheShapes(rawShapes, simplifiedShapes);
             }
@@ -1873,12 +1873,12 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
             console.log(`Loaded ${Object.keys(shapesIndex).length} shapes`);
             log('Parsed shapes');
           } catch (err) {
-            console.warn('Failed to parse shapes.txt:', err.message);
+            console.warn('Nie udało się sparsować shapes.txt:', err.message);
             // Continue without shapes - they're optional
           }
         }
         
-        state.loadingStep = 'Building indexes...'; render();
+        state.loadingStep = 'Budowanie indeksów...'; render();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -1958,7 +1958,7 @@ console.log(`\n📊 Total: ${((performance.now()-t0)/1000).toFixed(2)}s`);
         render();
       } catch(err) {
         console.error('Error loading GTFS:', err);
-        state.error = 'Error loading GTFS file: ' + err.message;
+        state.error = 'Błąd ładowania pliku GTFS: ' + err.message;
         state.loading=false; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
       }
@@ -1970,7 +1970,7 @@ console.log(`\n📊 Total: ${((performance.now()-t0)/1000).toFixed(2)}s`);
         state.currentWorker = null;
       }
       state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
-      state.error = 'Parsing cancelled by user';
+      state.error = 'Parsowanie anulowane przez użytkownika';
       render();
     }
 
@@ -5278,28 +5278,16 @@ switch(currentView) {
   case VIEW.LOADING:
     html += `<div class="flex-1 flex flex-col items-center justify-center bg-gray-50">
     <div class="text-center">
-      <p class="text-gray-600 font-medium mb-4">${state.loadingStep || 'Loading...'}</p>
+      <p class="text-gray-600 font-medium mb-4">${state.loadingStep || 'Ładowanie...'}</p>
       ${state.loadingProgress ? `
-        <div class="progress-wrap" style="position: relative;">
-          <div class="progress-bg" aria-hidden="true">
-            <div class="progress-bar" style="width: ${state.loadingProgressPercent}%"></div>
-          </div>
-          <div class="progress-badge">
-            ${state.loadingProgressPercent}%
-          </div>
-          <div style="font-size:12px;color:#555;margin-top:6px;">
-            ${state.loadingProgress.toLocaleString()} rows processed
-          </div>
-        </div>
+        <p class="text-gray-600 font-medium">
+          ${state.loadingProgressPercent}% (${state.loadingProgress.toLocaleString()} wierszy)
+        </p>
       ` : `
-        <div class="progress-wrap" style="position: relative;">
-          <div class="progress-bg" aria-hidden="true">
-            <div class="progress-bar progress-bar-blinking" style="width: 100%"></div>
-          </div>
-        </div>
+        <p class="text-gray-600 font-medium">Przetwarzanie...</p>
       `}
       <div style="margin-top:1rem;">
-        <button id="cancel-parse" class="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">Cancel</button>
+        <button id="cancel-parse" class="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">Anuluj</button>
       </div>
     </div>
   </div>`;
