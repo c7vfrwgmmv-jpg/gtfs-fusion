@@ -1373,13 +1373,17 @@ function looksLikeGarbageLabel(s, shortName) {
             for (let i = 0; i < line.length; i++) {
               if (line[i] === ',') {
                 let val = line.substring(start, i);
-                if (val[0] === '"') val = val.slice(1, -1);
+                if (val.length > 0 && val[0] === '"' && val[val.length - 1] === '"') {
+                  val = val.slice(1, -1);
+                }
                 cols.push(val);
                 start = i + 1;
               }
             }
             let val = line.substring(start);
-            if (val[0] === '"') val = val.slice(1, -1);
+            if (val.length > 0 && val[0] === '"' && val[val.length - 1] === '"') {
+              val = val.slice(1, -1);
+            }
             cols.push(val);
             return cols;
           };
