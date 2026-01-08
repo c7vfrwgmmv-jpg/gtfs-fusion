@@ -726,6 +726,9 @@ video {
 // === ROUTE CACHE MODULE (Removed - no longer using external routing APIs) ===
 // Routes are now rendered using shapes.txt from GTFS or straight lines
 
+// ═══════════════════════════════════════════════════════════════
+// 3. UTILITY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
 // === DOM HELPERS ===
 const $ = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -743,6 +746,9 @@ function debounce(func, wait) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 11. UI RENDERING - STOPS VIEW
+// ═══════════════════════════════════════════════════════════════
 // FAZA 1.2: Search index dla szybszego wyszukiwania
 let stopsSearchIndex = null;
 
@@ -844,6 +850,9 @@ function getOrBuildGroupsArray(stopsData) {
   return groupsArray;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 2. STATE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
 let state = {
   gtfsData: null,
   selectedRoute: null,
@@ -901,9 +910,12 @@ let state = {
     stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
   }
 };
-    const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-    const SUNDAY = 0, WEDNESDAY = 3, SATURDAY = 6;
-    const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>` };
+// ═══════════════════════════════════════════════════════════════
+// 1. CONSTANTS & CONFIGURATION
+// ═══════════════════════════════════════════════════════════════
+const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+const SUNDAY = 0, WEDNESDAY = 3, SATURDAY = 6;
+const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>` };
 
     // Stałe widoków aplikacji
     const VIEW = {
@@ -916,6 +928,9 @@ let state = {
       ROUTE_TIMETABLE: 'route_timetable'
     };
 
+// ═══════════════════════════════════════════════════════════════
+// 9. MAP RENDERING
+// ═══════════════════════════════════════════════════════════════
     // small utilities consolidated
     function resetMap() {
       if (window.leafletMap) {
@@ -991,6 +1006,9 @@ let state = {
       });
       return out;
     }
+// ═══════════════════════════════════════════════════════════════
+// 4. DATA PARSING & LOADING
+// ═══════════════════════════════════════════════════════════════
     function parseCSV(text) {
       const result = Papa.parse(text, {
         header: true, skipEmptyLines: true, dynamicTyping: false,
@@ -1096,6 +1114,9 @@ const CANONICAL_CATEGORIES = {
   monorail: { label: 'Monorail', order: 130 }
 };
 
+// ═══════════════════════════════════════════════════════════════
+// 5. GTFS DATA PROCESSING
+// ═══════════════════════════════════════════════════════════════
 function canonicalFromCode(t) {
   if (t === null || t === undefined || t === '') return null;
   const n = parseInt(t, 10);
@@ -1195,6 +1216,9 @@ function buildLogicalRoutes(routes, agenciesIndex) {
 }
 // --- END: Logical route grouper
 
+// ═══════════════════════════════════════════════════════════════
+// 6. ROUTE PROFILE & ANALYSIS
+// ═══════════════════════════════════════════════════════════════
 // === KROK 1: Budowa grafu trasy i profilu core dla logical route ===
 
 // Prosty helper: zbuduj klucz dla routeProfiles z logical group
@@ -2713,16 +2737,20 @@ function generateAvailableDates(calendar, calendarDates) {
         const endDate = parseGTFSDate(cal.end_date);
         if (startDate && endDate && date >= startDate && date <= endDate && cal[dayOfWeek] === '1') services.add(cal.service_id);
       });
-      if (state.gtfsData.calendarDates) {
-        state.gtfsData.calendarDates.forEach(cd => {
-          if (cd.date === dateStr) {
-            if (cd.exception_type === '1') services.add(cd.service_id);
-            else if (cd.exception_type === '2') services.delete(cd.service_id);
-          }
-        });
-      }
-      return Array.from(services);
+    if (state.gtfsData.calendarDates) {
+      state.gtfsData.calendarDates.forEach(cd => {
+        if (cd.date === dateStr) {
+          if (cd.exception_type === '1') services.add(cd.service_id);
+          else if (cd.exception_type === '2') services.delete(cd.service_id);
+        }
+      });
     }
+    return Array.from(services);
+    }
+
+// ═══════════════════════════════════════════════════════════════
+// 7. TRIP & VARIANT PROCESSING
+// ═══════════════════════════════════════════════════════════════
 
 function getAllTripsForRoute() {
   if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return [];
@@ -2745,6 +2773,9 @@ function getAllTripsForRoute() {
   return routeTrips.filter(t => activeServices.includes(t.service_id));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 10. UI RENDERING - ROUTES VIEW
+// ═══════════════════════════════════════════════════════════════
 function renderRouteTable() {
   const container = $('routes-tbody');
   if (!container || !state.gtfsData) return;
@@ -2973,7 +3004,10 @@ btn.innerHTML = `
   state.routeGroupMode = 'logical';
   renderRouteTable();
 }
-	
+
+// ═══════════════════════════════════════════════════════════════
+// 8. DIRECTION & HEADSIGN LOGIC
+// ═══════════════════════════════════════════════════════════════
 function getAvailableDirections() {
   if (!state.selectedRoute || !state.gtfsData) return [];
 
@@ -3495,6 +3529,9 @@ function buildStopTooltip(stopId, stopsIndex) {
   return parts.join('\n');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 12. UI RENDERING - TIMETABLE
+// ═══════════════════════════════════════════════════════════════
 function renderTimetable() {
   // Local escapeHtml function to prevent XSS attacks
   function escapeHtml(s) {
@@ -5280,6 +5317,9 @@ function updateDeparturesTable() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 13. MAIN RENDER & VIEW CONTROL
+// ═══════════════════════════════════════════════════════════════
     /**
      * Określa aktualny widok aplikacji na podstawie stanu
      * @returns {string} Jeden z VIEW.*
@@ -5939,6 +5979,9 @@ if (state.gtfsData && state.selectedRoute) {
   updateMap().catch(err => console.warn('updateMap error:', err)); 
 }
 }
+// ═══════════════════════════════════════════════════════════════
+// 14. GLOBAL EVENT HANDLERS & INITIALIZATION
+// ═══════════════════════════════════════════════════════════════
     // global delegated handlers (one-time) ---------------------------------------------------------
     // handle clicks on any .route-link (works for badges in stop detail, modal, lists)
     document.addEventListener('click', (e) => {
