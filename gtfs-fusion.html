@@ -1353,7 +1353,7 @@ function looksLikeGarbageLabel(s, shortName) {
     function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       return new Promise(async (resolve, reject) => {
         try {
-          // Get blob (more memory-efficient than string)
+          // Get blob (more memory-efficient than string).
           const blob = await zipFileEntry.async('blob');
           const stream = blob.stream();
           const reader = stream.getReader();
@@ -1434,7 +1434,7 @@ function looksLikeGarbageLabel(s, shortName) {
               
               // Validate required columns
               if (headers.tripIdx === -1 || headers.stopIdx === -1) {
-                console.error('Missing required columns in stop_times.txt: trip_id or stop_id');
+                throw new Error('Missing required columns in stop_times.txt: trip_id or stop_id');
               }
               return;
             }
@@ -1442,8 +1442,7 @@ function looksLikeGarbageLabel(s, shortName) {
             // Parse data line
             const cols = smartSplit(line);
             
-            // Validate we have minimum required columns
-            if (headers.tripIdx === -1 || headers.stopIdx === -1) return;
+            // Skip lines that don't have enough columns
             if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
             
             const tripId = (cols[headers.tripIdx] || '').replace(/^"|"$/g, '').trim();
