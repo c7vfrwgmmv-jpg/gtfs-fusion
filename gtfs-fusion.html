@@ -2399,7 +2399,7 @@ function buildRouteProfileForCurrentSelection() {
       const dropoff = st.drop_off_type;
 
       // GTFS: 1 = no pickup/dropoff; 0 = normal
-      if (pickup === '1' && dropoff === '1') {
+      if (pickup === 1 && dropoff === 1) {
         return; // stricte techniczne – pomijamy
       }
 
@@ -2520,8 +2520,8 @@ const candidateTailStops = new Set();
     const pts = sts.map(st => ({
       stop_id: st.stop_id,
       isCore: coreSet.has(st.stop_id),
-      p: String(st.pickup_type || '0'),
-      d: String(st.drop_off_type || '0')
+      p: String(st.pickup_type || 0),
+      d: String(st.drop_off_type || 0)
     }));
 
     let firstCoreIdx = pts.findIndex(p => p.isCore);
@@ -2586,7 +2586,7 @@ allTrips.forEach(trip => {
     if (!nodeTypes[stId]) {
       const pickup = st.pickup_type;
       const dropoff = st.drop_off_type;
-      const isStrictTech = (pickup === '1' && dropoff === '1');
+      const isStrictTech = (pickup === 1 && dropoff === 1);
       
       if (isStrictTech || candidateTailStops.has(stId)) {
         // Zajezdnia lub zjazd - oznacz jako tail
@@ -2610,8 +2610,8 @@ allTrips.forEach(trip => {
     
     sts.forEach((st, i) => {
       const stId = st.stop_id;
-      const pType = String(st.pickup_type || '0').trim();
-      const dType = String(st.drop_off_type || '0').trim();
+      const pType = String(st.pickup_type || 0).trim();
+      const dType = String(st.drop_off_type || 0).trim();
       
       if (!stopMetadata[stId]) {
         stopMetadata[stId] = {
@@ -4726,8 +4726,8 @@ const processedTrips = trips.map(trip => {
       }
 
       // Sprawdź flagi GTFS
-      const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-      const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
+      const pType = String(s.pickup_type || 0).trim();
+      const dType = String(s.drop_off_type || 0).trim();
       const isStrictlyTechnical = (pType === "1" && dType === "1");
       let isLikelyDepot = isStrictlyTechnical;
       if (!isLikelyDepot) {
@@ -4759,8 +4759,8 @@ const processedTrips = trips.map(trip => {
       
     } else {
       // === FALLBACK: Stara logika (jeśli brak profilu lub metadanych) ===
-      const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-      const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
+      const pType = String(s.pickup_type || 0).trim();
+      const dType = String(s.drop_off_type || 0).trim();
 
       isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
       const isStrictlyTechnical = (pType === "1" && dType === "1");
