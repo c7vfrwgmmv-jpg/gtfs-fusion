@@ -140,9 +140,68 @@ const CANONICAL_CATEGORIES = {
 // ═══════════════════════════════════════════════════════════════
 // 2. STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
+let state = {
+  gtfsData: null,
+  selectedRoute: null,
+  loading: false,
+  loadingStep: '',
+  loadingProgress: 0,
+  loadingProgressPercent: 0,
+  error: '',
+  selectedDate: '',
+  availableDates: [],
+  selectedDirection: '0',
+  selectedVariant: 1,
+  mapLoaded: false,
+  showAllTrips: false,
+  threshold: 10,
+  currentWorker: null,
+  // UI: group mode for routes list - 'route_id' or 'service_type'
+  routeGroupMode: 'service_type',
+  routesOptionsOpen: false,
+  routesOptionsListenerAttached: false,
+  // custom route type map can be injected/extended
+  customRouteTypeMap: {},
 
-// === ROUTE CACHE MODULE (Removed - no longer using external routing APIs) ===
-// Routes are now rendered using shapes.txt from GTFS or straight lines
+  // NOWE:
+  selectedRouteGroup: null,   // obecna logiczna grupa linii (dla listy linii)
+  routeProfiles: {},          // profile tras (graf/core) per logical group + direction
+  showStopsView: false,       // tryb „przystanki" vs „linie"
+  routesListScrollPosition: 0, // scroll position for ROUTES_LIST view
+
+  selectedStop: null,
+  stopViewFilteredRoutes: [],
+  
+  // Stops list view state
+  expandedStopGroup: null,
+  stopsListMapState: null,
+  stopsListSearchQuery: '',
+  
+  // FAZA 1.5: Pagination state
+  stopsListPage: 1,
+  stopsListPageSize: 50,
+  
+  // FAZA 2.1: Virtual list state
+  virtualListStartIndex: 0,
+  virtualListItemHeight: 68, // px - wysokość stop-group
+
+  // Map layers for stop detail view
+  stopDetailMapLayers: {},
+  stopDetailMapInitialized: false,
+  stopDetailMapInstance: null,
+  stopDetailDepartures: [], // All departures for current stop
+
+  // Cached timetable data for modal
+  currentTimetableData: {
+    allTrips: [],           // wszystkie trips (włącznie z ukrytymi)
+    stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
+  }
+};
+
+let stopsSearchIndex = null;
+let cachedGroupsArray = null;
+let lastStopsDataHash = null;
+let stationNameToIdCache = null;
 
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
@@ -163,11 +222,6 @@ function debounce(func, wait) {
     timeout = setTimeout(later, wait);
   };
 }
-
-let stopsSearchIndex = null;
-let cachedGroupsArray = null;
-let lastStopsDataHash = null;
-let stationNameToIdCache = null;
 
     function escapeHtml(s) {
       if (s === null || s === undefined) return '';
