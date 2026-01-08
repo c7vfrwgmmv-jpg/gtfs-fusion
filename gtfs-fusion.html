@@ -1340,6 +1340,62 @@ function looksLikeGarbageLabel(s, shortName) {
 // ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
+    /**
+     * Fast CSV parser for small GTFS files
+     * Uses native split() - much faster than PapaParse for simple files
+     * Handles: BOM removal, quote stripping, header normalization
+     */
+    function parseCSVFast(text) {
+      if (!text || !text.trim()) return [];
+      
+      const lines = text.split('\n');
+      if (lines.length === 0) return [];
+      
+      // Parse header line
+      const headerLine = lines[0].replace(/^\uFEFF/, '').trim(); // Remove BOM
+      if (!headerLine) return [];
+      
+      const rawHeaders = headerLine.split(',');
+      const headers = rawHeaders.map(h => {
+        if (!h) return '';
+        // Remove quotes and normalize
+        const cleaned = h.trim().replace(/^"|"$/g, '');
+        return normalizeKey(cleaned);
+      });
+      
+      // Parse data lines
+      const result = [];
+      
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue; // Skip empty lines
+        
+        const values = line.split(',');
+        const obj = {};
+        
+        for (let j = 0; j < headers.length; j++) {
+          const header = headers[j];
+          if (!header) continue;
+          
+          let value = '';
+          if (j < values.length && values[j]) {
+            // Remove quotes and trim
+            value = values[j].trim().replace(/^"|"$/g, '').trim();
+          }
+          
+          obj[header] = value;
+        }
+        
+        // Apply same normalization as PapaParse version
+        const normalized = normalizeRecord(obj);
+        if (normalized) {
+          result.push(normalized);
+        }
+      }
+      
+      return result;
+    }
+
     function parseCSV(text) {
       const result = Papa.parse(text, {
         header: true, skipEmptyLines: true, dynamicTyping: false,
@@ -1804,12 +1860,12 @@ function looksLikeGarbageLabel(s, shortName) {
 state.loadingStep = 'Wczytywanie i parsowanie plików (równolegle)...'; render();
 
 const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
-  routesFile.async('string').then(text => parseCSV(text)),
-  tripsFile.async('string').then(text => parseCSV(text)),
-  stopsFile.async('string').then(text => parseCSV(text)),
-  calendarFile ? calendarFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
+  routesFile.async('string').then(text => parseCSVFast(text)),
+  tripsFile.async('string').then(text => parseCSVFast(text)),
+  stopsFile.async('string').then(text => parseCSVFast(text)),
+  calendarFile ? calendarFile.async('string').then(text => parseCSVFast(text)) : Promise.resolve([]),
+  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSVFast(text)) : Promise.resolve([]),
+  agenciesFile ? agenciesFile.async('string').then(text => parseCSVFast(text)) : Promise.resolve([])
 ]);
         log('Parsed small files');
         state.loadingStep = 'Parsing stop_times (streaming)...'; render();
