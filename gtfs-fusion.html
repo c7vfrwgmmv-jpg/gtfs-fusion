@@ -1360,41 +1360,27 @@ function looksLikeGarbageLabel(s, shortName) {
           let buffer = '';
           let lineCount = 0;
           let headers = null;
-          const stopTimesIndex = Object.create(null);
+          const stopTimesIndex = new Map();
           
-          const PROGRESS_UPDATE_INTERVAL = 10000;
+          const PROGRESS_UPDATE_INTERVAL = 50000;
           const ESTIMATED_LINES_FOR_PROGRESS = 100000;
           const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
           
-          // Smart CSV split function to handle quoted fields
+          // Fast manual CSV split without regex (optimized for performance)
           const smartSplit = (line) => {
-            if (!line.includes('"')) {
-              return line.split(',');
-            }
-            
             const cols = [];
-            let current = '';
-            let inQuotes = false;
-            
+            let start = 0;
             for (let i = 0; i < line.length; i++) {
-              const char = line[i];
-              
-              if (char === '"') {
-                if (i + 1 < line.length && line[i+1] === '"') {
-                  current += '"';
-                  i++;
-                } else {
-                  inQuotes = !inQuotes;
-                }
-              } else if (char === ',' && !inQuotes) {
-                cols.push(current.trim());
-                current = '';
-              } else {
-                current += char;
+              if (line[i] === ',') {
+                let val = line.substring(start, i);
+                if (val[0] === '"') val = val.slice(1, -1);
+                cols.push(val);
+                start = i + 1;
               }
             }
-            
-            cols.push(current.trim());
+            let val = line.substring(start);
+            if (val[0] === '"') val = val.slice(1, -1);
+            cols.push(val);
             return cols;
           };
           
@@ -1449,11 +1435,11 @@ function looksLikeGarbageLabel(s, shortName) {
             
             if (!tripId || !stopId) return;
             
-            if (!stopTimesIndex[tripId]) {
-              stopTimesIndex[tripId] = [];
+            if (!stopTimesIndex.has(tripId)) {
+              stopTimesIndex.set(tripId, []);
             }
             
-            stopTimesIndex[tripId].push({
+            stopTimesIndex.get(tripId).push({
               stop_id: stopId,
               arrival_time: getCol(cols, headers.arrIdx),
               departure_time: getCol(cols, headers.depIdx),
@@ -1496,15 +1482,21 @@ function looksLikeGarbageLabel(s, shortName) {
           // Process any remaining buffer
           if (buffer.trim()) processLine(buffer);
           
-          // Sort each trip's stops by sequence
-          Object.keys(stopTimesIndex).forEach(tripId => {
-            stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
-          });
+          // Sort each trip's stops by sequence (optimized for Map)
+          for (const stops of stopTimesIndex.values()) {
+            stops.sort((a, b) => a.stop_sequence - b.stop_sequence);
+          }
+          
+          // Convert Map to Object for backward compatibility
+          const indexObj = Object.create(null);
+          for (const [tripId, stops] of stopTimesIndex.entries()) {
+            indexObj[tripId] = stops;
+          }
           
           state.loadingProgress = lineCount;
           state.loadingProgressPercent = 100;
           if (onProgress) onProgress(lineCount, 100);
-          resolve(stopTimesIndex);
+          resolve(indexObj);
           
         } catch(err) {
           reject(err);
