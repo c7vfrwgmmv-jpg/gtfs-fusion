@@ -1886,6 +1886,11 @@ if (dates.length > 0) {
   state.selectedDate = selectedDate;
 }
         log('DONE');
+		if (performance.memory) {
+  const heapMB = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
+  const totalMB = Math.round(performance.memory.totalJSHeapSize / 1024 / 1024);
+  console.log(`💾 Memory: ${heapMB} MB used / ${totalMB} MB allocated`);
+}
         console.log(`\n📊 Total: ${((performance.now()-t0)/1000).toFixed(2)}s`);
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
