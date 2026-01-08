@@ -2296,16 +2296,99 @@ function getCurrentRouteProfile() {
 
   const dir = state.selectedDirection || '0';
 
-  // jeśli mamy logical group → używamy jej jako klucza
+  // Ustal klucz
+  let key;
   if (state.selectedRouteGroup) {
-    const key = getLogicalRouteKeyFromGroup(state.selectedRouteGroup);
+    key = getLogicalRouteKeyFromGroup(state.selectedRouteGroup);
     if (!key) return null;
-    return (state.routeProfiles[key] && state.routeProfiles[key][dir]) || null;
+  } else {
+    key = 'raw::' + (state.selectedRoute.route_id || '');
   }
 
-  // jeśli nie ma grupy logicznej, użyjemy pojedynczego route_id jako klucza
-  const key = 'raw::' + (state.selectedRoute.route_id || '');
-  return (state.routeProfiles[key] && state.routeProfiles[key][dir]) || null;
+  // Sprawdź czy pełny profile już istnieje (cache)
+  if (state.routeProfiles[key] && state.routeProfiles[key][dir]) {
+    return state.routeProfiles[key][dir];
+  }
+
+  // NIE MA - zbuduj teraz (lazy loading)
+  console.log(`⏳ Building profile for ${key} direction ${dir}...`);
+  return buildRouteProfileForCurrentSelection();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Buduje lekkie coreStops dla OBUDWÓCH kierunków (0 i 1)
+// Wywoływane przy selectRoute() - szybkie, tylko lista stop_id
+// ═══════════════════════════════════════════════════════════════
+function buildCoreStopsForAllDirections() {
+  if (!state.selectedRoute || !state.gtfsData) return;
+  
+  // 1. Ustal klucz logicznej linii
+  let key;
+  let memberRoutes = [];
+  
+  if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
+    key = getLogicalRouteKeyFromGroup(state.selectedRouteGroup);
+    memberRoutes = state.selectedRouteGroup.members;
+  } else {
+    key = 'raw::' + (state.selectedRoute.route_id || '');
+    memberRoutes = [state.selectedRoute];
+  }
+  
+  if (!key) return;
+  
+  const { stopTimesIndex, tripsIndex } = state.gtfsData;
+  if (!stopTimesIndex || !tripsIndex) return;
+  
+  // 2. Zbierz wszystkie route_ids
+  const routeIds = memberRoutes.map(r => r.route_id).filter(Boolean);
+  if (!routeIds.length) return;
+  
+  // 3. Inicjalizuj cache jeśli nie istnieje
+  if (!state.routeCoreStops) state.routeCoreStops = {};
+  if (!state.routeCoreStops[key]) state.routeCoreStops[key] = {};
+  
+  // 4. Dla OBUDWÓCH kierunków (GTFS spec: 0 i 1)
+  ['0', '1'].forEach(dir => {
+    // Zbierz tripy dla tego kierunku
+    let allTrips = [];
+    routeIds.forEach(rid => {
+      const ts = tripsIndex[rid] || [];
+      allTrips = allTrips.concat(ts);
+    });
+    
+    allTrips = allTrips.filter(t => (t.direction_id || '0') === dir);
+    if (!allTrips.length) {
+      console.log(`No trips for direction ${dir} - skipping`);
+      return;
+    }
+    
+    // Znajdź najdłuższy trip (najbardziej kompletna trasa)
+    let refTrip = allTrips[0];
+    let maxStops = 0;
+    
+    allTrips.forEach(trip => {
+      const stops = stopTimesIndex[trip.trip_id] || [];
+      if (stops.length > maxStops) {
+        maxStops = stops.length;
+        refTrip = trip;
+      }
+    });
+    
+    // Core stops = stops z reference trip (już posortowane według stop_sequence)
+    const refStops = stopTimesIndex[refTrip.trip_id] || [];
+    refStops.sort((a, b) => 
+      parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)
+    );
+    
+    const coreStops = refStops
+      .filter(st => st && st.stop_id)
+      .map(st => st.stop_id);
+    
+    // Zapisz w cache
+    state.routeCoreStops[key][dir] = coreStops;
+    
+    console.log(`✅ Built coreStops for ${key} dir ${dir}: ${coreStops.length} stops`);
+  });
 }
 
 function buildRouteProfileForCurrentSelection() {
@@ -3912,8 +3995,8 @@ function selectRoute(route) {
     state.selectedDirection = [...new Set(routeTrips.map(t => t.direction_id || '0'))][0];
   }
 
-  // KROK 1: zbuduj (lub odczytaj) profil trasy dla tej linii + kierunku
-  buildRouteProfileForCurrentSelection();
+  // KROK 1: Zbuduj coreStops dla OBUDWÓCH kierunków (szybkie!)
+  buildCoreStopsForAllDirections();
 
   resetMap();
   render();
