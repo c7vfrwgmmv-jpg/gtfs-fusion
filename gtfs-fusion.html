@@ -1826,6 +1826,7 @@ function looksLikeGarbageLabel(s, shortName) {
           console.warn('fflate not available, using JSZip fallback');
           state.loadingStep = 'Decompressing ZIP (JSZip)...'; render();
           zip = await JSZip.loadAsync(file);
+          log('Unzipped');
           state.loadingStep = 'Extracting files...'; render();
           
           const files = ['routes.txt','trips.txt','stop_times.txt','stops.txt','calendar.txt','calendar_dates.txt','agency.txt','shapes.txt'];
