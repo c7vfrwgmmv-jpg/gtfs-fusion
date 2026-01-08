@@ -1703,8 +1703,17 @@ function looksLikeGarbageLabel(s, shortName) {
                         // Decode UTF-8 using TextDecoder
                         const decoder = new TextDecoder('utf-8');
                         return decoder.decode(this._data);
+                      } else if (type === 'arraybuffer') {
+                        // Return as ArrayBuffer
+                        return this._data.buffer.slice(this._data.byteOffset, this._data.byteOffset + this._data.byteLength);
+                      } else if (type === 'uint8array') {
+                        // Return the Uint8Array directly
+                        return this._data;
+                      } else if (type === 'blob') {
+                        // Create a Blob from the data
+                        return new Blob([this._data]);
                       }
-                      // For other types, return the raw data
+                      // For other types, return the raw Uint8Array
                       return this._data;
                     });
                   }
