@@ -2574,6 +2574,203 @@ function buildStopTooltip(stopId, stopsIndex) {
 // ═══════════════════════════════════════════════════════════════
 // === KROK 1: Budowa grafu trasy i profilu core dla logical route ===
 
+// Helper: Normalize GTFS pickup/dropoff types (treat on-demand as passenger)
+// Note: This is used during classification to treat on-demand (2,3) as regular passenger (0)
+// For display purposes, on-demand detection happens before normalization
+function normalizePickupDropoffType(value) {
+  const normalized = String(value || '0').trim();
+  // 2 = phone agency, 3 = coordinate with driver → treat as 0 (passenger)
+  if (normalized === '2' || normalized === '3') return '0';
+  return normalized;
+}
+
+// Helper: Calculate edge frequency per stop
+function calculateStopEdgeFrequency(trips, tripStopMaps) {
+  const edgeFrequency = {};
+  const totalTrips = trips.length;
+  
+  // Safety check for empty trips
+  if (totalTrips === 0) {
+    return edgeFrequency;
+  }
+  
+  trips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    for (let i = 0; i < stops.length - 1; i++) {
+      const edge = stops[i].stop_id + '->' + stops[i + 1].stop_id;
+      edgeFrequency[edge] = (edgeFrequency[edge] || 0) + 1;
+    }
+  });
+  
+  // Convert to percentages
+  Object.keys(edgeFrequency).forEach(key => {
+    edgeFrequency[key] = edgeFrequency[key] / totalTrips;
+  });
+  
+  return edgeFrequency;
+}
+
+// Helper: Find low-frequency candidates
+function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
+  const candidates = new Set();
+  
+  allStops.forEach(stopId => {
+    // Find all edges involving this stop
+    const edges = Object.keys(edgeFrequency).filter(e => 
+      e.startsWith(stopId + '->') || e.endsWith('->' + stopId)
+    );
+    
+    // If ALL edges are below threshold → candidate
+    const allLowFreq = edges.every(e => edgeFrequency[e] < threshold);
+    if (allLowFreq && edges.length > 0) {
+      candidates.add(stopId);
+    }
+  });
+  
+  return candidates;
+}
+
+// Helper: Check if stop is between core start and end
+function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
+  // Find positions of stopId, coreStart, coreEnd in trip
+  let stopIdx = -1;
+  let coreStartIdx = -1;
+  let coreEndIdx = -1;
+  
+  for (let i = 0; i < trip.length; i++) {
+    if (trip[i].stop_id === stopId) stopIdx = i;
+    if (trip[i].stop_id === coreStart) coreStartIdx = i;
+    if (trip[i].stop_id === coreEnd) coreEndIdx = i;
+  }
+  
+  // If stop is between coreStart and coreEnd → it's a passenger branch
+  // Handle both forward and reverse directions
+  if (coreStartIdx !== -1 && coreEndIdx !== -1 && stopIdx !== -1) {
+    const minCoreIdx = Math.min(coreStartIdx, coreEndIdx);
+    const maxCoreIdx = Math.max(coreStartIdx, coreEndIdx);
+    return stopIdx > minCoreIdx && stopIdx < maxCoreIdx;
+  }
+  
+  return false;
+}
+
+// Helper: Recursive tail detection
+function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIndex, coreStops) {
+  const nodeTypes = {};
+  const coreSet = new Set(coreStops);
+  
+  // Safety check: if no core stops, candidates will be classified in buildRouteProfileForCurrentSelection
+  if (!coreStops || coreStops.length === 0) {
+    return nodeTypes;
+  }
+  
+  const coreStart = coreStops[0];
+  const coreEnd = coreStops[coreStops.length - 1];
+  
+  let changed = true;
+  let iterations = 0;
+  const MAX_ITERATIONS = 10;
+  
+  // Initialize core stops with 'core' classification
+  coreStops.forEach(stopId => {
+    nodeTypes[stopId] = 'core';
+  });
+  
+  while (changed && iterations < MAX_ITERATIONS) {
+    changed = false;
+    iterations++;
+    
+    candidates.forEach(candidateId => {
+      // Skip if already classified
+      if (nodeTypes[candidateId]) return;
+      
+      // Check if candidate appears BETWEEN coreStart and coreEnd in any trip
+      let appearsBetweenCore = false;
+      
+      for (const trip of trips) {
+        const stops = tripStopMaps[trip.trip_id] || [];
+        if (isStopBetweenCore(candidateId, stops, coreStart, coreEnd)) {
+          appearsBetweenCore = true;
+          break;
+        }
+      }
+      
+      if (appearsBetweenCore) {
+        // Appears between core → passenger branch
+        nodeTypes[candidateId] = 'passenger';
+        return;
+      }
+      
+      // Get pickup/dropoff flags for this stop (check all occurrences)
+      let hasPickup1 = false;
+      let hasDropoff1 = false;
+      let hasNormalFlags = false;
+      
+      trips.forEach(trip => {
+        const stopTimes = stopTimesIndex[trip.trip_id] || [];
+        const st = stopTimes.find(s => s.stop_id === candidateId);
+        if (st) {
+          const pickup = normalizePickupDropoffType(st.pickup_type);
+          const dropoff = normalizePickupDropoffType(st.drop_off_type);
+          
+          if (pickup === '1' || dropoff === '1') {
+            if (pickup === '1') hasPickup1 = true;
+            if (dropoff === '1') hasDropoff1 = true;
+          } else {
+            hasNormalFlags = true;
+          }
+        }
+      });
+      
+      // If ANY occurrence has pickup=1 OR dropoff=1 → tail
+      if (hasPickup1 || hasDropoff1) {
+        nodeTypes[candidateId] = 'tail';
+        changed = true;
+        return;
+      }
+      
+      // If all flags are 0/0 (after normalization) → recursive test
+      if (hasNormalFlags) {
+        // Check: do ALL trips with this stop have a tail stop somewhere on their route?
+        const tripsWithCandidate = trips.filter(trip => {
+          const stops = tripStopMaps[trip.trip_id] || [];
+          return stops.some(s => s.stop_id === candidateId);
+        });
+        
+        let allTripsHaveOtherTails = true;
+        
+        for (const trip of tripsWithCandidate) {
+          const stops = tripStopMaps[trip.trip_id] || [];
+          
+          // Get stops OUTSIDE core for this trip
+          const stopsOutsideCore = stops.filter(s => !coreSet.has(s.stop_id));
+          
+          // Check if any stop outside core (excluding candidate itself) is marked as tail
+          const hasTailOnRoute = stopsOutsideCore.some(s => 
+            s.stop_id !== candidateId && nodeTypes[s.stop_id] === 'tail'
+          );
+          
+          if (!hasTailOnRoute) {
+            allTripsHaveOtherTails = false;
+            break;
+          }
+        }
+        
+        if (allTripsHaveOtherTails && tripsWithCandidate.length > 0) {
+          // All trips with this stop have a tail → this is part of depot route
+          nodeTypes[candidateId] = 'tail';
+          changed = true;
+        } else {
+          // Some trips don't have tail → legitimate passenger terminus
+          nodeTypes[candidateId] = 'passenger';
+        }
+      }
+    });
+  }
+  
+  return nodeTypes;
+}
+
 function getCurrentRouteProfile() {
   if (!state.selectedRoute || !state.gtfsData) return null;
 
@@ -2824,99 +3021,49 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-// --- 7. Klasyfikacja Tripów (Radykalne Wycinanie Branchów) ---
-const candidateBranchStops = new Set();
-const candidateTailStops = new Set(); 
-  const forbiddenFromBranch = new Set(); 
-
+// --- 7. NEW: Recursive Tail Detection Algorithm ---
+  
+  // 7.1: Build tripStopMaps for the helper functions
+  const tripStopMaps = {};
   allTrips.forEach(trip => {
-    const stsRaw = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-    const sts = [...stsRaw].sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
-    if (sts.length === 0) return;
-
-    const pts = sts.map(st => ({
-      stop_id: st.stop_id,
-      isCore: coreSet.has(st.stop_id),
-      p: String(st.pickup_type || '0'),
-      d: String(st.drop_off_type || '0')
-    }));
-
-    let firstCoreIdx = pts.findIndex(p => p.isCore);
-    let lastCoreIdx = -1;
-    pts.forEach((p, i) => { if (p.isCore) lastCoreIdx = i; });
-
-    const lastPt = pts[pts.length - 1];
-    // Jeśli ostatni stop to 1/1 - to jest zjazd
-    const isTechnicalTrip = (lastPt.p === '1' && lastPt.d === '1');
-
-if (isTechnicalTrip || firstCoreIdx === -1) {
-  // Zjazd: każdy przystanek poza Core trafia na czarną listę
-  pts.forEach(p => {
-    if (!p.isCore) {
-      forbiddenFromBranch.add(p.stop_id);
-      candidateTailStops.add(p.stop_id);     // <--- DODAJ TO!
-    }
+    const stsRaw = stopTimesIndex[trip.trip_id] || [];
+    const sts = stsRaw
+      .filter(st => st && st.stop_id)
+      .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+    tripStopMaps[trip.trip_id] = sts;
   });
-} else {
-      // Pasażerski: dodaj do Branchy, ale tylko prefiks i sufiks
-      pts.slice(0, firstCoreIdx).concat(pts.slice(lastCoreIdx + 1)).forEach(p => {
-        if (!p.isCore) candidateBranchStops.add(p.stop_id);
-      });
-    }
-  });
-
-  // Czyścimy Branchy z czarnej listy zjazdowej
-  forbiddenFromBranch.forEach(sid => candidateBranchStops.delete(sid));  
   
-// 8. Zbuduj nodeTypes: core / branch / tail / noncore
-// TAIL MA NAJWYŻSZY PRIORYTET - jeśli przystanek jest na jakimkolwiek zjeździe, to jest tail
-const nodeTypes = {};
-Object.keys(nodes).forEach(sid => {
-  if (coreSet.has(sid)) {
-    nodeTypes[sid] = 'core';
-  } else if (candidateTailStops.has(sid)) {
-    // TAIL MA NAJWYŻSZY PRIORYTET (nawet jeśli jest też w candidateBranchStops)
-    nodeTypes[sid] = 'tail';
-  } else if (candidateBranchStops.has(sid)) {
-    nodeTypes[sid] = 'branch';
-  } else {
-    nodeTypes[sid] = 'noncore';
-  }
-});
-// Dodaj do nodeTypes wszystkie przystanki z candidateTailStops, nawet jeśli nie są w nodes
-candidateTailStops.forEach(sid => {
-  if (!nodeTypes[sid]) {
-    nodeTypes[sid] = 'tail';
-  }
-});
-// NOWA POPRAWKA: Dodaj do nodeTypes wszystkie przystanki które są używane w tripach,
-// ale nie trafiły do nodes (bo były 1/1 i zostały pominięte w grafie)
-allTrips.forEach(trip => {
-  const stsRaw = stopTimesIndex[trip.trip_id] || [];
-  const sts = stsRaw
-    .filter(st => st && st.stop_id)
-    .sort((a, b) => (parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)));
+  // 7.2: Calculate edge frequency
+  const edgeFrequency = calculateStopEdgeFrequency(allTrips, tripStopMaps);
   
-  sts.forEach(st => {
-    const stId = st.stop_id;
-    // Jeśli ten przystanek nie ma typu, sprawdź czy jest na trasie zjazdu
-    if (!nodeTypes[stId]) {
-      const pickup = st.pickup_type;
-      const dropoff = st.drop_off_type;
-      const isStrictTech = (pickup === '1' && dropoff === '1');
-      
-      if (isStrictTech || candidateTailStops.has(stId)) {
-        // Zajezdnia lub zjazd - oznacz jako tail
-        nodeTypes[stId] = 'tail';
-      } else {
-        // Inny nieznany - domyślnie noncore
-        nodeTypes[stId] = 'noncore';
-      }
+  // 7.3: Find all stop IDs
+  const allStopIds = new Set();
+  allTrips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    stops.forEach(st => allStopIds.add(st.stop_id));
+  });
+  
+  // 7.4: Find low-frequency candidates (threshold 10%)
+  const candidates = findLowFrequencyCandidates(edgeFrequency, Array.from(allStopIds), 0.10);
+  
+  // 7.5: Classify stops recursively
+  const nodeTypes = classifyTailStopsRecursive(
+    candidates,
+    allTrips,
+    tripStopMaps,
+    stopTimesIndex,
+    coreStops
+  );
+  
+  // 7.6: Ensure all stops have a classification (fallback to 'passenger' for safety)
+  // Using 'passenger' instead of 'noncore' ensures unclassified stops are visible
+  allStopIds.forEach(stopId => {
+    if (!nodeTypes[stopId]) {
+      nodeTypes[stopId] = 'passenger';
     }
   });
-});
 
-  // 9. Zbierz szczegółowe metadane o przystankach (pickup/drop_off types, pozycje w trasach)
+  // 8. Collect detailed stop metadata (pickup/drop_off types, positions in routes)
   const stopMetadata = {}; // stop_id → { hasPickup1: bool, hasDropOff1: bool, isOnDemand: bool, isFirstWithNoPickup: bool, isLastWithNoDropOff: bool }
   
   allTrips.forEach(trip => {
@@ -2963,7 +3110,7 @@ allTrips.forEach(trip => {
     });
   });
 
-  // 10. Zapisz profil w state
+  // 9. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
     key,
@@ -5046,45 +5193,37 @@ const processedTrips = trips.map(trip => {
     let isOnDemand = false;
 
     if (meta) {
-      // === NOWA LOGIKA: Wzorcowa trasa ===
-      const tripId = trip.trip_id;
-      const coreIndices = profile?.tripCoreIndices?.[tripId];
-      let isOutsideCore = false;
-
-      if (coreIndices && coreIndices.firstCoreIdx !== -1) {
-        isOutsideCore = (i < coreIndices.firstCoreIdx) || (i > coreIndices.lastCoreIdx);
-      }
-
-      // Sprawdź flagi GTFS
-      const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-      const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
-      const isStrictlyTechnical = (pType === "1" && dType === "1");
-      let isLikelyDepot = isStrictlyTechnical;
-      if (!isLikelyDepot) {
-        if (i === 0 && pType === "1") {
-          isLikelyDepot = true;
+      // === NEW LOGIC: Use profile nodeTypes (with recursive classification) ===
+      const nodeType = nodeTypes[sId];
+      
+      if (nodeType === 'tail') {
+        // Depot/technical stop
+        isStopTech = true;
+      } else if (nodeType === 'passenger' || nodeType === 'core') {
+        // Passenger stop (including branches between core)
+        isStopTech = false;
+        // Check for on-demand BEFORE normalization (types 2,3 are on-demand)
+        const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
+        const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
+        isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
+      } else {
+        // Fallback for unclassified stops (noncore, branch, etc.)
+        // Check GTFS flags to determine if technical
+        const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
+        const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
+        const isStrictlyTechnical = (pType === "1" && dType === "1");
+        
+        if (isStrictlyTechnical) {
+          isStopTech = true;
+        } else if (i === 0 && pType === "1") {
+          isStopTech = true;
         } else if (i === stops.length - 1 && dType === "1") {
-          isLikelyDepot = true;
+          isStopTech = true;
+        } else {
+          // Default to passenger for backward compatibility
+          isStopTech = false;
+          isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
         }
-      }
-
-      // HIERARCHIA DECYZJI:
-      // Priorytet 1: Spoza wzorcowej trasy = ZAWSZE ZAJEZDNIA
-      if (isOutsideCore) {
-        isStopTech = true;
-      }
-      // Priorytet 2: Flagi GTFS (pickup/dropoff type = 1)
-      else if (isLikelyDepot) {
-        isStopTech = true;
-      }
-      // Priorytet 3: On-demand = PASAŻERSKI (tylko na wzorcowej trasie!)
-      else if (meta.isOnDemand) {
-        isStopTech = false;
-        isOnDemand = true;
-      }
-      // Domyślnie: pasażerski
-      else {
-        isStopTech = false;
       }
       
     } else {
