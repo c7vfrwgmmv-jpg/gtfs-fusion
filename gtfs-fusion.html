@@ -1667,6 +1667,83 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// STOP_SEQUENCE NORMALIZATION (geography-based)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Generate synthetic stop_sequence for ALL trips based on geography
+ * Geography is the source of truth - normalize all sequences for consistency
+ * @param {Array<Object>} trips - Array of trip objects
+ * @param {Object} stopTimesIndex - Index of stop times by trip_id
+ * @param {Object} stopsIndex - Index of stops by stop_id
+ */
+function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
+  let totalTrips = 0;
+  let fixedTrips = 0;
+  let skippedTrips = 0;
+  
+  trips.forEach(trip => {
+    totalTrips++;
+    
+    const stopTimes = stopTimesIndex[trip.trip_id] || [];
+    if (stopTimes.length === 0) {
+      skippedTrips++;
+      return;
+    }
+    
+    // Sort by original sequence first (best effort starting point)
+    stopTimes.sort((a, b) => 
+      parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0')
+    );
+    
+    // Get coordinates for all stops
+    const stopsWithCoords = stopTimes.map((st, originalIdx) => {
+      const stop = stopsIndex[st.stop_id];
+      const lat = parseFloat(stop?.stop_lat);
+      const lon = parseFloat(stop?.stop_lon);
+      
+      if (isNaN(lat) || isNaN(lon)) {
+        return null;
+      }
+      
+      return { stopTime: st, lat, lon, originalIdx };
+    }).filter(Boolean);
+    
+    // Skip if missing coordinates (broken dataset - can't fix)
+    if (stopsWithCoords.length !== stopTimes.length) {
+      console.warn(`⚠️ Trip ${trip.trip_id}: ${stopTimes.length - stopsWithCoords.length} stops missing coordinates`);
+      skippedTrips++;
+      return;
+    }
+    
+    // Calculate cumulative distance from first stop
+    let cumulativeDistance = 0;
+    stopsWithCoords.forEach((s, idx) => {
+      if (idx === 0) {
+        s.distance = 0;
+      } else {
+        const prev = stopsWithCoords[idx - 1];
+        const segmentDist = haversineDistance(prev.lat, prev.lon, s.lat, s.lon);
+        cumulativeDistance += segmentDist;
+        s.distance = cumulativeDistance;
+      }
+    });
+    
+    // Sort by cumulative distance
+    stopsWithCoords.sort((a, b) => a.distance - b.distance);
+    
+    // Assign new stop_sequence (1, 2, 3...)
+    stopsWithCoords.forEach((item, idx) => {
+      item.stopTime.stop_sequence = idx + 1;
+    });
+    
+    fixedTrips++;
+  });
+  
+  console.log(`📍 Stop sequences normalized: ${fixedTrips}/${totalTrips} trips (${skippedTrips} skipped - missing coords)`);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
 function parseCSV(text) {
@@ -2202,6 +2279,10 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
         // Generate missing direction_id values
         state.loadingStep = 'Generowanie brakujących direction_id...'; render();
         enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex);
+        
+        // Normalize ALL stop_sequence based on geography
+        state.loadingStep = 'Normalizacja stop_sequence (geografia)...'; render();
+        enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex);
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
