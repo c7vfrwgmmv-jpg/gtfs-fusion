@@ -1670,6 +1670,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 // STOP_SEQUENCE NORMALIZATION (geography-based union pattern)
 // ═══════════════════════════════════════════════════════════════
 
+// Constants for stop sequence normalization
+const POSITION_PADDING = 10;  // Spacing between positions (10, 20, 30...)
+const FALLBACK_STOP_SEQUENCE = 999;  // Fallback for stops not in pattern
+
 /**
  * Normalize stop_sequence using union of all stops per route+direction
  * Creates a complete geographic pattern from ALL trip variants
@@ -1720,15 +1724,11 @@ function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
 function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
   // Collect ALL unique stops from ALL trips
   const allStops = new Set();
-  const stopFirstOccurrence = {}; // Track when we first see each stop
   
-  trips.forEach((trip, tripIdx) => {
+  trips.forEach(trip => {
     const stopTimes = stopTimesIndex[trip.trip_id] || [];
-    stopTimes.forEach((st, stIdx) => {
+    stopTimes.forEach(st => {
       allStops.add(st.stop_id);
-      if (!(st.stop_id in stopFirstOccurrence)) {
-        stopFirstOccurrence[st.stop_id] = { tripIdx, stIdx };
-      }
     });
   });
   
@@ -1747,8 +1747,7 @@ function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
     return {
       stop_id: stopId,
       lat: lat,
-      lon: lon,
-      firstSeen: stopFirstOccurrence[stopId]
+      lon: lon
     };
   }).filter(Boolean);
   
@@ -1807,7 +1806,7 @@ function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
   // Assign positions with padding (10, 20, 30... for easy insertion)
   return stopsWithCoords.map((s, idx) => ({
     stop_id: s.stop_id,
-    position: (idx + 1) * 10
+    position: (idx + 1) * POSITION_PADDING
   }));
 }
 
@@ -1827,7 +1826,7 @@ function mapTripToPattern(trip, pattern, stopTimesIndex) {
     } else {
       // Should never happen (all stops are in union), but fallback
       console.warn(`Stop ${st.stop_id} not found in pattern for trip ${trip.trip_id}`);
-      st.stop_sequence = 999;
+      st.stop_sequence = FALLBACK_STOP_SEQUENCE;
     }
   });
 }
