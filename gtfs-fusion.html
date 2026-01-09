@@ -2775,7 +2775,7 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
     // FALLBACK: Apply tier-specific default
     if (!nodeTypes[candidateId]) {
       nodeTypes[candidateId] = fallbackType;
-      return fallbackType === 'tail'; // Only count as changed if we're classifying as tail
+      return true; // Count as changed when we make any classification
     }
     
     return false;
