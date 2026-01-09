@@ -2755,7 +2755,7 @@ function buildRouteProfileForCurrentSelection() {
 
   // 5. Wstępne „mocne” krawędzie jako kandydaci kręgosłupa
   const coreEdges = new Set();
-  const minCoreFraction = 0.3; // heurystyka: ≥ 40% trips
+  const minCoreFraction = 0.2; // depot trips ~5%, variants 30-40%
 
   Object.values(edges).forEach(e => {
     const frac = e.count / tripCount;
@@ -2777,39 +2777,62 @@ function buildRouteProfileForCurrentSelection() {
   });
 
   const coreStartCandidates = Object.keys(coreInDeg).filter(sid => (coreInDeg[sid] || 0) === 0);
-  const visitedCore = new Set();
-  let bestCorePath = [];
+  const allCorePaths = [];
 
-  function dfsCore(startId, path) {
+  function dfsAllPaths(startId, path, visited) {
     path.push(startId);
-    visitedCore.add(startId);
+    visited.add(startId);
+    
     const nexts = coreAdj[startId] || [];
+    
     if (!nexts.length) {
-      if (path.length > bestCorePath.length) {
-        bestCorePath = path.slice();
+      // End of path - save if ≥2 stops
+      if (path.length >= 2) {
+        allCorePaths.push(path.slice());
       }
     } else {
+      let hasUnvisited = false;
       nexts.forEach(nid => {
-        if (!visitedCore.has(nid)) {
-          dfsCore(nid, path);
-        } else {
-          if (path.length > bestCorePath.length) {
-            bestCorePath = path.slice();
-          }
+        if (!visited.has(nid)) {
+          hasUnvisited = true;
+          const newVisited = new Set(visited);
+          dfsAllPaths(nid, path, newVisited);
         }
       });
+      
+      // Cycle detected - save if ≥2
+      if (!hasUnvisited && path.length >= 2) {
+        allCorePaths.push(path.slice());
+      }
     }
+    
     path.pop();
-    visitedCore.delete(startId);
   }
 
+  // Run DFS
   if (coreStartCandidates.length) {
-    coreStartCandidates.forEach(sid => dfsCore(sid, []));
+    coreStartCandidates.forEach(sid => dfsAllPaths(sid, [], new Set()));
   } else {
-    Object.keys(coreAdj).forEach(sid => dfsCore(sid, []));
+    Object.keys(coreAdj).forEach(sid => dfsAllPaths(sid, [], new Set()));
   }
 
-  const coreStops = bestCorePath.filter(sid => nodes[sid]);
+  // Merge all paths
+  const coreStopsSet = new Set();
+  allCorePaths.forEach(path => {
+    path.forEach(sid => {
+      if (nodes[sid]) coreStopsSet.add(sid);
+    });
+  });
+
+  // Use longest path for ordering, add remaining at end
+  const longestPath = allCorePaths.reduce((longest, current) => 
+    current.length > longest.length ? current : longest, []
+  );
+
+  const coreStops = longestPath.filter(sid => nodes[sid]);
+  coreStopsSet.forEach(sid => {
+    if (!coreStops.includes(sid)) coreStops.push(sid);
+  });
 
   const coreSet = new Set(coreStops);
 
@@ -2824,94 +2847,50 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-// --- 7. Klasyfikacja Tripów (Radykalne Wycinanie Branchów) ---
-const candidateBranchStops = new Set();
-const candidateTailStops = new Set(); 
-  const forbiddenFromBranch = new Set(); 
-
-  allTrips.forEach(trip => {
-    const stsRaw = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-    const sts = [...stsRaw].sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
-    if (sts.length === 0) return;
-
-    const pts = sts.map(st => ({
-      stop_id: st.stop_id,
-      isCore: coreSet.has(st.stop_id),
-      p: String(st.pickup_type || '0'),
-      d: String(st.drop_off_type || '0')
-    }));
-
-    let firstCoreIdx = pts.findIndex(p => p.isCore);
-    let lastCoreIdx = -1;
-    pts.forEach((p, i) => { if (p.isCore) lastCoreIdx = i; });
-
-    const lastPt = pts[pts.length - 1];
-    // Jeśli ostatni stop to 1/1 - to jest zjazd
-    const isTechnicalTrip = (lastPt.p === '1' && lastPt.d === '1');
-
-if (isTechnicalTrip || firstCoreIdx === -1) {
-  // Zjazd: każdy przystanek poza Core trafia na czarną listę
-  pts.forEach(p => {
-    if (!p.isCore) {
-      forbiddenFromBranch.add(p.stop_id);
-      candidateTailStops.add(p.stop_id);     // <--- DODAJ TO!
-    }
-  });
-} else {
-      // Pasażerski: dodaj do Branchy, ale tylko prefiks i sufiks
-      pts.slice(0, firstCoreIdx).concat(pts.slice(lastCoreIdx + 1)).forEach(p => {
-        if (!p.isCore) candidateBranchStops.add(p.stop_id);
-      });
-    }
-  });
-
-  // Czyścimy Branchy z czarnej listy zjazdowej
-  forbiddenFromBranch.forEach(sid => candidateBranchStops.delete(sid));  
-  
-// 8. Zbuduj nodeTypes: core / branch / tail / noncore
-// TAIL MA NAJWYŻSZY PRIORYTET - jeśli przystanek jest na jakimkolwiek zjeździe, to jest tail
+// --- 7. Improved nodeTypes Classification with Depot Detection ---
 const nodeTypes = {};
-Object.keys(nodes).forEach(sid => {
-  if (coreSet.has(sid)) {
-    nodeTypes[sid] = 'core';
-  } else if (candidateTailStops.has(sid)) {
-    // TAIL MA NAJWYŻSZY PRIORYTET (nawet jeśli jest też w candidateBranchStops)
-    nodeTypes[sid] = 'tail';
-  } else if (candidateBranchStops.has(sid)) {
-    nodeTypes[sid] = 'branch';
-  } else {
-    nodeTypes[sid] = 'noncore';
-  }
+
+// Mark core
+coreStops.forEach(sid => {
+  nodeTypes[sid] = 'core';
 });
-// Dodaj do nodeTypes wszystkie przystanki z candidateTailStops, nawet jeśli nie są w nodes
-candidateTailStops.forEach(sid => {
-  if (!nodeTypes[sid]) {
-    nodeTypes[sid] = 'tail';
-  }
-});
-// NOWA POPRAWKA: Dodaj do nodeTypes wszystkie przystanki które są używane w tripach,
-// ale nie trafiły do nodes (bo były 1/1 i zostały pominięte w grafie)
+
+// Classify non-core
 allTrips.forEach(trip => {
-  const stsRaw = stopTimesIndex[trip.trip_id] || [];
-  const sts = stsRaw
-    .filter(st => st && st.stop_id)
-    .sort((a, b) => (parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)));
+  const stops = stopTimesIndex[trip.trip_id];
+  if (!stops) return;
   
-  sts.forEach(st => {
-    const stId = st.stop_id;
-    // Jeśli ten przystanek nie ma typu, sprawdź czy jest na trasie zjazdu
-    if (!nodeTypes[stId]) {
-      const pickup = st.pickup_type;
-      const dropoff = st.drop_off_type;
-      const isStrictTech = (pickup === '1' && dropoff === '1');
-      
-      if (isStrictTech || candidateTailStops.has(stId)) {
-        // Zajezdnia lub zjazd - oznacz jako tail
-        nodeTypes[stId] = 'tail';
-      } else {
-        // Inny nieznany - domyślnie noncore
-        nodeTypes[stId] = 'noncore';
+  // Find core stops in trip
+  const tripCoreIndices = [];
+  stops.forEach((st, idx) => {
+    if (coreSet.has(st.stop_id)) {
+      tripCoreIndices.push(idx);
+    }
+  });
+  
+  // No core = depot trip
+  if (tripCoreIndices.length === 0) {
+    stops.forEach(st => {
+      const pType = String(st.pickup_type || '0');
+      const dType = String(st.drop_off_type || '0');
+      if (pType === '1' && dType === '1') {
+        nodeTypes[st.stop_id] = 'tail'; // depot
       }
+    });
+    return;
+  }
+  
+  // Classify gaps
+  stops.forEach(st => {
+    if (coreSet.has(st.stop_id)) return;
+    
+    const pType = String(st.pickup_type || '0');
+    const dType = String(st.drop_off_type || '0');
+    
+    if (pType === '1' && dType === '1') {
+      nodeTypes[st.stop_id] = 'tail'; // depot
+    } else {
+      nodeTypes[st.stop_id] = 'branch'; // variant/terminus
     }
   });
 });
@@ -2963,6 +2942,74 @@ allTrips.forEach(trip => {
     });
   });
 
+  // 9.5. Pre-compute branchTopology
+  const branchTopology = {};
+
+  allTrips.forEach(trip => {
+    const stops = stopTimesIndex[trip.trip_id];
+    if (!stops) return;
+    
+    // Find core stops
+    const tripCoreStops = [];
+    const tripCoreIndices = [];
+    
+    stops.forEach((st, idx) => {
+      if (coreSet.has(st.stop_id)) {
+        tripCoreStops.push(st.stop_id);
+        tripCoreIndices.push(idx);
+      }
+    });
+    
+    if (tripCoreStops.length === 0) return;
+    
+    // Analyze gaps
+    for (let i = 0; i <= tripCoreStops.length; i++) {
+      let fromCore, toCore, gapStart, gapEnd;
+      
+      if (i === 0) {
+        // Before first core
+        fromCore = null;
+        toCore = tripCoreStops[0];
+        gapStart = 0;
+        gapEnd = tripCoreIndices[0];
+      } else if (i === tripCoreStops.length) {
+        // After last core
+        fromCore = tripCoreStops[i-1];
+        toCore = null;
+        gapStart = tripCoreIndices[i-1] + 1;
+        gapEnd = stops.length;
+      } else {
+        // Between cores
+        fromCore = tripCoreStops[i-1];
+        toCore = tripCoreStops[i];
+        gapStart = tripCoreIndices[i-1] + 1;
+        gapEnd = tripCoreIndices[i];
+      }
+      
+      // Record branch positions
+      for (let j = gapStart; j < gapEnd; j++) {
+        const st = stops[j];
+        if (nodeTypes[st.stop_id] !== 'branch') continue;
+        
+        const posKey = fromCore + "→" + toCore;
+        
+        if (!branchTopology[st.stop_id]) {
+          branchTopology[st.stop_id] = {};
+        }
+        
+        if (!branchTopology[st.stop_id][posKey]) {
+          branchTopology[st.stop_id][posKey] = {
+            fromCore: fromCore,
+            toCore: toCore,
+            count: 0
+          };
+        }
+        
+        branchTopology[st.stop_id][posKey].count++;
+      }
+    }
+  });
+
   // 10. Zapisz profil w state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
@@ -2978,6 +3025,7 @@ allTrips.forEach(trip => {
     stopMetadata,
     coreStationsSet: coreStationsSet,
     tripCoreIndices: tripCoreIndices,
+    branchTopology,
     version: 3,
   };
   state.routeProfiles[key][dir] = profile;
