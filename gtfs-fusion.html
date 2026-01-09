@@ -3262,7 +3262,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       let bTime = bStops[0]?.departure_time || "99:99:99";
       if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
       if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
-      return aTime.localeCompare(bTime);
+      return timeToMinutes(aTime) - timeToMinutes(bTime);
     });
   }
   
@@ -3297,7 +3297,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       let bTime = bStops[0]?.departure_time || "99:99:99";
       if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
       if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
-      return aTime.localeCompare(bTime);
+      return timeToMinutes(aTime) - timeToMinutes(bTime);
     });
   }
   
@@ -3363,8 +3363,8 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   
   // Sort core trips by anchor time
   coreData.sort((a, b) => {
-    const timeComp = a.anchorTime.localeCompare(b.anchorTime);
-    if (timeComp !== 0) return timeComp;
+    const timeDiff = timeToMinutes(a.anchorTime) - timeToMinutes(b.anchorTime);
+    if (timeDiff !== 0) return timeDiff;
     return b.totalStops - a.totalStops;
   });
   
@@ -3433,7 +3433,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       }
       
       // Insert before this core trip if non-core comes earlier
-      if (coreTimeAtCommon && insertionTime.localeCompare(coreTimeAtCommon) < 0) {
+      if (coreTimeAtCommon && timeToMinutes(insertionTime) < timeToMinutes(coreTimeAtCommon)) {
         insertIdx = i;
         break;
       }
