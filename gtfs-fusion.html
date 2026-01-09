@@ -1671,76 +1671,153 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Generate synthetic stop_sequence for ALL trips based on geography
- * Geography is the source of truth - normalize all sequences for consistency
- * @param {Array<Object>} trips - Array of trip objects
- * @param {Object} stopTimesIndex - Index of stop times by trip_id
- * @param {Object} stopsIndex - Index of stops by stop_id
+ * Normalize stop_sequence based on longest trip pattern per route+direction
+ * All trips in the same route+direction use the same reference pattern
  */
 function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
-  let totalTrips = 0;
-  let fixedTrips = 0;
-  let skippedTrips = 0;
-  
+  // Group trips by route+direction
+  const groups = {};
   trips.forEach(trip => {
-    totalTrips++;
-    
-    const stopTimes = stopTimesIndex[trip.trip_id] || [];
-    if (stopTimes.length === 0) {
-      skippedTrips++;
-      return;
-    }
-    
-    // Sort by original sequence first (best effort starting point)
-    stopTimes.sort((a, b) => 
-      parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)
-    );
-    
-    // Get coordinates for all stops
-    const stopsWithCoords = stopTimes.map((st) => {
-      const stop = stopsIndex[st.stop_id];
-      const lat = parseFloat(stop?.stop_lat);
-      const lon = parseFloat(stop?.stop_lon);
-      
-      if (isNaN(lat) || isNaN(lon)) {
-        return null;
-      }
-      
-      return { stopTime: st, lat, lon };
-    }).filter(Boolean);
-    
-    // Skip if missing coordinates (broken dataset - can't fix)
-    if (stopsWithCoords.length !== stopTimes.length) {
-      console.warn(`⚠️ Trip ${trip.trip_id}: ${stopTimes.length - stopsWithCoords.length} stops missing coordinates`);
-      skippedTrips++;
-      return;
-    }
-    
-    // Calculate cumulative distance from first stop
-    let cumulativeDistance = 0;
-    stopsWithCoords.forEach((s, idx) => {
-      if (idx === 0) {
-        s.distance = 0;
-      } else {
-        const prev = stopsWithCoords[idx - 1];
-        const segmentDist = haversineDistance(prev.lat, prev.lon, s.lat, s.lon);
-        cumulativeDistance += segmentDist;
-        s.distance = cumulativeDistance;
-      }
-    });
-    
-    // Sort by cumulative distance
-    stopsWithCoords.sort((a, b) => a.distance - b.distance);
-    
-    // Assign new stop_sequence (1, 2, 3...)
-    stopsWithCoords.forEach((item, idx) => {
-      item.stopTime.stop_sequence = idx + 1;
-    });
-    
-    fixedTrips++;
+    const key = `${trip.route_id}_${trip.direction_id || 0}`;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(trip);
   });
   
-  console.log(`📍 Stop sequences normalized: ${fixedTrips}/${totalTrips} trips (${skippedTrips} skipped - missing coords)`);
+  let totalGroups = Object.keys(groups).length;
+  let processedTrips = 0;
+  let skippedTrips = 0;
+  
+  // Process each route+direction group
+  Object.entries(groups).forEach(([key, groupTrips]) => {
+    // Find longest trip (this will be the pattern)
+    let longestTrip = groupTrips.reduce((max, t) => {
+      const maxLen = (stopTimesIndex[max.trip_id] || []).length;
+      const tLen = (stopTimesIndex[t.trip_id] || []).length;
+      return tLen > maxLen ? t : max;
+    });
+    
+    // Build geographic pattern from longest trip
+    const patternStops = buildGeographicPattern(longestTrip, stopTimesIndex, stopsIndex);
+    
+    if (!patternStops || patternStops.length === 0) {
+      skippedTrips += groupTrips.length;
+      return;
+    }
+    
+    // Map all trips in this group to the pattern
+    groupTrips.forEach(trip => {
+      mapTripToPattern(trip, patternStops, stopTimesIndex, stopsIndex);
+      processedTrips++;
+    });
+  });
+  
+  console.log(`📍 Stop sequences normalized: ${processedTrips} trips in ${totalGroups} route+direction groups (${skippedTrips} skipped)`);
+}
+
+/**
+ * Build geographic pattern from a trip (usually the longest)
+ * Returns array of {stop_id, position} sorted by geographic distance
+ */
+function buildGeographicPattern(trip, stopTimesIndex, stopsIndex) {
+  const stopTimes = stopTimesIndex[trip.trip_id] || [];
+  if (stopTimes.length === 0) return null;
+  
+  // Sort by original sequence first
+  stopTimes.sort((a, b) => 
+    parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0')
+  );
+  
+  // Get coordinates
+  const stopsWithCoords = stopTimes.map(st => {
+    const stop = stopsIndex[st.stop_id];
+    const lat = parseFloat(stop?.stop_lat);
+    const lon = parseFloat(stop?.stop_lon);
+    
+    if (isNaN(lat) || isNaN(lon)) {
+      return null;
+    }
+    
+    return {
+      stop_id: st.stop_id,
+      lat: lat,
+      lon: lon
+    };
+  }).filter(Boolean);
+  
+  if (stopsWithCoords.length === 0) return null;
+  
+  // Calculate cumulative distance from first stop
+  let cumulativeDistance = 0;
+  stopsWithCoords.forEach((s, idx) => {
+    if (idx === 0) {
+      s.distance = 0;
+    } else {
+      const prev = stopsWithCoords[idx - 1];
+      const segmentDist = haversineDistance(prev.lat, prev.lon, s.lat, s.lon);
+      cumulativeDistance += segmentDist;
+      s.distance = cumulativeDistance;
+    }
+  });
+  
+  // Sort by distance
+  stopsWithCoords.sort((a, b) => a.distance - b.distance);
+  
+  // Assign positions with padding (10, 20, 30... allows insertion of branch stops)
+  return stopsWithCoords.map((s, idx) => ({
+    stop_id: s.stop_id,
+    position: (idx + 1) * 10,
+    lat: s.lat,
+    lon: s.lon
+  }));
+}
+
+/**
+ * Map a trip's stops to the reference pattern
+ */
+function mapTripToPattern(trip, patternStops, stopTimesIndex, stopsIndex) {
+  const tripStops = stopTimesIndex[trip.trip_id] || [];
+  
+  tripStops.forEach(st => {
+    // Try to find this stop in the pattern
+    const patternEntry = patternStops.find(p => p.stop_id === st.stop_id);
+    
+    if (patternEntry) {
+      // Direct match - use pattern position
+      st.stop_sequence = patternEntry.position;
+    } else {
+      // Branch stop not in pattern - find insertion position
+      st.stop_sequence = findInsertionPosition(st.stop_id, patternStops, stopsIndex);
+    }
+  });
+}
+
+/**
+ * Find insertion position for a branch stop not in the pattern
+ * Places it after the geographically closest pattern stop
+ */
+function findInsertionPosition(stopId, patternStops, stopsIndex) {
+  const stop = stopsIndex[stopId];
+  const stopLat = parseFloat(stop?.stop_lat);
+  const stopLon = parseFloat(stop?.stop_lon);
+  
+  if (isNaN(stopLat) || isNaN(stopLon)) {
+    return 999; // Fallback for missing coords
+  }
+  
+  // Find closest pattern stop by distance
+  let minDist = Infinity;
+  let closestIdx = 0;
+  
+  patternStops.forEach((p, idx) => {
+    const dist = haversineDistance(stopLat, stopLon, p.lat, p.lon);
+    if (dist < minDist) {
+      minDist = dist;
+      closestIdx = idx;
+    }
+  });
+  
+  // Insert after closest pattern stop (position + 1)
+  return patternStops[closestIdx].position + 1;
 }
 
 // ═══════════════════════════════════════════════════════════════
