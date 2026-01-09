@@ -933,6 +933,19 @@ let state = {
   currentTimetableData: {
     allTrips: [],           // wszystkie trips (włącznie z ukrytymi)
     stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
+  },
+  
+  // Loading benchmark data
+  benchmark: {
+    startTime: 0,
+    endTime: 0,
+    duration: 0,
+    memoryBefore: 0,
+    memoryAfter: 0,
+    memoryPeak: 0,
+    memoryUsed: 0,
+    fileSize: 0,
+    recordCounts: {}
   }
 };
 
@@ -1824,12 +1837,30 @@ rawHeaders.forEach((h, i) => {
       
       return null;
     }
+    
+    // BENCHMARK: Helper function to track peak memory
+    function updateMemoryPeak() {
+      if (performance.memory && state.benchmark.memoryPeak !== undefined) {
+        const current = performance.memory.usedJSHeapSize;
+        if (current > state.benchmark.memoryPeak) {
+          state.benchmark.memoryPeak = current;
+        }
+      }
+    }
 
     async function handleFileUpload(e) {
       const file = e.target.files[0]; if (!file) return;
+      
+      // BENCHMARK: Start tracking
+      state.benchmark.startTime = performance.now();
+      state.benchmark.fileSize = file.size;
+      state.benchmark.memoryBefore = performance.memory ? performance.memory.usedJSHeapSize : 0;
+      state.benchmark.memoryPeak = state.benchmark.memoryBefore;
+      
       const t0 = performance.now();
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
+      updateMemoryPeak(); // Track memory
       try {
         // Check if fflate is available
         let zip;
@@ -1867,6 +1898,7 @@ rawHeaders.forEach((h, i) => {
 // PARALLEL LOADING & PARSING - małe pliki jednocześnie
 // ==========================================
 state.loadingStep = 'Wczytywanie i parsowanie plików (równolegle)...'; render();
+updateMemoryPeak(); // Track memory
 
 const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
   routesFile.async('string').then(text => parseCSV(text)),
@@ -1876,12 +1908,15 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
+        updateMemoryPeak(); // Track memory
         state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
         const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
           state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
+          updateMemoryPeak(); // Track memory during parsing
         });
+        updateMemoryPeak(); // Track memory
         
         // Parse shapes.txt if available (optional)
         let shapesIndex = {};
@@ -1892,7 +1927,9 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
               state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
               state.loadingProgressPercent = percent || state.loadingProgressPercent;
               render();
+              updateMemoryPeak(); // Track memory during parsing
             });
+            updateMemoryPeak(); // Track memory
             
             // Try to load from cache
             let simplifiedShapes = loadCachedShapes(rawShapes);
@@ -1909,12 +1946,14 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
             // MEMORY OPTIMIZATION: Release temporary data after processing
             rawShapes = null;
             simplifiedShapes = null;
+            updateMemoryPeak(); // Track memory
           } catch (err) {
             // Continue without shapes - they're optional
           }
         }
         
         state.loadingStep = 'Budowanie indeksów...'; render();
+        updateMemoryPeak(); // Track memory
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -2030,6 +2069,35 @@ if (dates.length > 0) {
   
   state.selectedDate = selectedDate;
 }
+
+        // BENCHMARK: End tracking and calculate results
+        state.benchmark.endTime = performance.now();
+        state.benchmark.duration = state.benchmark.endTime - state.benchmark.startTime;
+        state.benchmark.memoryAfter = performance.memory ? performance.memory.usedJSHeapSize : 0;
+        state.benchmark.memoryUsed = state.benchmark.memoryAfter - state.benchmark.memoryBefore;
+        
+        // Record counts
+        state.benchmark.recordCounts = {
+          routes: routes?.length || 0,
+          trips: trips?.length || 0,
+          stops: stops?.length || 0,
+          stopTimes: Object.keys(stopTimesIndex || {}).reduce((sum, tripId) => sum + (stopTimesIndex[tripId]?.length || 0), 0),
+          shapes: Object.keys(shapesIndex || {}).length || 0,
+          calendar: calendar?.length || 0
+        };
+        
+        // Log benchmark to console
+        console.log('=== GTFS Loading Benchmark ===');
+        console.log(`File size: ${(state.benchmark.fileSize / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`Loading time: ${(state.benchmark.duration / 1000).toFixed(2)} seconds`);
+        if (performance.memory) {
+          console.log(`Memory before: ${(state.benchmark.memoryBefore / 1024 / 1024).toFixed(2)} MB`);
+          console.log(`Memory after: ${(state.benchmark.memoryAfter / 1024 / 1024).toFixed(2)} MB`);
+          console.log(`Memory used: ${(state.benchmark.memoryUsed / 1024 / 1024).toFixed(2)} MB`);
+          console.log(`Peak memory: ${(state.benchmark.memoryPeak / 1024 / 1024).toFixed(2)} MB`);
+        }
+        console.log('Record counts:', state.benchmark.recordCounts);
+        console.log('==============================');
 
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
