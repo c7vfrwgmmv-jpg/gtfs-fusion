@@ -1374,16 +1374,15 @@ function looksLikeGarbageLabel(s, shortName) {
  * @param {number} lon2 - End longitude
  * @returns {number} Bearing in degrees (0-360)
  */
+const TO_RAD = Math.PI / 180;
+const TO_DEG = 180 / Math.PI;
 function calculateBearing(lat1, lon1, lat2, lon2) {
-  const toRad = Math.PI / 180;
-  const toDeg = 180 / Math.PI;
+  const dLon = (lon2 - lon1) * TO_RAD;
+  const y = Math.sin(dLon) * Math.cos(lat2 * TO_RAD);
+  const x = Math.cos(lat1 * TO_RAD) * Math.sin(lat2 * TO_RAD) -
+            Math.sin(lat1 * TO_RAD) * Math.cos(lat2 * TO_RAD) * Math.cos(dLon);
   
-  const dLon = (lon2 - lon1) * toRad;
-  const y = Math.sin(dLon) * Math.cos(lat2 * toRad);
-  const x = Math.cos(lat1 * toRad) * Math.sin(lat2 * toRad) -
-            Math.sin(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.cos(dLon);
-  
-  let bearing = Math.atan2(y, x) * toDeg;
+  let bearing = Math.atan2(y, x) * TO_DEG;
   return (bearing + 360) % 360; // Normalize to 0-360
 }
 
@@ -1426,17 +1425,17 @@ function findReversedPair(tripPatterns) {
       const seqB = tripPatterns[j].sequence;
       if (seqB.length === 0) continue;
       
-      // Check if B is reversed version of A
-      const reversedB = [...seqB].reverse();
-      
-      // Calculate coverage - how many stops match
-      const minLen = Math.min(seqA.length, reversedB.length);
+      // Check if B is reversed version of A by comparing in reverse order
+      const maxLen = Math.max(seqA.length, seqB.length);
+      const minLen = Math.min(seqA.length, seqB.length);
       let matches = 0;
+      
+      // Compare seqA with reversed seqB without creating a copy
       for (let k = 0; k < minLen; k++) {
-        if (seqA[k] === reversedB[k]) matches++;
+        if (seqA[k] === seqB[seqB.length - 1 - k]) matches++;
       }
       
-      const coverage = matches / Math.max(seqA.length, reversedB.length);
+      const coverage = matches / maxLen;
       
       // If coverage >= 80%, we found reversed pair
       if (coverage >= 0.8) {
@@ -1507,7 +1506,13 @@ function clusterByBearing(bearingData) {
     const next = sorted[(i + 1) % sorted.length].bearing;
     
     // Calculate gap (considering wrap-around at 360°)
-    let gap = (next - current + 360) % 360;
+    let gap;
+    if (i === sorted.length - 1) {
+      // Wrap-around case: last to first
+      gap = (360 - current) + next;
+    } else {
+      gap = next - current;
+    }
     
     if (gap > maxGap) {
       maxGap = gap;
