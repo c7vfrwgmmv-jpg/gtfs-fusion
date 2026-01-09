@@ -2947,9 +2947,7 @@ allTrips.forEach(trip => {
       if (pType === '1') meta.hasPickup1 = true;
       if (dType === '1') meta.hasDropOff1 = true;
       if (pType === '1' && dType === '1') meta.isStrictlyTechnical = true;
-      if (pType === '2' || pType === '3' || dType === '2' || dType === '3') {
-        meta.isOnDemand = true;
-      }
+      // Note: Values 2 and 3 are treated like 0 (regular service), not as on-demand
       
       // Sprawdź czy to pierwszy przystanek z pickup_type=1
       if (i === 0 && pType === '1') {
@@ -5092,7 +5090,8 @@ const processedTrips = trips.map(trip => {
       const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
       const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
 
-      isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
+      // Note: Values 2 and 3 are treated like 0 (regular service), not as on-demand
+      isOnDemand = false;
       const isStrictlyTechnical = (pType === "1" && dType === "1");
 
       let isLikelyDepot = isStrictlyTechnical;
