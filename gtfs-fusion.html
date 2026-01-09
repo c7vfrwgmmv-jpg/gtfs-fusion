@@ -3156,8 +3156,26 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
       id: stopIds[0]
     }));
 
+    // Sort branch groups by position to avoid index shifting issues
+    // Process from end to beginning of the route
+    const groupsArray = Object.entries(branchGroups).map(([posKey, group]) => ({
+      posKey,
+      ...group
+    }));
+    
+    // Sort by fromCore position (descending), so we insert from end to start
+    groupsArray.sort((a, b) => {
+      const aFromIdx = a.fromCore ? masterList.findIndex(m => 
+        (m.stopIds && m.stopIds.includes(a.fromCore)) || m.id === a.fromCore
+      ) : -1;
+      const bFromIdx = b.fromCore ? masterList.findIndex(m => 
+        (m.stopIds && m.stopIds.includes(b.fromCore)) || m.id === b.fromCore
+      ) : -1;
+      return bFromIdx - aFromIdx; // Descending order
+    });
+
     // Insert branch groups based on topology
-    for (const [posKey, group] of Object.entries(branchGroups)) {
+    for (const group of groupsArray) {
       const {fromCore, toCore, stops} = group;
       
       // Group stops by station
