@@ -1769,23 +1769,37 @@ function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
   });
   
   // Get most common start stop
-  let startStopId = Object.keys(startCandidates).reduce((a, b) => 
-    startCandidates[a] > startCandidates[b] ? a : b
-  );
-  
-  let startStop = stopsWithCoords.find(s => s.stop_id === startStopId);
-  if (!startStop) {
-    // Fallback to first stop in array
-    startStop = stopsWithCoords[0];
-  }
-  
-  // Calculate distance from start stop for ALL stops
-  stopsWithCoords.forEach(s => {
-    s.distance = haversineDistance(
-      startStop.lat, startStop.lon,
-      s.lat, s.lon
+  const startCandidateKeys = Object.keys(startCandidates);
+  if (startCandidateKeys.length === 0) {
+    // No valid start candidates, fall back to first stop in array
+    const firstStop = stopsWithCoords[0];
+    
+    // Calculate distance from first stop for ALL stops
+    stopsWithCoords.forEach(s => {
+      s.distance = haversineDistance(
+        firstStop.lat, firstStop.lon,
+        s.lat, s.lon
+      );
+    });
+  } else {
+    let startStopId = startCandidateKeys.reduce((a, b) => 
+      startCandidates[a] > startCandidates[b] ? a : b
     );
-  });
+    
+    let startStop = stopsWithCoords.find(s => s.stop_id === startStopId);
+    if (!startStop) {
+      // Fallback to first stop in array
+      startStop = stopsWithCoords[0];
+    }
+    
+    // Calculate distance from start stop for ALL stops
+    stopsWithCoords.forEach(s => {
+      s.distance = haversineDistance(
+        startStop.lat, startStop.lon,
+        s.lat, s.lon
+      );
+    });
+  }
   
   // Sort by distance from start
   stopsWithCoords.sort((a, b) => a.distance - b.distance);
