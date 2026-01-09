@@ -3078,29 +3078,153 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
 function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
   const profile = getCurrentRouteProfile();
   
-  if (!profile || !Array.isArray(profile. coreStops) || profile.coreStops.length === 0) {
+  if (!profile || !Array.isArray(profile.coreStops) || profile.coreStops.length === 0) {
     return buildMasterList(sortedTrips, tripStopMaps, stopsIndex);
   }
 
-  const { coreStops, nodes } = profile;
+  const { coreStops, branchTopology, nodeTypes } = profile;
+
+  const getStationDisplayName = (stationId, stopIds) => {
+    if (stopsIndex[stationId]?.stop_name) {
+      return stopsIndex[stationId].stop_name;
+    }
+    const firstStop = stopsIndex[stopIds[0]];
+    return firstStop?.stop_name || stationId;
+  };
+
+  // Use topology-based ordering if available
+  if (branchTopology) {
+    // Step 1: Select best position for each branch
+    const branchPlacements = {};
+
+    for (const [stopId, positions] of Object.entries(branchTopology)) {
+      // Skip depot stops
+      if (nodeTypes && nodeTypes[stopId] === 'tail') {
+        continue;
+      }
+      
+      // Find position with maximum count
+      let bestPosition = null;
+      let maxCount = 0;
+      
+      for (const [posKey, data] of Object.entries(positions)) {
+        if (data.count > maxCount) {
+          maxCount = data.count;
+          bestPosition = data;
+        }
+      }
+      
+      if (bestPosition) {
+        branchPlacements[stopId] = {
+          fromCore: bestPosition.fromCore,
+          toCore: bestPosition.toCore,
+          count: maxCount
+        };
+      }
+    }
+
+    // Step 2: Group branches by position
+    const branchGroups = {};
+
+    for (const [stopId, placement] of Object.entries(branchPlacements)) {
+      const key = `${placement.fromCore}→${placement.toCore}`;
+      
+      if (!branchGroups[key]) {
+        branchGroups[key] = {
+          fromCore: placement.fromCore,
+          toCore: placement.toCore,
+          stops: []
+        };
+      }
+      
+      branchGroups[key].stops.push(stopId);
+    }
+
+    // Step 3: Build masterList with core stops as skeleton
+    const stopsByStation = new Map();
+    coreStops.forEach(sid => {
+      const stationId = getStationId(sid, stopsIndex);
+      if (!stopsByStation.has(stationId)) {
+        stopsByStation.set(stationId, []);
+      }
+      stopsByStation.get(stationId).push(sid);
+    });
+
+    let masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
+      name: getStationDisplayName(stationId, stopIds),
+      stopIds: stopIds,
+      id: stopIds[0]
+    }));
+
+    // Insert branch groups based on topology
+    for (const [posKey, group] of Object.entries(branchGroups)) {
+      const {fromCore, toCore, stops} = group;
+      
+      // Group stops by station
+      const branchByStation = new Map();
+      stops.forEach(sid => {
+        const stationId = getStationId(sid, stopsIndex);
+        if (!branchByStation.has(stationId)) {
+          branchByStation.set(stationId, []);
+        }
+        branchByStation.get(stationId).push(sid);
+      });
+
+      const branchItems = Array.from(branchByStation.entries()).map(([stationId, stopIds]) => ({
+        name: getStationDisplayName(stationId, stopIds),
+        stopIds: stopIds,
+        id: stopIds[0]
+      }));
+
+      if (fromCore === null && toCore !== null) {
+        // Route start - insert BEFORE toCore
+        const toIdx = masterList.findIndex(m => 
+          (m.stopIds && m.stopIds.includes(toCore)) || m.id === toCore
+        );
+        if (toIdx >= 0) {
+          masterList.splice(toIdx, 0, ...branchItems);
+        }
+      } 
+      else if (toCore === null && fromCore !== null) {
+        // Route terminus - insert AFTER fromCore
+        const fromIdx = masterList.findIndex(m => 
+          (m.stopIds && m.stopIds.includes(fromCore)) || m.id === fromCore
+        );
+        if (fromIdx >= 0) {
+          masterList.splice(fromIdx + 1, 0, ...branchItems);
+        }
+      } 
+      else if (fromCore !== null && toCore !== null) {
+        // Internal branch - insert BETWEEN fromCore and toCore
+        const fromIdx = masterList.findIndex(m => 
+          (m.stopIds && m.stopIds.includes(fromCore)) || m.id === fromCore
+        );
+        const toIdx = masterList.findIndex(m => 
+          (m.stopIds && m.stopIds.includes(toCore)) || m.id === toCore
+        );
+        
+        if (fromIdx >= 0 && toIdx > fromIdx) {
+          // Insert after fromCore (before toCore)
+          masterList.splice(fromIdx + 1, 0, ...branchItems);
+        }
+      }
+    }
+
+    return masterList;
+  }
+
+  // FALLBACK: Old logic for backward compatibility (when branchTopology is missing)
+  const coreSet = new Set(coreStops);
 
   // 1. Bazowa lista = kręgosłup - grupuj po stacji
   const stopsByStation = new Map();
   coreStops.forEach(sid => {
     const stationId = getStationId(sid, stopsIndex);
     if (!stopsByStation.has(stationId)) {
-      stopsByStation. set(stationId, []);
+      stopsByStation.set(stationId, []);
     }
     stopsByStation.get(stationId).push(sid);
   });
-
-  const getStationDisplayName = (stationId, stopIds) => {
-    if (stopsIndex[stationId]?.stop_name) {
-      return stopsIndex[stationId]. stop_name;
-    }
-    const firstStop = stopsIndex[stopIds[0]];
-    return firstStop?.stop_name || stationId;
-  };
 
   let masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
     name: getStationDisplayName(stationId, stopIds),
@@ -3109,16 +3233,15 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
   }));
 
   // 2. Znajdź branch-prefiksy
-  const coreSet = new Set(coreStops);
   const branchCandidatesPerCore = {};
 
   sortedTrips.forEach(trip => {
     const sts = tripStopMaps[trip.trip_id] || [];
-    if (! sts.length) return;
+    if (!sts.length) return;
 
     let firstCoreIdx = -1;
     for (let i = 0; i < sts.length; i++) {
-      if (coreSet.has(sts[i]. stop_id)) {
+      if (coreSet.has(sts[i].stop_id)) {
         firstCoreIdx = i;
         break;
       }
@@ -3129,7 +3252,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
     for (let i = 0; i < firstCoreIdx; i++) {
       const sid = sts[i].stop_id;
       if (coreSet.has(sid)) continue;
-      if (! branchCandidatesPerCore[entryCoreStopId]) {
+      if (!branchCandidatesPerCore[entryCoreStopId]) {
         branchCandidatesPerCore[entryCoreStopId] = new Set();
       }
       branchCandidatesPerCore[entryCoreStopId].add(sid);
@@ -3139,7 +3262,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
   // 3. Wstaw branch-prefiksy do masterList
   coreStops.forEach(coreId => {
     const branchesSet = branchCandidatesPerCore[coreId];
-    if (!branchesSet || ! branchesSet.size) return;
+    if (!branchesSet || !branchesSet.size) return;
 
     const branches = Array.from(branchesSet);
     const coreIdx = masterList.findIndex(m => 
@@ -3174,7 +3297,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
 
       masterList.splice(insertPos, 0, {
         id: stopIds[0],
-        name:  getStationDisplayName(stationId, stopIds),
+        name: getStationDisplayName(stationId, stopIds),
         stopIds: stopIds
       });
       insertPos++;
@@ -3209,8 +3332,8 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
       }
       
       if (idx !== -1) {
-        if (masterList[idx].stopIds && ! masterList[idx].stopIds. includes(sId)) {
-          masterList[idx].stopIds. push(sId);
+        if (masterList[idx].stopIds && !masterList[idx].stopIds.includes(sId)) {
+          masterList[idx].stopIds.push(sId);
         }
         lastIdx = idx;
       } else {
@@ -3220,7 +3343,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
           name,
           stopIds: [sId]
         };
-        masterList. splice(lastIdx + 1, 0, newEntry);
+        masterList.splice(lastIdx + 1, 0, newEntry);
         // Insert the stationId into the cache at the same position
         masterListStationIds.splice(lastIdx + 1, 0, stationId);
         lastIdx++;
