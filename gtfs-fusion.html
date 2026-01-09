@@ -2985,201 +2985,89 @@ allTrips.forEach(trip => {
 }
 
 function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
-  const masterList = [];
-  const seenStations = new Set();
-  
-  // Group stops by station
-  const stopsByStation = new Map();
-  
-  sortedTrips.forEach(trip => {
-    const tripStops = tripStopMaps[trip.trip_id] || [];
-    tripStops.forEach(s => {
-      const sId = s.stop_id;
-      const stationId = getStationId(sId, stopsIndex);
-      
-      // If we haven't seen this station yet, add it to the list
-      if (!seenStations.has(stationId)) {
-        seenStations.add(stationId);
-        
-        // Create entry for this station
-        const stop = stopsIndex[sId];
-        const name = stopsIndex[stationId]?.stop_name || stop?.stop_name || stationId;
-        
-        masterList.push({
-          id: sId,
-          name: name,
-          stopIds: [sId]
-        });
-        
-        stopsByStation.set(stationId, masterList.length - 1);
-      } else {
-        // Add this stop_id to the existing station entry if not already there
-        const idx = stopsByStation.get(stationId);
-        if (idx !== undefined && masterList[idx]) {
-          if (!masterList[idx].stopIds.includes(sId)) {
-            masterList[idx].stopIds.push(sId);
-          }
-        }
-      }
-    });
-  });
-  
-  return masterList;
-}
-
-function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
+  // Step 1: Get core stops from profile
   const profile = getCurrentRouteProfile();
-  
-  if (!profile || !Array.isArray(profile. coreStops) || profile.coreStops.length === 0) {
-    return buildMasterList(sortedTrips, tripStopMaps, stopsIndex);
+  if (!profile || !profile.coreStops) {
+    // This should never happen, but fail gracefully
+    return [];
   }
-
-  const { coreStops, nodes } = profile;
-
-  // 1. Bazowa lista = kręgosłup - grupuj po stacji
+  
+  const coreStops = profile.coreStops;
+  
+  // Step 2: Group core stops by station (merged stops)
   const stopsByStation = new Map();
-  coreStops.forEach(sid => {
-    const stationId = getStationId(sid, stopsIndex);
+  
+  coreStops.forEach(stopId => {
+    const stationId = getStationId(stopId, stopsIndex);
     if (!stopsByStation.has(stationId)) {
-      stopsByStation. set(stationId, []);
+      stopsByStation.set(stationId, []);
     }
-    stopsByStation.get(stationId).push(sid);
+    stopsByStation.get(stationId).push(stopId);
   });
-
+  
+  // Step 3: Build base master list from core
   const getStationDisplayName = (stationId, stopIds) => {
     if (stopsIndex[stationId]?.stop_name) {
-      return stopsIndex[stationId]. stop_name;
+      return stopsIndex[stationId].stop_name;
     }
     const firstStop = stopsIndex[stopIds[0]];
     return firstStop?.stop_name || stationId;
   };
 
-  let masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
+  // Base master list = core stops grouped by station
+  const masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
+    id: stopIds[0],
     name: getStationDisplayName(stationId, stopIds),
-    stopIds: stopIds,
-    id: stopIds[0]
+    stopIds: stopIds
   }));
-
-  // 2. Znajdź branch-prefiksy
-  const coreSet = new Set(coreStops);
-  const branchCandidatesPerCore = {};
-
-  sortedTrips.forEach(trip => {
-    const sts = tripStopMaps[trip.trip_id] || [];
-    if (! sts.length) return;
-
-    let firstCoreIdx = -1;
-    for (let i = 0; i < sts.length; i++) {
-      if (coreSet.has(sts[i]. stop_id)) {
-        firstCoreIdx = i;
-        break;
-      }
-    }
-    if (firstCoreIdx <= 0) return;
-
-    const entryCoreStopId = sts[firstCoreIdx].stop_id;
-    for (let i = 0; i < firstCoreIdx; i++) {
-      const sid = sts[i].stop_id;
-      if (coreSet.has(sid)) continue;
-      if (! branchCandidatesPerCore[entryCoreStopId]) {
-        branchCandidatesPerCore[entryCoreStopId] = new Set();
-      }
-      branchCandidatesPerCore[entryCoreStopId].add(sid);
-    }
-  });
-
-  // 3. Wstaw branch-prefiksy do masterList
-  coreStops.forEach(coreId => {
-    const branchesSet = branchCandidatesPerCore[coreId];
-    if (!branchesSet || ! branchesSet.size) return;
-
-    const branches = Array.from(branchesSet);
-    const coreIdx = masterList.findIndex(m => 
-      (m.stopIds && m.stopIds.includes(coreId)) || m.id === coreId
-    );
-    if (coreIdx === -1) return;
-
-    const branchByStation = new Map();
-    branches.forEach(sid => {
-      const stationId = getStationId(sid, stopsIndex);
-      if (!branchByStation.has(stationId)) {
-        branchByStation.set(stationId, []);
-      }
-      branchByStation.get(stationId).push(sid);
-    });
-
-    let insertPos = coreIdx;
-    branchByStation.forEach((stopIds, stationId) => {
-      // Check if this STATION (not just stop_id) already exists in masterList
-      const alreadyExists = masterList.some(m => {
-        // Get the stationId for the masterList entry
-        if (m.stopIds && m.stopIds.length > 0) {
-          const mStationId = getStationId(m.stopIds[0], stopsIndex);
-          return mStationId === stationId;
-        } else if (m.id) {
-          const mStationId = getStationId(m.id, stopsIndex);
-          return mStationId === stationId;
-        }
-        return false;
-      });
-      if (alreadyExists) return;
-
-      masterList.splice(insertPos, 0, {
-        id: stopIds[0],
-        name:  getStationDisplayName(stationId, stopIds),
-        stopIds: stopIds
-      });
-      insertPos++;
-    });
-  });
-
-  // 4. Dodaj pozostałe przystanki z tripów
-  // Cache stationId for each masterList entry to avoid repeated getStationId calls
-  const masterListStationIds = masterList.map(m => {
-    if (m.stopIds && m.stopIds.length > 0) {
-      return getStationId(m.stopIds[0], stopsIndex);
-    } else if (m.id) {
-      return getStationId(m.id, stopsIndex);
-    }
-    return null;
+  
+  // Step 4: Add branch stops (stops outside core)
+  // Cache stationId for each masterList entry for performance
+  const masterListStationIds = masterList.map(entry => {
+    return getStationId(entry.stopIds[0], stopsIndex);
   });
   
+  // Process all trips to add stops not in core
   sortedTrips.forEach(trip => {
-    let lastIdx = -1;
     const tripStops = tripStopMaps[trip.trip_id] || [];
-    tripStops.forEach(s => {
-      const sId = s.stop_id;
-      const stationId = getStationId(sId, stopsIndex);
+    let lastMasterIdx = -1;
+    
+    tripStops.forEach(stopTime => {
+      const stopId = stopTime.stop_id;
+      const stationId = getStationId(stopId, stopsIndex);
       
-      // Find the station in masterList by comparing stationIds
-      let idx = -1;
-      for (let i = 0; i < masterList.length; i++) {
+      // Find if this station already exists in masterList
+      let existingIdx = -1;
+      for (let i = 0; i < masterListStationIds.length; i++) {
         if (masterListStationIds[i] === stationId) {
-          idx = i;
+          existingIdx = i;
           break;
         }
       }
       
-      if (idx !== -1) {
-        if (masterList[idx].stopIds && ! masterList[idx].stopIds. includes(sId)) {
-          masterList[idx].stopIds. push(sId);
+      if (existingIdx !== -1) {
+        // Station already exists - add stop_id if not present
+        if (!masterList[existingIdx].stopIds.includes(stopId)) {
+          masterList[existingIdx].stopIds.push(stopId);
         }
-        lastIdx = idx;
+        lastMasterIdx = existingIdx;
       } else {
-        const name = getStationDisplayName(stationId, [sId]);
-        const newEntry = { 
-          id: sId, 
-          name,
-          stopIds: [sId]
+        // NEW station - insert RIGHT AFTER the last common stop
+        const newEntry = {
+          id: stopId,
+          name: getStationDisplayName(stationId, [stopId]),
+          stopIds: [stopId]
         };
-        masterList. splice(lastIdx + 1, 0, newEntry);
-        // Insert the stationId into the cache at the same position
-        masterListStationIds.splice(lastIdx + 1, 0, stationId);
-        lastIdx++;
+        
+        // Insert after lastMasterIdx (or at beginning if no common stop yet)
+        const insertPos = lastMasterIdx + 1;
+        masterList.splice(insertPos, 0, newEntry);
+        masterListStationIds.splice(insertPos, 0, stationId);
+        lastMasterIdx = insertPos;
       }
     });
   });
-
+  
   return masterList;
 }
 
@@ -5262,7 +5150,7 @@ sortedTrips.forEach(t => {
   newTripStopMaps[t.trip_id] = t.pStops;
 });
 
-const masterList = buildMasterListWithProfile(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
+const masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
 // === POPULATE CACHED TIMETABLE DATA FOR MODAL ===
