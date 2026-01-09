@@ -1485,7 +1485,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
     tripIdx: -1,
     stopIdx: -1,
             seqIdx: -1,
-            arrIdx: -1,
+            // arrIdx: -1,  // REMOVED - arrival_time no longer stored (memory optimization)
             depIdx: -1,
             pickupIdx: -1,
             dropoffIdx: -1
@@ -1496,7 +1496,7 @@ rawHeaders.forEach((h, i) => {
             if (normalized === 'trip_id') headers.tripIdx = i;
             else if (normalized === 'stop_id') headers.stopIdx = i;
             else if (normalized === 'stop_sequence') headers.seqIdx = i;
-            else if (normalized === 'arrival_time') headers.arrIdx = i;
+            // else if (normalized === 'arrival_time') headers.arrIdx = i;  // REMOVED - not used
             else if (normalized === 'departure_time') headers.depIdx = i;
             else if (normalized === 'pickup_type') headers.pickupIdx = i;
             else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
