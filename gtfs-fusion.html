@@ -1815,6 +1815,7 @@ function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
  */
 function mapTripToPattern(trip, pattern, stopTimesIndex) {
   const tripStops = stopTimesIndex[trip.trip_id] || [];
+  let missingStops = 0;
   
   tripStops.forEach(st => {
     // Find this stop in the pattern
@@ -1825,10 +1826,15 @@ function mapTripToPattern(trip, pattern, stopTimesIndex) {
       st.stop_sequence = patternEntry.position;
     } else {
       // Should never happen (all stops are in union), but fallback
-      console.warn(`Stop ${st.stop_id} not found in pattern for trip ${trip.trip_id}`);
+      missingStops++;
       st.stop_sequence = FALLBACK_STOP_SEQUENCE;
     }
   });
+  
+  // Report missing stops once per trip (if any)
+  if (missingStops > 0) {
+    console.warn(`Trip ${trip.trip_id}: ${missingStops} stops not found in pattern`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
