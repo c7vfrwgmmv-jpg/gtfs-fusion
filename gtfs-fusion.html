@@ -943,7 +943,9 @@ let stationNameToIdCache = null;
 let cachedStopsData = null;
 let stopsDataHash = null;
 let stopsDataWorker = null;
+let stopsDataWorkerBlobUrl = null;
 let stopsDataBuilding = false;
+let stopsDataPendingCallbacks = [];
 
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
@@ -1848,6 +1850,16 @@ lastStopsDataHash = null;
 cachedStopsData = null;
 stopsDataHash = null;
 stopsDataBuilding = false;
+stopsDataPendingCallbacks = [];
+// Cleanup worker to prevent memory leaks
+if (stopsDataWorker) {
+  stopsDataWorker.terminate();
+  stopsDataWorker = null;
+}
+if (stopsDataWorkerBlobUrl) {
+  URL.revokeObjectURL(stopsDataWorkerBlobUrl);
+  stopsDataWorkerBlobUrl = null;
+}
 
 state.gtfsData = {
   routes,
@@ -3976,8 +3988,8 @@ function createStopsDataWorker() {
   `;
   
   const blob = new Blob([workerCode], { type: 'application/javascript' });
-  const workerUrl = URL.createObjectURL(blob);
-  return new Worker(workerUrl);
+  stopsDataWorkerBlobUrl = URL.createObjectURL(blob);
+  return new Worker(stopsDataWorkerBlobUrl);
 }
 
 function buildStopsData(callback) {
@@ -3992,9 +4004,10 @@ function buildStopsData(callback) {
     return;
   }
   
-  // Already building
+  // Already building - queue callback
   if (stopsDataBuilding) {
-    console.log('[Performance] stopsData already building...');
+    console.log('[Performance] stopsData already building, queueing callback...');
+    stopsDataPendingCallbacks.push(callback);
     return;
   }
   
@@ -4013,12 +4026,26 @@ function buildStopsData(callback) {
     
     console.log('[Performance] stopsData ready from Worker!');
     callback(cachedStopsData);
+    
+    // Execute pending callbacks
+    while (stopsDataPendingCallbacks.length > 0) {
+      const pendingCallback = stopsDataPendingCallbacks.shift();
+      pendingCallback(cachedStopsData);
+    }
   };
   
   stopsDataWorker.onerror = (err) => {
     console.error('[Worker] Error:', err);
     stopsDataBuilding = false;
+    stopsDataWorker.terminate();
+    stopsDataWorker = null;
     buildStopsDataSync(callback);
+    
+    // Execute pending callbacks with sync fallback
+    while (stopsDataPendingCallbacks.length > 0) {
+      const pendingCallback = stopsDataPendingCallbacks.shift();
+      pendingCallback(cachedStopsData);
+    }
   };
   
   // Send data to worker
