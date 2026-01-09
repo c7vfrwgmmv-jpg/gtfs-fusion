@@ -2755,7 +2755,7 @@ function buildRouteProfileForCurrentSelection() {
 
   // 5. Wstępne „mocne” krawędzie jako kandydaci kręgosłupa
   const coreEdges = new Set();
-  const minCoreFraction = 0.4; // heurystyka: ≥ 40% trips
+  const minCoreFraction = 0.3; // heurystyka: ≥ 40% trips
 
   Object.values(edges).forEach(e => {
     const frac = e.count / tripCount;
