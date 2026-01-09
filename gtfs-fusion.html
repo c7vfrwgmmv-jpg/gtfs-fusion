@@ -2947,7 +2947,11 @@ allTrips.forEach(trip => {
       if (pType === '1') meta.hasPickup1 = true;
       if (dType === '1') meta.hasDropOff1 = true;
       if (pType === '1' && dType === '1') meta.isStrictlyTechnical = true;
-      // Note: Values 2 and 3 are treated like 0 (regular service), not as on-demand
+      // Note: Values 2 and 3 are flagged as on-demand for visual indicator only
+      // They are treated like 0 (regular service) for all filtering/classification logic
+      if (pType === '2' || pType === '3' || dType === '2' || dType === '3') {
+        meta.isOnDemand = true;
+      }
       
       // Sprawdź czy to pierwszy przystanek z pickup_type=1
       if (i === 0 && pType === '1') {
@@ -5076,6 +5080,7 @@ const processedTrips = trips.map(trip => {
         isStopTech = true;
       }
       // Priorytet 3: On-demand = PASAŻERSKI (tylko na wzorcowej trasie!)
+      // Note: Values 2 and 3 are treated as regular passenger stops, not technical stops
       else if (meta.isOnDemand) {
         isStopTech = false;
         isOnDemand = true;
@@ -5090,8 +5095,9 @@ const processedTrips = trips.map(trip => {
       const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
       const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
 
-      // Note: Values 2 and 3 are treated like 0 (regular service), not as on-demand
-      isOnDemand = false;
+      // Note: Values 2 and 3 are flagged as on-demand for visual indicator only
+      // They are treated like 0 (regular service) for all filtering/classification logic
+      isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
       const isStrictlyTechnical = (pType === "1" && dType === "1");
 
       let isLikelyDepot = isStrictlyTechnical;
