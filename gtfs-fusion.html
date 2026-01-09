@@ -1261,10 +1261,7 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
         const originalSize = jsonStr.length;
         
         localStorage.setItem(cacheKey, jsonStr);
-        
-        console.log(`Shapes cached: ${cacheKey}, size: ${(originalSize / 1024).toFixed(1)}KB`);
       } catch (e) {
-        console.warn('Failed to cache shapes:', e.message);
         // If storage quota exceeded, try to clear old caches
         if (e.name === 'QuotaExceededError') {
           try {
@@ -1275,9 +1272,8 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
                 localStorage.removeItem(key);
               }
             }
-            console.log('Cleared old shape caches due to quota');
           } catch (e2) {
-            console.warn('Failed to clear old caches:', e2.message);
+            // Ignore cache cleanup errors - they don't affect core functionality
           }
         }
       }
@@ -1310,10 +1306,8 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
           }
         });
         
-        console.log('Loaded shapes from cache:', cacheKey);
         return shapes;
       } catch (e) {
-        console.warn('Failed to load cached shapes:', e.message);
         return null;
       }
     }
@@ -1340,8 +1334,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       const reduction = totalOriginal > 0 
         ? Math.round((1 - totalSimplified / totalOriginal) * 100) 
         : 0;
-      
-      console.log(`Simplified shapes: ${totalOriginal} → ${totalSimplified} points (${reduction}% reduction)`);
       
       return simplified;
     }
@@ -1818,7 +1810,6 @@ rawHeaders.forEach((h, i) => {
     async function handleFileUpload(e) {
       const file = e.target.files[0]; if (!file) return;
       const t0 = performance.now();
-      const log = (msg) => console.log(`⏱️  ${(performance.now()-t0).toFixed(0)}ms - ${msg}`);
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
@@ -1827,10 +1818,8 @@ rawHeaders.forEach((h, i) => {
         let routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile;
         
         if (typeof fflate === 'undefined') {
-          console.warn('fflate niedostępne, używam JSZip jako fallback');
           state.loadingStep = 'Rozpakowywanie ZIP (JSZip)...'; render();
           zip = await JSZip.loadAsync(file);
-          log('Unzipped');
           state.loadingStep = 'Wyodrębnianie plików...'; render();
           
           const files = ['routes.txt','trips.txt','stop_times.txt','stops.txt','calendar.txt','calendar_dates.txt','agency.txt','shapes.txt'];
@@ -1839,7 +1828,6 @@ rawHeaders.forEach((h, i) => {
           // Use fflate (fast path)
           state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
           zip = await unzipWithFflate(file);
-          log('Unzipped');
           state.loadingStep = 'Wyodrębnianie plików...'; render();
           
           routesFile = findFile(zip.files, 'routes.txt');
@@ -1870,14 +1858,12 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
-        log('Parsed small files');
         state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
         const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
           state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
-        log('Parsed stop_times');
         
         // Parse shapes.txt if available (optional)
         let shapesIndex = {};
@@ -1901,10 +1887,7 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
             }
             
             shapesIndex = simplifiedShapes;
-            console.log(`Loaded ${Object.keys(shapesIndex).length} shapes`);
-            log('Parsed shapes');
           } catch (err) {
-            console.warn('Nie udało się sparsować shapes.txt:', err.message);
             // Continue without shapes - they're optional
           }
         }
@@ -1941,7 +1924,6 @@ state.gtfsData = {
   stops,
   shapesIndex
 };
-log('Built indexes');
 state.selectedRouteGroup = null;
         if (routes.length === 1) {
           state.selectedRoute = routes[0];
@@ -1976,15 +1958,7 @@ if (dates.length > 0) {
   
   state.selectedDate = selectedDate;
 }
-log('DONE');
 
-if (performance.memory) {
-  const heapMB = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
-  const totalMB = Math.round(performance.memory.totalJSHeapSize / 1024 / 1024);
-  console.log(`💾 Memory: ${heapMB} MB used / ${totalMB} MB allocated`);
-}
-
-console.log(`\n📊 Total: ${((performance.now()-t0)/1000).toFixed(2)}s`);
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
       } catch(err) {
@@ -2311,7 +2285,6 @@ function getCurrentRouteProfile() {
   }
 
   // NIE MA - zbuduj teraz (lazy loading)
-  console.log(`⏳ Building profile for ${key} direction ${dir}...`);
   return buildRouteProfileForCurrentSelection();
 }
 
@@ -2358,7 +2331,6 @@ function buildCoreStopsForAllDirections() {
     
     allTrips = allTrips.filter(t => (t.direction_id || '0') === dir);
     if (!allTrips.length) {
-      console.log(`No trips for direction ${dir} - skipping`);
       return;
     }
     
@@ -2386,8 +2358,6 @@ function buildCoreStopsForAllDirections() {
     
     // Zapisz w cache
     state.routeCoreStops[key][dir] = coreStops;
-    
-    console.log(`✅ Built coreStops for ${key} dir ${dir}: ${coreStops.length} stops`);
   });
 }
 
@@ -2779,8 +2749,6 @@ allTrips.forEach(trip => {
 }
 
 function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
-  console.log('=== buildMasterList (fallback) wywołane ===');
-  
   const masterList = [];
   const seenStations = new Set();
   
@@ -2820,24 +2788,15 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
     });
   });
   
-  console.log('buildMasterList: created', masterList.length, 'station entries');
   return masterList;
 }
 
 function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
-  console.log('=== buildMasterListWithProfile wywołane ===');
-  console.log('sortedTrips count:', sortedTrips?. length);
-  
   const profile = getCurrentRouteProfile();
-  console.log('profile:', profile ?  'JEST' : 'BRAK');
-  console.log('coreStops:', profile?.coreStops?.length);
   
   if (!profile || !Array.isArray(profile. coreStops) || profile.coreStops.length === 0) {
-    console.log('! !!  FALLBACK !!!');
     return buildMasterList(sortedTrips, tripStopMaps, stopsIndex);
   }
-  
-  console.log('Kontynuuję z profilem.. .');
 
   const { coreStops, nodes } = profile;
 
@@ -2985,10 +2944,6 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
     });
   });
 
-  // Debug - sprawdź S Mahlow
-  const mahlowEntries = masterList.filter(m => m.name?.includes('Mahlow'));
-  console.log('S Mahlow w finalnym masterList:', mahlowEntries.length);
-
   return masterList;
 }
 
@@ -3118,8 +3073,6 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
     }
   });
   
-  console.log(`[Sort] Anchor station: ${anchorStationId}, stop_ids: ${anchorStopIds.length}`);
-  
   // 3. Podziel tripy na core (przez anchor) i non-core (bez anchor)
   const coreTrips = [];
   const nonCoreTrips = [];
@@ -3134,8 +3087,6 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       nonCoreTrips.push(trip);
     }
   });
-  
-  console.log(`[Sort] Core trips: ${coreTrips.length}, Non-core trips: ${nonCoreTrips.length}`);
   
   // 4. Zbierz wszystkie stop_ids z core trips (wspólne przystanki)
   const coreStopIds = new Set();
@@ -3536,12 +3487,10 @@ async function generateHybridLineGeometry(stops, shapeId, routeType) {
   
   // If good coverage (>70%), use hybrid approach
   if (coverage.percentage >= 0.7) {
-    console.debug(`Using shapes.txt (${Math.round(coverage.percentage * 100)}% coverage) with gap filling`);
     return fillShapeGaps(stops, shapePoints, coverage.nearbyStops);
   }
   
   // Poor coverage - use straight lines
-  console.debug(`Shape coverage too low (${Math.round(coverage.percentage * 100)}%), using straight lines`);
   return await generateLineGeometry(stops, routeType);
 }
 
@@ -3656,7 +3605,6 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
       
       if (shapeId && state.gtfsData. shapesIndex[shapeId]) {
         lineGeometry = state.gtfsData.shapesIndex[shapeId];
-        console.log(`Using shapes.txt for variant ${variantId}, shape_id: ${shapeId}`);
       }
     }
   }
@@ -3666,7 +3614,6 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
     lineGeometry = sel.stopDetails
       .map(s => [parseFloat(s.stop_lat), parseFloat(s.stop_lon)])
       .filter(([lat, lon]) => !isNaN(lat) && !isNaN(lon));
-    console.log(`Using straight lines for variant ${variantId}`);
   }
 
   if (lineGeometry && lineGeometry.length > 1) {
@@ -3740,7 +3687,7 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
       if (layer && layer.getLatLng) map.setView(layer.getLatLng(), 13);
     }
   } catch (err) {
-    console.debug('updateMap: fit error', err && err.message);
+    // Ignore map fit errors - they don't prevent map from displaying
   }
 }
 
@@ -3851,33 +3798,24 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
 } // << zamknięcie funkcji renderującej mapę szczegółową
 
 function filterStopDetailMapLayers(filteredRouteIds = []) {
-  console.log('[FIX #3] filterStopDetailMapLayers called with:', filteredRouteIds);
-
   if (!state.stopDetailMapInstance || !state.stopDetailMapInitialized) {
-    console.log('[FIX #3] Map not initialized yet, skipping filter');
     return;
   }
 
   const filterIds = (filteredRouteIds || []).map(String);
   const map = state.stopDetailMapInstance;
-  const layerKeys = Object.keys(state.stopDetailMapLayers);
-  console.log('[FIX #3] Available layers:', layerKeys);
 
   Object.entries(state.stopDetailMapLayers).forEach(([layerKey, layer]) => {
     const routeId = layerKey.split('_')[0]; // Extract route_id from "route_id_direction"
     const shouldShow = filterIds.length === 0 || filterIds.includes(routeId);
 
-    console.log(`[FIX #3] Layer ${layerKey} (route ${routeId}): shouldShow=${shouldShow}`);
-
     if (shouldShow) {
       if (!map.hasLayer(layer)) {
         layer.addTo(map);
-        console.log(`[FIX #3] Added layer ${layerKey} to map`);
       }
     } else {
       if (map.hasLayer(layer)) {
         map.removeLayer(layer);
-        console.log(`[FIX #3] Removed layer ${layerKey} from map`);
       }
     }
   });
@@ -4186,13 +4124,11 @@ function buildStopsSearchIndex(groupsArray) {
     routeSet: group.routeSet
   }));
   
-  console.log(`[Performance] Search index built: ${stopsSearchIndex.length} groups`);
   return stopsSearchIndex;
 }
 
 function clearStopsSearchIndex() {
   stopsSearchIndex = null;
-  console.log('[Performance] Search index cleared');
 }
 
 function searchStopsInIndex(query, groupsArray) {
@@ -4217,11 +4153,8 @@ function getOrBuildGroupsArray(stopsData) {
   const currentHash = stopsData.length + '_' + (stopsData[0]?.stop_id || '');
   
   if (cachedGroupsArray && lastStopsDataHash === currentHash) {
-    console.log('[Performance] Using cached groupsArray');
     return cachedGroupsArray;
   }
-  
-  console.log('[Performance] Building new groupsArray');
   
   // Grupuj przystanki według nazwy bazowej (bez numerów)
   const stopGroups = new Map();
@@ -4262,7 +4195,6 @@ function measureStopItemHeight() {
     const height = firstItem.offsetHeight;
     if (height > 0 && height !== state.virtualListItemHeight) {
       state.virtualListItemHeight = height;
-      console.log(`[Performance] Measured item height: ${height}px`);
     }
   }
 }
@@ -4385,7 +4317,6 @@ function renderStopsView() {
   const useVirtualList = filteredGroups.length > 100; // Threshold
 
   if (useVirtualList) {
-    console.log(`[Performance] Using virtual list for ${filteredGroups.length} groups`);
     renderVirtualStopsList(filteredGroups);
   } else {
     // FAZA 1.5: Implement pagination for better initial load performance
@@ -5350,7 +5281,7 @@ function openStopTimetable(stopId) {
       mainDestination = currentDir.fullName || currentDir.name || '';
     }
   } catch (e) {
-    console.warn('getAvailableDirections failed:', e);
+    // Ignore getAvailableDirections errors - fallback logic handles missing direction data
   }
   
   // Fallback: use old headsign counting logic if needed
@@ -6089,7 +6020,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
           try {
             lineGeometry = await generateLineGeometry(mainRouteStops, route.route_type);
           } catch (err) {
-            console.debug('Failed to get route geometry:', err && err.message);
+            // Ignore geometry generation errors - fallback to straight lines between stops
           }
         }
         
@@ -6171,7 +6102,9 @@ if (state.gtfsData && state.selectedRoute) {
   } catch (err) {
     console.error('renderTimetable error:', err);
   }
-  updateMap().catch(err => console.warn('updateMap error:', err)); 
+  updateMap().catch(() => {
+    // Ignore map update errors - map functionality is non-critical for timetable display
+  }); 
 }
 }
 
