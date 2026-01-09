@@ -2575,6 +2575,8 @@ function buildStopTooltip(stopId, stopsIndex) {
 // === KROK 1: Budowa grafu trasy i profilu core dla logical route ===
 
 // Helper: Normalize GTFS pickup/dropoff types (treat on-demand as passenger)
+// Note: This is used during classification to treat on-demand (2,3) as regular passenger (0)
+// For display purposes, on-demand detection happens before normalization
 function normalizePickupDropoffType(value) {
   const normalized = String(value || '0').trim();
   // 2 = phone agency, 3 = coordinate with driver → treat as 0 (passenger)
@@ -3052,7 +3054,7 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-  // 8. Zbierz szczegółowe metadane o przystankach (pickup/drop_off types, pozycje w trasach)
+  // 8. Collect detailed stop metadata (pickup/drop_off types, positions in routes)
   const stopMetadata = {}; // stop_id → { hasPickup1: bool, hasDropOff1: bool, isOnDemand: bool, isFirstWithNoPickup: bool, isLastWithNoDropOff: bool }
   
   allTrips.forEach(trip => {
@@ -3099,7 +3101,7 @@ function buildRouteProfileForCurrentSelection() {
     });
   });
 
-  // 9. Zapisz profil w state
+  // 9. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
     key,
@@ -5191,9 +5193,9 @@ const processedTrips = trips.map(trip => {
       } else if (nodeType === 'passenger' || nodeType === 'core') {
         // Passenger stop (including branches between core)
         isStopTech = false;
-        // Check for on-demand using normalized flags
-        const pType = normalizePickupDropoffType(s.pickup_type);
-        const dType = normalizePickupDropoffType(s.drop_off_type);
+        // Check for on-demand BEFORE normalization (types 2,3 are on-demand)
+        const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
+        const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
         isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
       } else {
         // Fallback for unclassified stops (noncore, branch, etc.)
