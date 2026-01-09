@@ -1363,6 +1363,305 @@ function looksLikeGarbageLabel(s, shortName) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// DIRECTION_ID GENERATION HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Calculate bearing (azimuth) between two geographic points
+ * @param {number} lat1 - Start latitude
+ * @param {number} lon1 - Start longitude
+ * @param {number} lat2 - End latitude
+ * @param {number} lon2 - End longitude
+ * @returns {number} Bearing in degrees (0-360)
+ */
+function calculateBearing(lat1, lon1, lat2, lon2) {
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+  
+  const dLon = (lon2 - lon1) * toRad;
+  const y = Math.sin(dLon) * Math.cos(lat2 * toRad);
+  const x = Math.cos(lat1 * toRad) * Math.sin(lat2 * toRad) -
+            Math.sin(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.cos(dLon);
+  
+  let bearing = Math.atan2(y, x) * toDeg;
+  return (bearing + 360) % 360; // Normalize to 0-360
+}
+
+/**
+ * Get stop sequence for a trip
+ * @param {string} tripId - Trip ID
+ * @param {Object} stopTimesIndex - Index of stop times by trip_id
+ * @returns {Array<string>} Array of stop_ids in sequence
+ */
+function getTripStopSequence(tripId, stopTimesIndex) {
+  const stopTimes = stopTimesIndex[tripId];
+  if (!stopTimes || stopTimes.length === 0) return [];
+  return stopTimes.map(st => st.stop_id);
+}
+
+/**
+ * Check if a route is circular (starts and ends at same stop)
+ * @param {Array<string>} stopSequence - Array of stop_ids
+ * @returns {boolean} True if circular
+ */
+function isCircularRoute(stopSequence) {
+  if (!stopSequence || stopSequence.length < 2) return false;
+  return stopSequence[0] === stopSequence[stopSequence.length - 1];
+}
+
+/**
+ * Find reversed sequence pairs among trip patterns
+ * @param {Array<Object>} tripPatterns - Array of {tripId, sequence}
+ * @returns {Object} {group0: [...tripIds], group1: [...tripIds]} or null
+ */
+function findReversedPair(tripPatterns) {
+  if (tripPatterns.length < 2) return null;
+  
+  // Try to find a pair of reversed sequences
+  for (let i = 0; i < tripPatterns.length; i++) {
+    const seqA = tripPatterns[i].sequence;
+    if (seqA.length === 0) continue;
+    
+    for (let j = i + 1; j < tripPatterns.length; j++) {
+      const seqB = tripPatterns[j].sequence;
+      if (seqB.length === 0) continue;
+      
+      // Check if B is reversed version of A
+      const reversedB = [...seqB].reverse();
+      
+      // Calculate coverage - how many stops match
+      const minLen = Math.min(seqA.length, reversedB.length);
+      let matches = 0;
+      for (let k = 0; k < minLen; k++) {
+        if (seqA[k] === reversedB[k]) matches++;
+      }
+      
+      const coverage = matches / Math.max(seqA.length, reversedB.length);
+      
+      // If coverage >= 80%, we found reversed pair
+      if (coverage >= 0.8) {
+        // Group all trips by their similarity to pattern A or B
+        const group0 = [];
+        const group1 = [];
+        
+        for (const pattern of tripPatterns) {
+          const seq = pattern.sequence;
+          if (seq.length === 0) {
+            group0.push(pattern.tripId);
+            continue;
+          }
+          
+          // Calculate similarity to seqA
+          let simA = 0;
+          const lenA = Math.min(seq.length, seqA.length);
+          for (let k = 0; k < lenA; k++) {
+            if (seq[k] === seqA[k]) simA++;
+          }
+          
+          // Calculate similarity to seqB
+          let simB = 0;
+          const lenB = Math.min(seq.length, seqB.length);
+          for (let k = 0; k < lenB; k++) {
+            if (seq[k] === seqB[k]) simB++;
+          }
+          
+          // Assign to group with higher similarity
+          if (simA >= simB) {
+            group0.push(pattern.tripId);
+          } else {
+            group1.push(pattern.tripId);
+          }
+        }
+        
+        return { group0, group1 };
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Cluster trips by bearing into 1 or 2 groups
+ * @param {Array<Object>} bearingData - Array of {tripId, bearing}
+ * @returns {Object} {group0: [...tripIds], group1: [...tripIds] or null}
+ */
+function clusterByBearing(bearingData) {
+  if (bearingData.length === 0) {
+    return { group0: [], group1: null };
+  }
+  
+  if (bearingData.length === 1) {
+    return { group0: [bearingData[0].tripId], group1: null };
+  }
+  
+  // Sort by bearing
+  const sorted = [...bearingData].sort((a, b) => a.bearing - b.bearing);
+  
+  // Find the largest gap in bearings
+  let maxGap = 0;
+  let splitIdx = -1;
+  
+  for (let i = 0; i < sorted.length; i++) {
+    const current = sorted[i].bearing;
+    const next = sorted[(i + 1) % sorted.length].bearing;
+    
+    // Calculate gap (considering wrap-around at 360°)
+    let gap = (next - current + 360) % 360;
+    
+    if (gap > maxGap) {
+      maxGap = gap;
+      splitIdx = i;
+    }
+  }
+  
+  // If max gap > 90°, split into 2 groups
+  if (maxGap > 90) {
+    const group0 = [];
+    const group1 = [];
+    
+    for (let i = 0; i < sorted.length; i++) {
+      if (i <= splitIdx) {
+        group0.push(sorted[i].tripId);
+      } else {
+        group1.push(sorted[i].tripId);
+      }
+    }
+    
+    return { group0, group1 };
+  }
+  
+  // Single direction
+  return { group0: bearingData.map(b => b.tripId), group1: null };
+}
+
+/**
+ * Main function to enrich trips with direction_id
+ * @param {Array<Object>} trips - Array of trip objects
+ * @param {Object} stopTimesIndex - Index of stop times by trip_id
+ * @param {Object} stopsIndex - Index of stops by stop_id
+ */
+function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
+  // Group trips by route_id
+  const tripsByRoute = {};
+  
+  for (const trip of trips) {
+    if (!trip || !trip.trip_id) continue;
+    
+    const routeId = trip.route_id || 'unknown';
+    if (!tripsByRoute[routeId]) {
+      tripsByRoute[routeId] = [];
+    }
+    tripsByRoute[routeId].push(trip);
+  }
+  
+  // Process each route
+  for (const routeId in tripsByRoute) {
+    const routeTrips = tripsByRoute[routeId];
+    
+    // Filter trips that need direction_id
+    const tripsToProcess = routeTrips.filter(t => 
+      !t.direction_id || t.direction_id === ''
+    );
+    
+    if (tripsToProcess.length === 0) continue;
+    
+    // STEP 1: Build stop sequences
+    const tripPatterns = tripsToProcess.map(trip => ({
+      tripId: trip.trip_id,
+      trip: trip,
+      sequence: getTripStopSequence(trip.trip_id, stopTimesIndex)
+    }));
+    
+    // Filter out trips without stop sequences
+    const validPatterns = tripPatterns.filter(p => p.sequence.length > 0);
+    
+    if (validPatterns.length === 0) {
+      // No valid patterns, assign all to direction 0
+      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      continue;
+    }
+    
+    // STEP 2: Check for circular routes
+    const firstPattern = validPatterns[0];
+    if (isCircularRoute(firstPattern.sequence)) {
+      // All trips are circular, assign direction 0
+      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      continue;
+    }
+    
+    // STEP 3A: Try to find reversed sequences
+    const reversedGroups = findReversedPair(validPatterns);
+    
+    if (reversedGroups && reversedGroups.group1 && reversedGroups.group1.length > 0) {
+      // Found reversed pairs, assign direction_id
+      const group0Set = new Set(reversedGroups.group0);
+      const group1Set = new Set(reversedGroups.group1);
+      
+      tripsToProcess.forEach(trip => {
+        if (group0Set.has(trip.trip_id)) {
+          trip.direction_id = '0';
+        } else if (group1Set.has(trip.trip_id)) {
+          trip.direction_id = '1';
+        } else {
+          trip.direction_id = '0'; // Fallback
+        }
+      });
+      continue;
+    }
+    
+    // STEP 3B: Geographic analysis (bearing-based)
+    const bearingData = [];
+    
+    for (const pattern of validPatterns) {
+      const seq = pattern.sequence;
+      if (seq.length < 2) continue;
+      
+      // Get first and last stop coordinates
+      const firstStop = stopsIndex[seq[0]];
+      const lastStop = stopsIndex[seq[seq.length - 1]];
+      
+      if (!firstStop || !lastStop) continue;
+      
+      const lat1 = parseFloat(firstStop.stop_lat);
+      const lon1 = parseFloat(firstStop.stop_lon);
+      const lat2 = parseFloat(lastStop.stop_lat);
+      const lon2 = parseFloat(lastStop.stop_lon);
+      
+      if (isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) continue;
+      
+      const bearing = calculateBearing(lat1, lon1, lat2, lon2);
+      bearingData.push({
+        tripId: pattern.tripId,
+        bearing: bearing
+      });
+    }
+    
+    if (bearingData.length === 0) {
+      // No geographic data, assign all to direction 0
+      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      continue;
+    }
+    
+    // Cluster by bearing
+    const bearingGroups = clusterByBearing(bearingData);
+    
+    const bearingGroup0Set = new Set(bearingGroups.group0);
+    const bearingGroup1Set = bearingGroups.group1 ? new Set(bearingGroups.group1) : null;
+    
+    tripsToProcess.forEach(trip => {
+      if (bearingGroup0Set.has(trip.trip_id)) {
+        trip.direction_id = '0';
+      } else if (bearingGroup1Set && bearingGroup1Set.has(trip.trip_id)) {
+        trip.direction_id = '1';
+      } else {
+        trip.direction_id = '0'; // Fallback
+      }
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
 function parseCSV(text) {
@@ -1894,6 +2193,11 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
         
         state.loadingStep = 'Budowanie indeksów...'; render();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
+        
+        // Generate missing direction_id values
+        state.loadingStep = 'Generowanie brakujących direction_id...'; render();
+        enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex);
+        
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
 agencies.forEach(a => {
