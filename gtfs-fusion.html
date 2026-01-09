@@ -4,7 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>GTFS Fusion</title>
+  <script>
+    // Ensure CommonJS-style global exists for fflate UMD
+    if (typeof exports === 'undefined') {
+      window.exports = {};
+    }
+  </script>
   <script src="https://unpkg.com/fflate@0.8.1/umd/index.js"></script>
+  <script>
+    // Expose fflate from UMD exports when present
+    if (typeof exports !== 'undefined' && exports.unzip) {
+      window.fflate = exports;
+    }
+  </script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
