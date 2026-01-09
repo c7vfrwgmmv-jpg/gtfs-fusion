@@ -4037,15 +4037,26 @@ function buildStopsData(callback) {
   stopsDataWorker.onerror = (err) => {
     console.error('[Worker] Error:', err);
     stopsDataBuilding = false;
+    
+    // Cleanup worker and blob URL
     stopsDataWorker.terminate();
     stopsDataWorker = null;
-    buildStopsDataSync(callback);
-    
-    // Execute pending callbacks with sync fallback
-    while (stopsDataPendingCallbacks.length > 0) {
-      const pendingCallback = stopsDataPendingCallbacks.shift();
-      pendingCallback(cachedStopsData);
+    if (stopsDataWorkerBlobUrl) {
+      URL.revokeObjectURL(stopsDataWorkerBlobUrl);
+      stopsDataWorkerBlobUrl = null;
     }
+    
+    // Build synchronously as fallback - this will call the main callback
+    buildStopsDataSync((syncData) => {
+      // Call original callback
+      callback(syncData);
+      
+      // Execute all pending callbacks with the sync result
+      while (stopsDataPendingCallbacks.length > 0) {
+        const pendingCallback = stopsDataPendingCallbacks.shift();
+        pendingCallback(syncData);
+      }
+    });
   };
   
   // Send data to worker
