@@ -1954,21 +1954,25 @@ trips.forEach(t => {
 });
 
 // Clean up stops - remove fields not used frequently
-// NOTE: parent_station is KEPT - it's used for grouping stops by station
+// NOTE: Fields KEPT (required by application):
+//   - parent_station: used for grouping stops by station
+//   - stop_code: used in UI
+//   - stop_desc: used in timetable tooltips
 stops.forEach(s => {
   if (s) {
-    delete s.stop_code;
+    // delete s.stop_code; // KEEP - used in UI
     delete s.stop_url;
     delete s.location_type;
     // delete s.parent_station; // KEEP - used for stop grouping
+    // delete s.stop_desc; // KEEP - used in tooltips
     delete s.stop_timezone;
     delete s.wheelchair_boarding;
     delete s.level_id;
   }
 });
 
-// Clean up stop_times - Note: pickup_type and drop_off_type are kept as they're used in route profile analysis
-// These fields are relatively small compared to arrival_time which we've already removed
+// Clean up stop_times - pickup_type and drop_off_type MUST be kept
+// These fields are used in route profile analysis and technical stop detection
 Object.keys(stopTimesIndex).forEach(tripId => {
   const stopTimes = stopTimesIndex[tripId];
   if (stopTimes) {
