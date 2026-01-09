@@ -3060,36 +3060,203 @@ function getAllTripsForRoute() {
       return { trips, tripStopMaps, tripToVariant, patternToVariant, variantDetails };
     }
 
-function sortTripsByMostFrequentStop(trips, tripStopMaps) {
-  if (!trips || trips.length === 0) return trips.slice();
-  const stopFrequency = new Map();
-  trips.forEach(trip => {
-    const stops = tripStopMaps[trip.trip_id];
-    if (!stops) return;
-    stops.forEach(stop => {
-      stopFrequency.set(stop.stop_id, (stopFrequency.get(stop.stop_id) || 0) + 1);
+function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
+  if (!trips || trips.length === 0) return trips;
+  if (!stopsIndex) {
+    // Fallback: chronological sort
+    return trips.sort((a, b) => {
+      const aStops = tripStopMaps[a.trip_id] || [];
+      const bStops = tripStopMaps[b.trip_id] || [];
+      let aTime = aStops[0]?.departure_time || "99:99:99";
+      let bTime = bStops[0]?.departure_time || "99:99:99";
+      if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
+      if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
+      return aTime.localeCompare(bTime);
     });
-  });
-  let maxFrequency = 0, mostFrequentStopId = null;
-  stopFrequency.forEach((count, stopId) => {
-    if (count > maxFrequency) {
-      maxFrequency = count;
-      mostFrequentStopId = stopId;
-    }
-  });
-  if (!mostFrequentStopId) return trips.slice();
-  const tripTimes = new Map();
+  }
+  
+  // 1. Znajdź most frequent STATION (merged stop aware)
+  const stationCounts = new Map();
+  
   trips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
-    const stop = stops.find(s => s.stop_id === mostFrequentStopId);
-    const lastStop = stops[stops.length - 1];
-    const timeStr = stop ? (stop.departure_time || stop.arrival_time)
-                         : (lastStop ? (lastStop.departure_time || lastStop.arrival_time) : null);
-    tripTimes.set(trip.trip_id, timeStr ? getTimeInMinutes(timeStr) : 999999);
+    stops.forEach(s => {
+      // getStationId zwraca parent_station || stop_id (merguje przystanki!)
+      const stationId = getStationId(s.stop_id, stopsIndex);
+      stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
+    });
   });
-  return trips.slice().sort((a,b) =>
-    (tripTimes.get(a.trip_id) || 999999) - (tripTimes.get(b.trip_id) || 999999)
-  );
+  
+  // Znajdź most frequent station
+  let maxCount = 0;
+  let anchorStationId = null;
+  stationCounts.forEach((count, stId) => {
+    if (count > maxCount) {
+      maxCount = count;
+      anchorStationId = stId;
+    }
+  });
+  
+  if (!anchorStationId) {
+    // Fallback: chronological
+    return trips.sort((a, b) => {
+      const aStops = tripStopMaps[a.trip_id] || [];
+      const bStops = tripStopMaps[b.trip_id] || [];
+      let aTime = aStops[0]?.departure_time || "99:99:99";
+      let bTime = bStops[0]?.departure_time || "99:99:99";
+      if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
+      if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
+      return aTime.localeCompare(bTime);
+    });
+  }
+  
+  // 2. Znajdź wszystkie stop_ids dla anchor station (wszystkie perony, etc.)
+  const anchorStopIds = [];
+  Object.values(stopsIndex).forEach(stop => {
+    if (getStationId(stop.stop_id, stopsIndex) === anchorStationId) {
+      anchorStopIds.push(stop.stop_id);
+    }
+  });
+  
+  console.log(`[Sort] Anchor station: ${anchorStationId}, stop_ids: ${anchorStopIds.length}`);
+  
+  // 3. Podziel tripy na core (przez anchor) i non-core (bez anchor)
+  const coreTrips = [];
+  const nonCoreTrips = [];
+  
+  trips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    const hasAnchor = stops.some(s => anchorStopIds.includes(s.stop_id));
+    
+    if (hasAnchor) {
+      coreTrips.push(trip);
+    } else {
+      nonCoreTrips.push(trip);
+    }
+  });
+  
+  console.log(`[Sort] Core trips: ${coreTrips.length}, Non-core trips: ${nonCoreTrips.length}`);
+  
+  // 4. Zbierz wszystkie stop_ids z core trips (wspólne przystanki)
+  const coreStopIds = new Set();
+  coreTrips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    stops.forEach(s => {
+      coreStopIds.add(s.stop_id);
+    });
+  });
+  
+  // 5. Sort core trips by anchorTime (ascending)
+  const coreData = coreTrips.map(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    let anchorTime = null;
+    for (let i = 0; i < stops.length; i++) {
+      if (anchorStopIds.includes(stops[i].stop_id)) {
+        anchorTime = stops[i].departure_time || stops[i].arrival_time;
+        break;
+      }
+    }
+    
+    // Normalize time
+    if (anchorTime && String(anchorTime).match(/^\d:/)) {
+      anchorTime = "0" + anchorTime;
+    }
+    
+    if (!anchorTime) {
+      anchorTime = "99:99:99";
+    }
+    
+    return {
+      trip,
+      anchorTime,
+      totalStops: stops.length
+    };
+  });
+  
+  // Sort core trips by anchor time
+  coreData.sort((a, b) => {
+    const timeComp = a.anchorTime.localeCompare(b.anchorTime);
+    if (timeComp !== 0) return timeComp;
+    return b.totalStops - a.totalStops;
+  });
+  
+  // 6. Inject non-core trips into sorted core list chronologically
+  // For each non-core trip, find insertion point based on first common stop time
+  const result = [...coreData.map(cd => cd.trip)]; // Start with sorted core trips
+  
+  nonCoreTrips.forEach(nonCoreTrip => {
+    const nonCoreStops = tripStopMaps[nonCoreTrip.trip_id] || [];
+    
+    // Find first stop that exists in core trips
+    let insertionTime = null;
+    let commonStopId = null;
+    for (let i = 0; i < nonCoreStops.length; i++) {
+      if (coreStopIds.has(nonCoreStops[i].stop_id)) {
+        insertionTime = nonCoreStops[i].departure_time || nonCoreStops[i].arrival_time;
+        commonStopId = nonCoreStops[i].stop_id;
+        break;
+      }
+    }
+    
+    // Normalize time
+    if (insertionTime && String(insertionTime).match(/^\d:/)) {
+      insertionTime = "0" + insertionTime;
+    }
+    
+    // Fallback: if no common stop, use first stop time
+    if (!insertionTime) {
+      insertionTime = nonCoreStops[0]?.departure_time || "99:99:99";
+      if (String(insertionTime).match(/^\d:/)) {
+        insertionTime = "0" + insertionTime;
+      }
+    }
+    
+    // Find insertion point: compare with core trips' time at the SAME stop (or anchor if not present)
+    let insertIdx = result.length; // Default: append at end
+    
+    for (let i = 0; i < result.length; i++) {
+      const coreTrip = result[i];
+      const coreStops = tripStopMaps[coreTrip.trip_id] || [];
+      
+      // Find core trip's time at the common stop (if it has it)
+      let coreTimeAtCommon = null;
+      if (commonStopId) {
+        const coreStop = coreStops.find(s => s.stop_id === commonStopId);
+        if (coreStop) {
+          coreTimeAtCommon = coreStop.departure_time || coreStop.arrival_time;
+          if (String(coreTimeAtCommon).match(/^\d:/)) {
+            coreTimeAtCommon = "0" + coreTimeAtCommon;
+          }
+        }
+      }
+      
+      // If core trip doesn't have the common stop, use its anchor time as fallback
+      if (!coreTimeAtCommon) {
+        // Find this core trip's anchor time
+        for (let j = 0; j < coreStops.length; j++) {
+          if (anchorStopIds.includes(coreStops[j].stop_id)) {
+            coreTimeAtCommon = coreStops[j].departure_time || coreStops[j].arrival_time;
+            if (String(coreTimeAtCommon).match(/^\d:/)) {
+              coreTimeAtCommon = "0" + coreTimeAtCommon;
+            }
+            break;
+          }
+        }
+      }
+      
+      // Insert before this core trip if non-core comes earlier
+      if (coreTimeAtCommon && insertionTime.localeCompare(coreTimeAtCommon) < 0) {
+        insertIdx = i;
+        break;
+      }
+    }
+    
+    // Insert at found position
+    result.splice(insertIdx, 0, nonCoreTrip);
+  });
+  
+  return result;
 }
 
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
@@ -4918,7 +5085,7 @@ const processedTrips = trips.map(trip => {
   return { ...trip, pStops, hasPassenger };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
       if (processedTrips.length === 0) { tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; return; }
-let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps);
+let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps, state.gtfsData.stopsIndex);
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
   let start = firstStop?.departure_time || "00:00:00";
