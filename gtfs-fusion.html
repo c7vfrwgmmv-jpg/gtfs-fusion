@@ -5004,35 +5004,37 @@ state.currentTimetableData.stopDepartures = stopDepartures;
 
         // FIX #8: Check if this is a merged stop for tooltips on time cells
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
-        let mergedStopTooltip = '';
-        
-        if (isMergedStop) {
-          // Build merged stop tooltip info: stop_id, stop_desc, platform_code
-          const firstStopId = mStop.stopIds[0];
-          const stopData = state.gtfsData.stopsIndex[firstStopId];
-          
-          if (stopData) {
-            const infoParts = [];
-            if (stopData.stop_id) infoParts.push(`ID: ${escapeHtml(stopData.stop_id)}`);
-            if (stopData.stop_desc) infoParts.push(escapeHtml(stopData.stop_desc));
-            if (stopData.platform_code) infoParts.push(`Peron: ${escapeHtml(stopData.platform_code)}`);
-            
-            if (infoParts.length > 0) {
-              mergedStopTooltip = infoParts.join('<br>');
-            }
-          }
-        }
 
         // Inner loop: generate time cells for each trip
         tripMappings.forEach((mapping, tripIdx) => {
           const stopMatch = mapping[mIdx];
           const trip = sortedTrips[tripIdx];
+          
           if (stopMatch) {
-            // FIX #8: Add tooltip ONLY for merged stops with stop_id, stop_desc, platform_code
-            if (isMergedStop && mergedStopTooltip) {
+            // Zbuduj tooltip dla TEGO KONKRETNEGO stop_id (nie pierwszego!)
+            let cellTooltip = '';
+            
+            if (isMergedStop) {
+              const actualStopId = stopMatch.stop_id;  // ← Właściwy stop_id dla TEJ komórki!
+              const stopData = state.gtfsData.stopsIndex[actualStopId];
+              
+              if (stopData) {
+                const infoParts = [];
+                if (stopData.stop_id) infoParts.push(`ID: ${escapeHtml(stopData.stop_id)}`);
+                if (stopData.stop_desc) infoParts.push(escapeHtml(stopData.stop_desc));
+                if (stopData.platform_code) infoParts.push(`Peron: ${escapeHtml(stopData.platform_code)}`);
+                
+                if (infoParts.length > 0) {
+                  cellTooltip = infoParts.join('<br>');
+                }
+              }
+            }
+            
+            // Renderuj komórkę z właściwym tooltipem
+            if (cellTooltip) {
               html += `<td class="p-1 text-center text-xs border border-gray-300 time-cell-with-tooltip">
                 ${formatTime(stopMatch.departure_time || stopMatch.arrival_time)}
-                <span class="tooltip-content">${mergedStopTooltip}</span>
+                <span class="tooltip-content">${cellTooltip}</span>
               </td>`;
             } else {
               // No tooltip for non-merged stops
