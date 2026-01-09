@@ -1472,7 +1472,9 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
     tripIdx: -1,
     stopIdx: -1,
             seqIdx: -1,
-            depIdx: -1
+            depIdx: -1,
+            pickupIdx: -1,
+            dropoffIdx: -1
           };
           
 rawHeaders.forEach((h, i) => {
@@ -1481,6 +1483,8 @@ rawHeaders.forEach((h, i) => {
             else if (normalized === 'stop_id') headers.stopIdx = i;
             else if (normalized === 'stop_sequence') headers.seqIdx = i;
             else if (normalized === 'departure_time') headers.depIdx = i;
+            else if (normalized === 'pickup_type') headers.pickupIdx = i;
+            else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
           });
           
           if (headers.tripIdx === -1 || headers.stopIdx === -1) {
@@ -1506,7 +1510,9 @@ rawHeaders.forEach((h, i) => {
         stopTimesIndex[tripId].push({
           stop_id: stopId,
           departure_time: getCol(cols, headers.depIdx),
-          stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10)
+          stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
+          pickup_type: getCol(cols, headers.pickupIdx) || '0',
+          drop_off_type: getCol(cols, headers.dropoffIdx) || '0'
         });
         
         lineCount++;
