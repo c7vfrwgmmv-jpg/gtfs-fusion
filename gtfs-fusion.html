@@ -3181,72 +3181,80 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
     return b.totalStops - a.totalStops;
   });
   
-  // 6. Prepare non-core trips with their sortKey (first common stop time)
-  const nonCoreData = nonCoreTrips.map(trip => {
-    const stops = tripStopMaps[trip.trip_id] || [];
+  // 6. Inject non-core trips into sorted core list chronologically
+  // For each non-core trip, find insertion point based on first common stop time
+  const result = [...coreData.map(cd => cd.trip)]; // Start with sorted core trips
+  
+  nonCoreTrips.forEach(nonCoreTrip => {
+    const nonCoreStops = tripStopMaps[nonCoreTrip.trip_id] || [];
     
-    let sortKey = null;
-    for (let i = 0; i < stops.length; i++) {
-      if (coreStopIds.has(stops[i].stop_id)) {
-        sortKey = stops[i].departure_time || stops[i].arrival_time;
+    // Find first stop that exists in core trips
+    let insertionTime = null;
+    let commonStopId = null;
+    for (let i = 0; i < nonCoreStops.length; i++) {
+      if (coreStopIds.has(nonCoreStops[i].stop_id)) {
+        insertionTime = nonCoreStops[i].departure_time || nonCoreStops[i].arrival_time;
+        commonStopId = nonCoreStops[i].stop_id;
         break;
       }
     }
     
     // Normalize time
-    if (sortKey && String(sortKey).match(/^\d:/)) {
-      sortKey = "0" + sortKey;
+    if (insertionTime && String(insertionTime).match(/^\d:/)) {
+      insertionTime = "0" + insertionTime;
     }
     
-    // Fallback: jeśli brak wspólnego przystanku, użyj czasu pierwszego przystanku
-    if (!sortKey) {
-      sortKey = stops[0]?.departure_time || "99:99:99";
-      if (String(sortKey).match(/^\d:/)) {
-        sortKey = "0" + sortKey;
+    // Fallback: if no common stop, use first stop time
+    if (!insertionTime) {
+      insertionTime = nonCoreStops[0]?.departure_time || "99:99:99";
+      if (String(insertionTime).match(/^\d:/)) {
+        insertionTime = "0" + insertionTime;
       }
     }
     
-    return {
-      trip,
-      sortKey,
-      totalStops: stops.length
-    };
-  });
-  
-  // 7. Inject non-core trips into sorted core list chronologically
-  const result = [];
-  let coreIdx = 0;
-  let nonCoreIdx = 0;
-  
-  // Sort non-core by sortKey for efficient injection
-  nonCoreData.sort((a, b) => {
-    const timeComp = a.sortKey.localeCompare(b.sortKey);
-    if (timeComp !== 0) return timeComp;
-    return b.totalStops - a.totalStops;
-  });
-  
-  // Merge: inject non-core trips at positions where core.anchorTime > nonCore.sortKey
-  while (coreIdx < coreData.length || nonCoreIdx < nonCoreData.length) {
-    if (nonCoreIdx >= nonCoreData.length) {
-      // No more non-core trips, add remaining core trips
-      result.push(coreData[coreIdx++].trip);
-    } else if (coreIdx >= coreData.length) {
-      // No more core trips, add remaining non-core trips
-      result.push(nonCoreData[nonCoreIdx++].trip);
-    } else {
-      // Compare and insert chronologically
-      const coreTime = coreData[coreIdx].anchorTime;
-      const nonCoreTime = nonCoreData[nonCoreIdx].sortKey;
+    // Find insertion point: compare with core trips' time at the SAME stop (or anchor if not present)
+    let insertIdx = result.length; // Default: append at end
+    
+    for (let i = 0; i < result.length; i++) {
+      const coreTrip = result[i];
+      const coreStops = tripStopMaps[coreTrip.trip_id] || [];
       
-      if (nonCoreTime.localeCompare(coreTime) < 0) {
-        // Non-core trip comes before this core trip
-        result.push(nonCoreData[nonCoreIdx++].trip);
-      } else {
-        // Core trip comes first (or equal, prioritize core)
-        result.push(coreData[coreIdx++].trip);
+      // Find core trip's time at the common stop (if it has it)
+      let coreTimeAtCommon = null;
+      if (commonStopId) {
+        const coreStop = coreStops.find(s => s.stop_id === commonStopId);
+        if (coreStop) {
+          coreTimeAtCommon = coreStop.departure_time || coreStop.arrival_time;
+          if (String(coreTimeAtCommon).match(/^\d:/)) {
+            coreTimeAtCommon = "0" + coreTimeAtCommon;
+          }
+        }
+      }
+      
+      // If core trip doesn't have the common stop, use its anchor time as fallback
+      if (!coreTimeAtCommon) {
+        // Find this core trip's anchor time
+        for (let j = 0; j < coreStops.length; j++) {
+          if (anchorStopIds.includes(coreStops[j].stop_id)) {
+            coreTimeAtCommon = coreStops[j].departure_time || coreStops[j].arrival_time;
+            if (String(coreTimeAtCommon).match(/^\d:/)) {
+              coreTimeAtCommon = "0" + coreTimeAtCommon;
+            }
+            break;
+          }
+        }
+      }
+      
+      // Insert before this core trip if non-core comes earlier
+      if (coreTimeAtCommon && insertionTime.localeCompare(coreTimeAtCommon) < 0) {
+        insertIdx = i;
+        break;
       }
     }
-  }
+    
+    // Insert at found position
+    result.splice(insertIdx, 0, nonCoreTrip);
+  });
   
   return result;
 }
