@@ -2857,8 +2857,11 @@ coreStops.forEach(sid => {
 
 // Classify non-core
 allTrips.forEach(trip => {
-  const stops = stopTimesIndex[trip.trip_id];
-  if (!stops) return;
+  const stops = (stopTimesIndex[trip.trip_id] || [])
+    .slice()
+    .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
+  
+  if (!stops.length) return;
   
   // Find core stops in trip
   const tripCoreIndices = [];
@@ -2883,6 +2886,7 @@ allTrips.forEach(trip => {
   // Classify gaps
   stops.forEach(st => {
     if (coreSet.has(st.stop_id)) return;
+    if (nodeTypes[st.stop_id] === 'tail') return; // Don't overwrite tail classification
     
     const pType = String(st.pickup_type || '0');
     const dType = String(st.drop_off_type || '0');
@@ -2946,8 +2950,11 @@ allTrips.forEach(trip => {
   const branchTopology = {};
 
   allTrips.forEach(trip => {
-    const stops = stopTimesIndex[trip.trip_id];
-    if (!stops) return;
+    const stops = (stopTimesIndex[trip.trip_id] || [])
+      .slice()
+      .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
+    
+    if (!stops.length) return;
     
     // Find core stops
     const tripCoreStops = [];
