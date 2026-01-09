@@ -2623,6 +2623,8 @@ function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
     
     // If ALL edges are below threshold → candidate
     const allLowFreq = edges.every(e => edgeFrequency[e] < threshold);
+    
+    // Skip if not a low-frequency candidate or has no edges
     if (!allLowFreq || edges.length === 0) return;
     
     // Calculate max edge frequency for this stop
