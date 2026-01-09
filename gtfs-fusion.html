@@ -1773,7 +1773,7 @@ function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
     startCandidates[a] > startCandidates[b] ? a : b
   );
   
-  const startStop = stopsWithCoords.find(s => s.stop_id === startStopId);
+  let startStop = stopsWithCoords.find(s => s.stop_id === startStopId);
   if (!startStop) {
     // Fallback to first stop in array
     startStop = stopsWithCoords[0];
