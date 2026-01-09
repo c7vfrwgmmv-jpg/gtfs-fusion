@@ -2659,7 +2659,7 @@ function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIn
   const nodeTypes = {};
   const coreSet = new Set(coreStops);
   
-  // Safety check: if no core stops, all candidates are noncore
+  // Safety check: if no core stops, candidates will be classified in buildRouteProfileForCurrentSelection
   if (!coreStops || coreStops.length === 0) {
     return nodeTypes;
   }
@@ -2671,7 +2671,7 @@ function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIn
   let iterations = 0;
   const MAX_ITERATIONS = 10;
   
-  // Initialize core stops as passenger
+  // Initialize core stops with 'core' classification
   coreStops.forEach(stopId => {
     nodeTypes[stopId] = 'core';
   });
