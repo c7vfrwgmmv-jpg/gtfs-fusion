@@ -3060,36 +3060,105 @@ function getAllTripsForRoute() {
       return { trips, tripStopMaps, tripToVariant, patternToVariant, variantDetails };
     }
 
-function sortTripsByMostFrequentStop(trips, tripStopMaps) {
-  if (!trips || trips.length === 0) return trips.slice();
-  const stopFrequency = new Map();
-  trips.forEach(trip => {
-    const stops = tripStopMaps[trip.trip_id];
-    if (!stops) return;
-    stops.forEach(stop => {
-      stopFrequency.set(stop.stop_id, (stopFrequency.get(stop.stop_id) || 0) + 1);
+function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
+  if (!trips || trips.length === 0) return trips;
+  if (!stopsIndex) {
+    // Fallback: chronological sort
+    return trips.sort((a, b) => {
+      const aStops = tripStopMaps[a.trip_id] || [];
+      const bStops = tripStopMaps[b.trip_id] || [];
+      let aTime = aStops[0]?.departure_time || "99:99:99";
+      let bTime = bStops[0]?.departure_time || "99:99:99";
+      if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
+      if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
+      return aTime.localeCompare(bTime);
     });
-  });
-  let maxFrequency = 0, mostFrequentStopId = null;
-  stopFrequency.forEach((count, stopId) => {
-    if (count > maxFrequency) {
-      maxFrequency = count;
-      mostFrequentStopId = stopId;
-    }
-  });
-  if (!mostFrequentStopId) return trips.slice();
-  const tripTimes = new Map();
+  }
+  
+  // 1. Znajdź most frequent STATION (merged stop aware)
+  const stationCounts = new Map();
+  
   trips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
-    const stop = stops.find(s => s.stop_id === mostFrequentStopId);
-    const lastStop = stops[stops.length - 1];
-    const timeStr = stop ? (stop.departure_time || stop.arrival_time)
-                         : (lastStop ? (lastStop.departure_time || lastStop.arrival_time) : null);
-    tripTimes.set(trip.trip_id, timeStr ? getTimeInMinutes(timeStr) : 999999);
+    stops.forEach(s => {
+      // getStationId zwraca parent_station || stop_id (merguje przystanki!)
+      const stationId = getStationId(s.stop_id, stopsIndex);
+      stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
+    });
   });
-  return trips.slice().sort((a,b) =>
-    (tripTimes.get(a.trip_id) || 999999) - (tripTimes.get(b.trip_id) || 999999)
-  );
+  
+  // Znajdź most frequent station
+  let maxCount = 0;
+  let anchorStationId = null;
+  stationCounts.forEach((count, stId) => {
+    if (count > maxCount) {
+      maxCount = count;
+      anchorStationId = stId;
+    }
+  });
+  
+  if (!anchorStationId) {
+    // Fallback: chronological
+    return trips.sort((a, b) => {
+      const aStops = tripStopMaps[a.trip_id] || [];
+      const bStops = tripStopMaps[b.trip_id] || [];
+      let aTime = aStops[0]?.departure_time || "99:99:99";
+      let bTime = bStops[0]?.departure_time || "99:99:99";
+      if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
+      if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
+      return aTime.localeCompare(bTime);
+    });
+  }
+  
+  // 2. Znajdź wszystkie stop_ids dla anchor station (wszystkie perony, etc.)
+  const anchorStopIds = [];
+  Object.values(stopsIndex).forEach(stop => {
+    if (getStationId(stop.stop_id, stopsIndex) === anchorStationId) {
+      anchorStopIds.push(stop.stop_id);
+    }
+  });
+  
+  console.log(`[Sort] Anchor station: ${anchorStationId}, stop_ids: ${anchorStopIds.length}`);
+  
+  // 3. Dla każdego tripu: znajdź CZAS przejazdu przez anchor
+  const tripData = trips.map(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    let anchorTime = null;
+    for (let i = 0; i < stops.length; i++) {
+      if (anchorStopIds.includes(stops[i].stop_id)) {
+        anchorTime = stops[i].departure_time || stops[i].arrival_time;
+        break;
+      }
+    }
+    
+    // Normalize time (dodaj leading zero)
+    if (anchorTime && String(anchorTime).match(/^\d:/)) {
+      anchorTime = "0" + anchorTime;
+    }
+    
+    // Sentinel dla tripów bez anchor (rzadkie, ale możliwe)
+    if (!anchorTime) {
+      anchorTime = "99:99:99";
+    }
+    
+    return {
+      trip,
+      anchorTime,  // ← CZAS w anchor, nie pozycja!
+      totalStops: stops.length
+    };
+  });
+  
+  // 4. Sortuj TYLKO według anchorTime (wspólny punkt czasowy!)
+  tripData.sort((a, b) => {
+    const timeComp = a.anchorTime.localeCompare(b.anchorTime);
+    if (timeComp !== 0) return timeComp;
+    
+    // Tiebreaker: dłuższe tripy pierwsze
+    return b.totalStops - a.totalStops;
+  });
+  
+  return tripData.map(td => td.trip);
 }
 
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
@@ -4918,7 +4987,7 @@ const processedTrips = trips.map(trip => {
   return { ...trip, pStops, hasPassenger };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
       if (processedTrips.length === 0) { tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; return; }
-let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps);
+let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps, state.gtfsData.stopsIndex);
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
   let start = firstStop?.departure_time || "00:00:00";
