@@ -2648,6 +2648,12 @@ function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
 function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIndex, coreStops) {
   const nodeTypes = {};
   const coreSet = new Set(coreStops);
+  
+  // Safety check: if no core stops, all candidates are noncore
+  if (!coreStops || coreStops.length === 0) {
+    return nodeTypes;
+  }
+  
   const coreStart = coreStops[0];
   const coreEnd = coreStops[coreStops.length - 1];
   
