@@ -940,6 +940,10 @@ let stopsSearchIndex = null;
 let cachedGroupsArray = null;
 let lastStopsDataHash = null;
 let stationNameToIdCache = null;
+let cachedStopsData = null;
+let stopsDataHash = null;
+let stopsDataWorker = null;
+let stopsDataBuilding = false;
 
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
@@ -1239,83 +1243,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
         hash = hash & hash;
       }
       return 'shapes_' + Math.abs(hash).toString(36);
-    }
-
-    function cacheShapes(shapesIndex, simplified) {
-      try {
-        const cacheKey = hashShapesData(shapesIndex);
-        
-        // Compress each shape's coordinates
-        const compressed = {};
-        Object.keys(simplified).forEach(shapeId => {
-          compressed[shapeId] = compressCoordinates(simplified[shapeId]);
-        });
-        
-        const cacheData = {
-          version: 2, // version 2 uses compression
-          timestamp: Date.now(),
-          shapes: compressed
-        };
-        
-        const jsonStr = JSON.stringify(cacheData);
-        const originalSize = jsonStr.length;
-        
-        localStorage.setItem(cacheKey, jsonStr);
-        
-        console.log(`Shapes cached: ${cacheKey}, size: ${(originalSize / 1024).toFixed(1)}KB`);
-      } catch (e) {
-        console.warn('Failed to cache shapes:', e.message);
-        // If storage quota exceeded, try to clear old caches
-        if (e.name === 'QuotaExceededError') {
-          try {
-            // Remove old shape caches
-            for (let i = 0; i < localStorage.length; i++) {
-              const key = localStorage.key(i);
-              if (key && key.startsWith('shapes_')) {
-                localStorage.removeItem(key);
-              }
-            }
-            console.log('Cleared old shape caches due to quota');
-          } catch (e2) {
-            console.warn('Failed to clear old caches:', e2.message);
-          }
-        }
-      }
-    }
-
-    function loadCachedShapes(shapesIndex) {
-      try {
-        const cacheKey = hashShapesData(shapesIndex);
-        const cached = localStorage.getItem(cacheKey);
-        if (!cached) return null;
-        
-        const data = JSON.parse(cached);
-        
-        // Check if cache is not too old (30 days)
-        const age = Date.now() - data.timestamp;
-        if (age > 30 * 24 * 60 * 60 * 1000) {
-          localStorage.removeItem(cacheKey);
-          return null;
-        }
-        
-        // Decompress coordinates
-        const shapes = {};
-        Object.keys(data.shapes).forEach(shapeId => {
-          if (data.version === 2) {
-            // Version 2 uses compression
-            shapes[shapeId] = decompressCoordinates(data.shapes[shapeId]);
-          } else {
-            // Version 1 or unversioned - direct coordinates
-            shapes[shapeId] = data.shapes[shapeId];
-          }
-        });
-        
-        console.log('Loaded shapes from cache:', cacheKey);
-        return shapes;
-      } catch (e) {
-        console.warn('Failed to load cached shapes:', e.message);
-        return null;
-      }
     }
 
     function simplifyShapes(shapesIndex, tolerance = 0.0001) {
@@ -1890,17 +1817,9 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
               render();
             });
             
-            // Try to load from cache
-            let simplifiedShapes = loadCachedShapes(rawShapes);
-            
-            if (!simplifiedShapes) {
-              // Simplify and cache
-              state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
-              simplifiedShapes = simplifyShapes(rawShapes, 0.0001);
-              cacheShapes(rawShapes, simplifiedShapes);
-            }
-            
-            shapesIndex = simplifiedShapes;
+            // Simplify shapes (in RAM only, no localStorage)
+            state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
+            shapesIndex = simplifyShapes(rawShapes, 0.0001);
             console.log(`Loaded ${Object.keys(shapesIndex).length} shapes`);
             log('Parsed shapes');
           } catch (err) {
@@ -1926,6 +1845,9 @@ clearStationCache();
 clearStopsSearchIndex();
 cachedGroupsArray = null;
 lastStopsDataHash = null;
+cachedStopsData = null;
+stopsDataHash = null;
+stopsDataBuilding = false;
 
 state.gtfsData = {
   routes,
@@ -4005,6 +3927,151 @@ function selectRoute(route) {
 // ═══════════════════════════════════════════════════════════════
 // 12. UI RENDERING - STOPS VIEW
 // ═══════════════════════════════════════════════════════════════
+
+// Web Worker for async stopsData building
+function createStopsDataWorker() {
+  const workerCode = `
+    self.onmessage = function(e) {
+      const { routes, tripsIndex, stopTimesIndex, stopsIndex } = e.data;
+      
+      console.log('[Worker] Building stopsData...');
+      const startTime = performance.now();
+      
+      const stopToRoutes = new Map();
+      
+      routes.forEach(route => {
+        const trips = tripsIndex[route.route_id] || [];
+        const stopIds = new Set();
+        
+        trips.forEach(trip => {
+          const stopTimes = stopTimesIndex[trip.trip_id] || [];
+          stopTimes.forEach(st => stopIds.add(st.stop_id));
+        });
+        
+        stopIds.forEach(stopId => {
+          if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
+          stopToRoutes.get(stopId).push(route);
+        });
+      });
+      
+      const stopsData = [];
+      Object.values(stopsIndex).forEach(stop => {
+        const routes = stopToRoutes.get(stop.stop_id) || [];
+        if (routes.length > 0) {
+          stopsData.push({
+            ...stop,
+            routeCount: routes.length,
+            routes: routes
+          });
+        }
+      });
+      
+      stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));
+      
+      const elapsed = performance.now() - startTime;
+      console.log('[Worker] Built stopsData in ' + elapsed.toFixed(0) + 'ms');
+      
+      self.postMessage({ stopsData });
+    };
+  `;
+  
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const workerUrl = URL.createObjectURL(blob);
+  return new Worker(workerUrl);
+}
+
+function buildStopsData(callback) {
+  const currentHash = 
+    state.gtfsData.routes.length + '_' + 
+    Object.keys(state.gtfsData.stopsIndex).length;
+  
+  // Cache hit
+  if (cachedStopsData && stopsDataHash === currentHash) {
+    console.log('[Performance] Using cached stopsData (RAM)');
+    callback(cachedStopsData);
+    return;
+  }
+  
+  // Already building
+  if (stopsDataBuilding) {
+    console.log('[Performance] stopsData already building...');
+    return;
+  }
+  
+  stopsDataBuilding = true;
+  console.log('[Performance] Building stopsData in Web Worker...');
+  
+  // Create worker (lazy)
+  if (!stopsDataWorker) {
+    stopsDataWorker = createStopsDataWorker();
+  }
+  
+  stopsDataWorker.onmessage = (e) => {
+    cachedStopsData = e.data.stopsData;
+    stopsDataHash = currentHash;
+    stopsDataBuilding = false;
+    
+    console.log('[Performance] stopsData ready from Worker!');
+    callback(cachedStopsData);
+  };
+  
+  stopsDataWorker.onerror = (err) => {
+    console.error('[Worker] Error:', err);
+    stopsDataBuilding = false;
+    buildStopsDataSync(callback);
+  };
+  
+  // Send data to worker
+  stopsDataWorker.postMessage({
+    routes: state.gtfsData.routes,
+    tripsIndex: state.gtfsData.tripsIndex,
+    stopTimesIndex: state.gtfsData.stopTimesIndex,
+    stopsIndex: state.gtfsData.stopsIndex
+  });
+}
+
+function buildStopsDataSync(callback) {
+  console.log('[Performance] Building stopsData synchronously (fallback)...');
+  const startTime = performance.now();
+  
+  const currentHash = 
+    state.gtfsData.routes.length + '_' + 
+    Object.keys(state.gtfsData.stopsIndex).length;
+  
+  const stopsData = [];
+  const stopToRoutes = new Map();
+  
+  state.gtfsData.routes.forEach(route => {
+    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
+    const stopIds = new Set();
+    trips.forEach(trip => {
+      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      stopTimes.forEach(st => stopIds.add(st.stop_id));
+    });
+    stopIds.forEach(stopId => {
+      if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
+      stopToRoutes.get(stopId).push(route);
+    });
+  });
+  
+  Object.values(state.gtfsData.stopsIndex).forEach(stop => {
+    const routes = stopToRoutes.get(stop.stop_id) || [];
+    if (routes.length > 0) {
+      stopsData.push({...stop, routeCount: routes.length, routes});
+    }
+  });
+  
+  stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));
+  
+  const elapsed = performance.now() - startTime;
+  console.log(`[Performance] Built stopsData (sync) in ${elapsed.toFixed(0)}ms`);
+  
+  cachedStopsData = stopsData;
+  stopsDataHash = currentHash;
+  callback(stopsData);
+}
+
+
 // FAZA 1.2: Search index dla szybszego wyszukiwania
 
 function buildStopsSearchIndex(groupsArray) {
@@ -4175,38 +4242,17 @@ function renderStopsView() {
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
   
-  // Zbierz wszystkie przystanki z liczbą tras
-  const stopsData = [];
-  const stopToRoutes = new Map();
+  // Show loading state
+  stopsList.innerHTML = `
+    <div class="p-8 text-center">
+      <div class="text-gray-500 mb-2">Ładowanie przystanków...</div>
+      <div class="text-sm text-gray-400">UI pozostaje responsywne ✅</div>
+    </div>
+  `;
   
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    const stopIds = new Set();
-    trips.forEach(trip => {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-      stopTimes.forEach(st => stopIds.add(st.stop_id));
-    });
-    
-    stopIds.forEach(stopId => {
-      if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
-      stopToRoutes.get(stopId).push(route);
-    });
-  });
-  
-  Object.values(state.gtfsData.stopsIndex).forEach(stop => {
-    const routes = stopToRoutes.get(stop.stop_id) || [];
-    if (routes.length > 0) {
-      stopsData.push({
-        ...stop,
-        routeCount: routes.length,
-        routes: routes
-      });
-    }
-  });
-  
-  // Sortuj alfabetycznie
-  stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));
-  
+  // Build async in Worker
+  buildStopsData((stopsData) => {
+    // Callback when ready - wrap rest of function here
   // FAZA 2.5: Use cached groupsArray
   const groupsArray = getOrBuildGroupsArray(stopsData);
   
@@ -4558,6 +4604,7 @@ if (stop) {
     stopsList_el._stopItemHandler = handler;
     stopsList_el.addEventListener('click', handler);
   }
+  }); // End of buildStopsData callback
 }
 
 function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
