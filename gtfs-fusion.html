@@ -1588,8 +1588,8 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     }
     
     // STEP 2: Check for circular routes
-    const firstPattern = validPatterns[0];
-    if (isCircularRoute(firstPattern.sequence)) {
+    const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
+    if (isCircular) {
       // All trips are circular, assign direction 0
       tripsToProcess.forEach(trip => trip.direction_id = '0');
       continue;
