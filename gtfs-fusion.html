@@ -2847,54 +2847,98 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-// --- 7. Improved nodeTypes Classification with Depot Detection ---
-const nodeTypes = {};
+// --- 7. Depot Detection: TWO-PHASE PROCESSING (restored from main-2) ---
 
-// Mark core
-coreStops.forEach(sid => {
-  nodeTypes[sid] = 'core';
-});
+// PHASE 1: Collect candidates from ALL trips
+const candidateBranchStops = new Set();
+const candidateTailStops = new Set();
+const forbiddenFromBranch = new Set();
 
-// Classify non-core
 allTrips.forEach(trip => {
-  const stops = (stopTimesIndex[trip.trip_id] || [])
+  const stsRaw = stopTimesIndex[trip.trip_id] || [];
+  const sts = stsRaw
     .slice()
     .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
   
-  if (!stops.length) return;
-  
-  // Find core stops in trip
-  const tripCoreIndices = [];
-  stops.forEach((st, idx) => {
-    if (coreSet.has(st.stop_id)) {
-      tripCoreIndices.push(idx);
-    }
-  });
-  
-  // No core = depot trip
-  if (tripCoreIndices.length === 0) {
-    stops.forEach(st => {
-      const pType = String(st.pickup_type || '0');
-      const dType = String(st.drop_off_type || '0');
-      if (pType === '1' && dType === '1') {
-        nodeTypes[st.stop_id] = 'tail'; // depot
+  if (sts.length === 0) return;
+
+  // Map to extract pickup/drop_off types
+  const pts = sts.map(st => ({
+    stop_id: st.stop_id,
+    isCore: coreSet.has(st.stop_id),
+    p: String(st.pickup_type || '0'),
+    d: String(st.drop_off_type || '0')
+  }));
+
+  // Find first and last core stop indices
+  let firstCoreIdx = pts.findIndex(p => p.isCore);
+  let lastCoreIdx = -1;
+  pts.forEach((p, i) => { if (p.isCore) lastCoreIdx = i; });
+
+  // Detect depot trip: last stop has pickup=1 AND drop_off=1
+  const lastPt = pts[pts.length - 1];
+  const isTechnicalTrip = (lastPt.p === '1' && lastPt.d === '1');
+
+  if (isTechnicalTrip || firstCoreIdx === -1) {
+    // DEPOT TRIP: All non-core stops go to blacklist
+    pts.forEach(p => {
+      if (!p.isCore) {
+        forbiddenFromBranch.add(p.stop_id);
+        candidateTailStops.add(p.stop_id);
       }
     });
-    return;
+  } else {
+    // PASSENGER TRIP: Prefix and suffix are branch candidates
+    pts.slice(0, firstCoreIdx).concat(pts.slice(lastCoreIdx + 1)).forEach(p => {
+      if (!p.isCore) candidateBranchStops.add(p.stop_id);
+    });
   }
+});
+
+// Remove blacklisted stops from branch candidates
+forbiddenFromBranch.forEach(sid => candidateBranchStops.delete(sid));
+
+// PHASE 2: Assign types (TAIL has highest priority)
+const nodeTypes = {};
+
+Object.keys(nodes).forEach(sid => {
+  if (coreSet.has(sid)) {
+    nodeTypes[sid] = 'core';
+  } else if (candidateTailStops.has(sid)) {
+    nodeTypes[sid] = 'tail';  // HIGHEST PRIORITY - never overwritten
+  } else if (candidateBranchStops.has(sid)) {
+    nodeTypes[sid] = 'branch';
+  } else {
+    nodeTypes[sid] = 'noncore';
+  }
+});
+
+// Add tail stops that aren't in nodes (e.g., depot-only stops)
+candidateTailStops.forEach(sid => {
+  if (!nodeTypes[sid]) {
+    nodeTypes[sid] = 'tail';
+  }
+});
+
+// Also process trips to add stops not in nodes (fallback for 1/1 stops)
+allTrips.forEach(trip => {
+  const stsRaw = stopTimesIndex[trip.trip_id] || [];
+  const sts = stsRaw
+    .filter(st => st && st.stop_id)
+    .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
   
-  // Classify gaps
-  stops.forEach(st => {
-    if (coreSet.has(st.stop_id)) return;
-    if (nodeTypes[st.stop_id] === 'tail') return; // Don't overwrite tail classification
-    
-    const pType = String(st.pickup_type || '0');
-    const dType = String(st.drop_off_type || '0');
-    
-    if (pType === '1' && dType === '1') {
-      nodeTypes[st.stop_id] = 'tail'; // depot
-    } else {
-      nodeTypes[st.stop_id] = 'branch'; // variant/terminus
+  sts.forEach(st => {
+    const stId = st.stop_id;
+    if (!nodeTypes[stId]) {
+      const pickup = st.pickup_type;
+      const dropoff = st.drop_off_type;
+      const isStrictTech = (pickup === '1' && dropoff === '1');
+      
+      if (isStrictTech || candidateTailStops.has(stId)) {
+        nodeTypes[stId] = 'tail';
+      } else {
+        nodeTypes[stId] = 'noncore';
+      }
     }
   });
 });
