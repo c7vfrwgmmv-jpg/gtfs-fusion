@@ -2610,9 +2610,10 @@ function calculateStopEdgeFrequency(trips, tripStopMaps) {
   return edgeFrequency;
 }
 
-// Helper: Find low-frequency candidates
+// Helper: Find low-frequency candidates with tier classification
 function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
-  const candidates = new Set();
+  const tier1 = new Set();  // <6%
+  const tier2 = new Set();  // 6-10%
   
   allStops.forEach(stopId => {
     // Find all edges involving this stop
@@ -2622,12 +2623,20 @@ function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
     
     // If ALL edges are below threshold → candidate
     const allLowFreq = edges.every(e => edgeFrequency[e] < threshold);
-    if (allLowFreq && edges.length > 0) {
-      candidates.add(stopId);
+    if (!allLowFreq || edges.length === 0) return;
+    
+    // Calculate max edge frequency for this stop
+    const maxEdgeFreq = Math.max(...edges.map(e => edgeFrequency[e]));
+    
+    // Classify into tiers
+    if (maxEdgeFreq < 0.06) {
+      tier1.add(stopId);
+    } else if (maxEdgeFreq < threshold) {
+      tier2.add(stopId);
     }
   });
   
-  return candidates;
+  return { tier1, tier2 };
 }
 
 // Helper: Check if stop is between core start and end
@@ -2654,8 +2663,8 @@ function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
   return false;
 }
 
-// Helper: Recursive tail detection
-function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIndex, coreStops) {
+// Helper: Recursive tail detection with 2-tier classification
+function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTimesIndex, coreStops) {
   const nodeTypes = {};
   const coreSet = new Set(coreStops);
   
@@ -2667,6 +2676,10 @@ function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIn
   const coreStart = coreStops[0];
   const coreEnd = coreStops[coreStops.length - 1];
   
+  // Extract tier sets
+  const tier1Candidates = candidateTiers.tier1 || new Set();
+  const tier2Candidates = candidateTiers.tier2 || new Set();
+  
   let changed = true;
   let iterations = 0;
   const MAX_ITERATIONS = 10;
@@ -2676,94 +2689,113 @@ function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIn
     nodeTypes[stopId] = 'core';
   });
   
-  while (changed && iterations < MAX_ITERATIONS) {
-    changed = false;
-    iterations++;
+  // Helper function to classify a candidate with tier-specific fallback
+  const classifyCandidate = (candidateId, fallbackType) => {
+    // Skip if already classified
+    if (nodeTypes[candidateId]) return false;
     
-    candidates.forEach(candidateId => {
-      // Skip if already classified
-      if (nodeTypes[candidateId]) return;
-      
-      // Check if candidate appears BETWEEN coreStart and coreEnd in any trip
-      let appearsBetweenCore = false;
-      
-      for (const trip of trips) {
+    // TEST 1: Check if candidate appears BETWEEN coreStart and coreEnd in any trip
+    let appearsBetweenCore = false;
+    
+    for (const trip of trips) {
+      const stops = tripStopMaps[trip.trip_id] || [];
+      if (isStopBetweenCore(candidateId, stops, coreStart, coreEnd)) {
+        appearsBetweenCore = true;
+        break;
+      }
+    }
+    
+    if (appearsBetweenCore) {
+      // Appears between core → passenger branch
+      nodeTypes[candidateId] = 'passenger';
+      return true;
+    }
+    
+    // TEST 2: Get pickup/dropoff flags for this stop (check all occurrences)
+    let hasPickup1 = false;
+    let hasDropoff1 = false;
+    let hasNormalFlags = false;
+    
+    trips.forEach(trip => {
+      const stopTimes = stopTimesIndex[trip.trip_id] || [];
+      const st = stopTimes.find(s => s.stop_id === candidateId);
+      if (st) {
+        const pickup = normalizePickupDropoffType(st.pickup_type);
+        const dropoff = normalizePickupDropoffType(st.drop_off_type);
+        
+        if (pickup === '1' || dropoff === '1') {
+          if (pickup === '1') hasPickup1 = true;
+          if (dropoff === '1') hasDropoff1 = true;
+        } else {
+          hasNormalFlags = true;
+        }
+      }
+    });
+    
+    // If ANY occurrence has pickup=1 OR dropoff=1 → tail
+    if (hasPickup1 || hasDropoff1) {
+      nodeTypes[candidateId] = 'tail';
+      return true;
+    }
+    
+    // TEST 3: If all flags are 0/0 (after normalization) → recursive test
+    if (hasNormalFlags) {
+      // Check: do ALL trips with this stop have a tail stop somewhere on their route?
+      const tripsWithCandidate = trips.filter(trip => {
         const stops = tripStopMaps[trip.trip_id] || [];
-        if (isStopBetweenCore(candidateId, stops, coreStart, coreEnd)) {
-          appearsBetweenCore = true;
+        return stops.some(s => s.stop_id === candidateId);
+      });
+      
+      let allTripsHaveOtherTails = true;
+      
+      for (const trip of tripsWithCandidate) {
+        const stops = tripStopMaps[trip.trip_id] || [];
+        
+        // Get stops OUTSIDE core for this trip
+        const stopsOutsideCore = stops.filter(s => !coreSet.has(s.stop_id));
+        
+        // Check if any stop outside core (excluding candidate itself) is marked as tail
+        const hasTailOnRoute = stopsOutsideCore.some(s => 
+          s.stop_id !== candidateId && nodeTypes[s.stop_id] === 'tail'
+        );
+        
+        if (!hasTailOnRoute) {
+          allTripsHaveOtherTails = false;
           break;
         }
       }
       
-      if (appearsBetweenCore) {
-        // Appears between core → passenger branch
-        nodeTypes[candidateId] = 'passenger';
-        return;
-      }
-      
-      // Get pickup/dropoff flags for this stop (check all occurrences)
-      let hasPickup1 = false;
-      let hasDropoff1 = false;
-      let hasNormalFlags = false;
-      
-      trips.forEach(trip => {
-        const stopTimes = stopTimesIndex[trip.trip_id] || [];
-        const st = stopTimes.find(s => s.stop_id === candidateId);
-        if (st) {
-          const pickup = normalizePickupDropoffType(st.pickup_type);
-          const dropoff = normalizePickupDropoffType(st.drop_off_type);
-          
-          if (pickup === '1' || dropoff === '1') {
-            if (pickup === '1') hasPickup1 = true;
-            if (dropoff === '1') hasDropoff1 = true;
-          } else {
-            hasNormalFlags = true;
-          }
-        }
-      });
-      
-      // If ANY occurrence has pickup=1 OR dropoff=1 → tail
-      if (hasPickup1 || hasDropoff1) {
+      if (allTripsHaveOtherTails && tripsWithCandidate.length > 0) {
+        // All trips with this stop have a tail → this is part of depot route
         nodeTypes[candidateId] = 'tail';
-        changed = true;
-        return;
+        return true;
       }
-      
-      // If all flags are 0/0 (after normalization) → recursive test
-      if (hasNormalFlags) {
-        // Check: do ALL trips with this stop have a tail stop somewhere on their route?
-        const tripsWithCandidate = trips.filter(trip => {
-          const stops = tripStopMaps[trip.trip_id] || [];
-          return stops.some(s => s.stop_id === candidateId);
-        });
-        
-        let allTripsHaveOtherTails = true;
-        
-        for (const trip of tripsWithCandidate) {
-          const stops = tripStopMaps[trip.trip_id] || [];
-          
-          // Get stops OUTSIDE core for this trip
-          const stopsOutsideCore = stops.filter(s => !coreSet.has(s.stop_id));
-          
-          // Check if any stop outside core (excluding candidate itself) is marked as tail
-          const hasTailOnRoute = stopsOutsideCore.some(s => 
-            s.stop_id !== candidateId && nodeTypes[s.stop_id] === 'tail'
-          );
-          
-          if (!hasTailOnRoute) {
-            allTripsHaveOtherTails = false;
-            break;
-          }
-        }
-        
-        if (allTripsHaveOtherTails && tripsWithCandidate.length > 0) {
-          // All trips with this stop have a tail → this is part of depot route
-          nodeTypes[candidateId] = 'tail';
-          changed = true;
-        } else {
-          // Some trips don't have tail → legitimate passenger terminus
-          nodeTypes[candidateId] = 'passenger';
-        }
+    }
+    
+    // FALLBACK: Apply tier-specific default
+    if (!nodeTypes[candidateId]) {
+      nodeTypes[candidateId] = fallbackType;
+      return fallbackType === 'tail'; // Only count as changed if we're classifying as tail
+    }
+    
+    return false;
+  };
+  
+  while (changed && iterations < MAX_ITERATIONS) {
+    changed = false;
+    iterations++;
+    
+    // Process TIER 1 first (ultra-low, bias: TAIL)
+    tier1Candidates.forEach(candidateId => {
+      if (classifyCandidate(candidateId, 'tail')) {
+        changed = true;
+      }
+    });
+    
+    // Then process TIER 2 (low, bias: PASSENGER)
+    tier2Candidates.forEach(candidateId => {
+      if (classifyCandidate(candidateId, 'passenger')) {
+        changed = true;
       }
     });
   }
@@ -3043,12 +3075,12 @@ function buildRouteProfileForCurrentSelection() {
     stops.forEach(st => allStopIds.add(st.stop_id));
   });
   
-  // 7.4: Find low-frequency candidates (threshold 10%)
-  const candidates = findLowFrequencyCandidates(edgeFrequency, Array.from(allStopIds), 0.10);
+  // 7.4: Find low-frequency candidates with tier classification (threshold 10%)
+  const candidateTiers = findLowFrequencyCandidates(edgeFrequency, Array.from(allStopIds), 0.10);
   
-  // 7.5: Classify stops recursively
+  // 7.5: Classify stops recursively with tier-specific fallbacks
   const nodeTypes = classifyTailStopsRecursive(
-    candidates,
+    candidateTiers,
     allTrips,
     tripStopMaps,
     stopTimesIndex,
