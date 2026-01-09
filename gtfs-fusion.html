@@ -3120,8 +3120,34 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   
   console.log(`[Sort] Anchor station: ${anchorStationId}, stop_ids: ${anchorStopIds.length}`);
   
-  // 3. Dla każdego tripu: znajdź CZAS przejazdu przez anchor
-  const tripData = trips.map(trip => {
+  // 3. Podziel tripy na core (przez anchor) i non-core (bez anchor)
+  const coreTrips = [];
+  const nonCoreTrips = [];
+  
+  trips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    const hasAnchor = stops.some(s => anchorStopIds.includes(s.stop_id));
+    
+    if (hasAnchor) {
+      coreTrips.push(trip);
+    } else {
+      nonCoreTrips.push(trip);
+    }
+  });
+  
+  console.log(`[Sort] Core trips: ${coreTrips.length}, Non-core trips: ${nonCoreTrips.length}`);
+  
+  // 4. Zbierz wszystkie stop_ids z core trips (wspólne przystanki)
+  const coreStopIds = new Set();
+  coreTrips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    stops.forEach(s => {
+      coreStopIds.add(s.stop_id);
+    });
+  });
+  
+  // 5. Dla core trips: znajdź CZAS przejazdu przez anchor
+  const coreData = coreTrips.map(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     
     let anchorTime = null;
@@ -3132,33 +3158,69 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       }
     }
     
-    // Normalize time (dodaj leading zero)
+    // Normalize time
     if (anchorTime && String(anchorTime).match(/^\d:/)) {
       anchorTime = "0" + anchorTime;
     }
     
-    // Sentinel dla tripów bez anchor (rzadkie, ale możliwe)
     if (!anchorTime) {
       anchorTime = "99:99:99";
     }
     
     return {
       trip,
-      anchorTime,  // ← CZAS w anchor, nie pozycja!
-      totalStops: stops.length
+      sortTime: anchorTime,
+      totalStops: stops.length,
+      isCore: true
     };
   });
   
-  // 4. Sortuj TYLKO według anchorTime (wspólny punkt czasowy!)
-  tripData.sort((a, b) => {
-    const timeComp = a.anchorTime.localeCompare(b.anchorTime);
+  // 6. Dla non-core trips: znajdź CZAS pierwszego wspólnego przystanku z core
+  const nonCoreData = nonCoreTrips.map(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    let firstCommonTime = null;
+    for (let i = 0; i < stops.length; i++) {
+      if (coreStopIds.has(stops[i].stop_id)) {
+        firstCommonTime = stops[i].departure_time || stops[i].arrival_time;
+        break;
+      }
+    }
+    
+    // Normalize time
+    if (firstCommonTime && String(firstCommonTime).match(/^\d:/)) {
+      firstCommonTime = "0" + firstCommonTime;
+    }
+    
+    // Fallback: jeśli brak wspólnego przystanku, użyj czasu pierwszego przystanku
+    if (!firstCommonTime) {
+      firstCommonTime = stops[0]?.departure_time || "99:99:99";
+      if (String(firstCommonTime).match(/^\d:/)) {
+        firstCommonTime = "0" + firstCommonTime;
+      }
+    }
+    
+    return {
+      trip,
+      sortTime: firstCommonTime,
+      totalStops: stops.length,
+      isCore: false
+    };
+  });
+  
+  // 7. Połącz wszystkie tripy i sortuj według sortTime
+  const allData = [...coreData, ...nonCoreData];
+  
+  allData.sort((a, b) => {
+    const timeComp = a.sortTime.localeCompare(b.sortTime);
     if (timeComp !== 0) return timeComp;
     
-    // Tiebreaker: dłuższe tripy pierwsze
+    // Tiebreaker: core trips pierwsze, potem dłuższe tripy
+    if (a.isCore !== b.isCore) return b.isCore - a.isCore;
     return b.totalStops - a.totalStops;
   });
   
-  return tripData.map(td => td.trip);
+  return allData.map(td => td.trip);
 }
 
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
