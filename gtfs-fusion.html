@@ -1273,7 +1273,7 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
               }
             }
           } catch (e2) {
-            // Ignore cache cleanup errors
+            // Ignore cache cleanup errors - they don't affect core functionality
           }
         }
       }
@@ -3687,7 +3687,7 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
       if (layer && layer.getLatLng) map.setView(layer.getLatLng(), 13);
     }
   } catch (err) {
-    // Ignore fit errors
+    // Ignore map fit errors - they don't prevent map from displaying
   }
 }
 
@@ -5281,7 +5281,7 @@ function openStopTimetable(stopId) {
       mainDestination = currentDir.fullName || currentDir.name || '';
     }
   } catch (e) {
-    // Ignore getAvailableDirections errors
+    // Ignore getAvailableDirections errors - fallback logic handles missing direction data
   }
   
   // Fallback: use old headsign counting logic if needed
@@ -6020,7 +6020,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
           try {
             lineGeometry = await generateLineGeometry(mainRouteStops, route.route_type);
           } catch (err) {
-            // Ignore geometry generation errors
+            // Ignore geometry generation errors - fallback to straight lines between stops
           }
         }
         
@@ -6102,7 +6102,9 @@ if (state.gtfsData && state.selectedRoute) {
   } catch (err) {
     console.error('renderTimetable error:', err);
   }
-  updateMap().catch(() => {}); 
+  updateMap().catch(() => {
+    // Ignore map update errors - map functionality is non-critical for timetable display
+  }); 
 }
 }
 
