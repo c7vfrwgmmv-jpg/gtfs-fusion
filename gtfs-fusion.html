@@ -3146,7 +3146,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
     });
   });
   
-  // 5. Dla core trips: znajdź CZAS przejazdu przez anchor
+  // 5. Sort core trips by anchorTime (ascending)
   const coreData = coreTrips.map(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     
@@ -3169,58 +3169,86 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
     
     return {
       trip,
-      sortTime: anchorTime,
-      totalStops: stops.length,
-      isCore: true
+      anchorTime,
+      totalStops: stops.length
     };
   });
   
-  // 6. Dla non-core trips: znajdź CZAS pierwszego wspólnego przystanku z core
+  // Sort core trips by anchor time
+  coreData.sort((a, b) => {
+    const timeComp = a.anchorTime.localeCompare(b.anchorTime);
+    if (timeComp !== 0) return timeComp;
+    return b.totalStops - a.totalStops;
+  });
+  
+  // 6. Prepare non-core trips with their sortKey (first common stop time)
   const nonCoreData = nonCoreTrips.map(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     
-    let firstCommonTime = null;
+    let sortKey = null;
     for (let i = 0; i < stops.length; i++) {
       if (coreStopIds.has(stops[i].stop_id)) {
-        firstCommonTime = stops[i].departure_time || stops[i].arrival_time;
+        sortKey = stops[i].departure_time || stops[i].arrival_time;
         break;
       }
     }
     
     // Normalize time
-    if (firstCommonTime && String(firstCommonTime).match(/^\d:/)) {
-      firstCommonTime = "0" + firstCommonTime;
+    if (sortKey && String(sortKey).match(/^\d:/)) {
+      sortKey = "0" + sortKey;
     }
     
     // Fallback: jeśli brak wspólnego przystanku, użyj czasu pierwszego przystanku
-    if (!firstCommonTime) {
-      firstCommonTime = stops[0]?.departure_time || "99:99:99";
-      if (String(firstCommonTime).match(/^\d:/)) {
-        firstCommonTime = "0" + firstCommonTime;
+    if (!sortKey) {
+      sortKey = stops[0]?.departure_time || "99:99:99";
+      if (String(sortKey).match(/^\d:/)) {
+        sortKey = "0" + sortKey;
       }
     }
     
     return {
       trip,
-      sortTime: firstCommonTime,
-      totalStops: stops.length,
-      isCore: false
+      sortKey,
+      totalStops: stops.length
     };
   });
   
-  // 7. Połącz wszystkie tripy i sortuj według sortTime
-  const allData = [...coreData, ...nonCoreData];
+  // 7. Inject non-core trips into sorted core list chronologically
+  const result = [];
+  let coreIdx = 0;
+  let nonCoreIdx = 0;
   
-  allData.sort((a, b) => {
-    const timeComp = a.sortTime.localeCompare(b.sortTime);
+  // Sort non-core by sortKey for efficient injection
+  nonCoreData.sort((a, b) => {
+    const timeComp = a.sortKey.localeCompare(b.sortKey);
     if (timeComp !== 0) return timeComp;
-    
-    // Tiebreaker: core trips pierwsze, potem dłuższe tripy
-    if (a.isCore !== b.isCore) return b.isCore - a.isCore;
     return b.totalStops - a.totalStops;
   });
   
-  return allData.map(td => td.trip);
+  // Merge: inject non-core trips at positions where core.anchorTime > nonCore.sortKey
+  while (coreIdx < coreData.length || nonCoreIdx < nonCoreData.length) {
+    if (nonCoreIdx >= nonCoreData.length) {
+      // No more non-core trips, add remaining core trips
+      result.push(coreData[coreIdx++].trip);
+    } else if (coreIdx >= coreData.length) {
+      // No more core trips, add remaining non-core trips
+      result.push(nonCoreData[nonCoreIdx++].trip);
+    } else {
+      // Compare and insert chronologically
+      const coreTime = coreData[coreIdx].anchorTime;
+      const nonCoreTime = nonCoreData[nonCoreIdx].sortKey;
+      
+      if (nonCoreTime.localeCompare(coreTime) < 0) {
+        // Non-core trip comes before this core trip
+        result.push(nonCoreData[nonCoreIdx++].trip);
+      } else {
+        // Core trip comes first (or equal, prioritize core)
+        result.push(coreData[coreIdx++].trip);
+      }
+    }
+  }
+  
+  return result;
 }
 
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
