@@ -2589,6 +2589,11 @@ function calculateStopEdgeFrequency(trips, tripStopMaps) {
   const edgeFrequency = {};
   const totalTrips = trips.length;
   
+  // Safety check for empty trips
+  if (totalTrips === 0) {
+    return edgeFrequency;
+  }
+  
   trips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     for (let i = 0; i < stops.length - 1; i++) {
@@ -2639,8 +2644,11 @@ function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
   }
   
   // If stop is between coreStart and coreEnd → it's a passenger branch
+  // Handle both forward and reverse directions
   if (coreStartIdx !== -1 && coreEndIdx !== -1 && stopIdx !== -1) {
-    return stopIdx > coreStartIdx && stopIdx < coreEndIdx;
+    const minCoreIdx = Math.min(coreStartIdx, coreEndIdx);
+    const maxCoreIdx = Math.max(coreStartIdx, coreEndIdx);
+    return stopIdx > minCoreIdx && stopIdx < maxCoreIdx;
   }
   
   return false;
@@ -2723,13 +2731,13 @@ function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIn
       
       // If all flags are 0/0 (after normalization) → recursive test
       if (hasNormalFlags) {
-        // Check: do ALL trips with this stop (outside core) have a tail stop on their route?
+        // Check: do ALL trips with this stop have a tail stop somewhere on their route?
         const tripsWithCandidate = trips.filter(trip => {
           const stops = tripStopMaps[trip.trip_id] || [];
           return stops.some(s => s.stop_id === candidateId);
         });
         
-        let allTripsHaveTail = true;
+        let allTripsHaveOtherTails = true;
         
         for (const trip of tripsWithCandidate) {
           const stops = tripStopMaps[trip.trip_id] || [];
@@ -2743,12 +2751,12 @@ function classifyTailStopsRecursive(candidates, trips, tripStopMaps, stopTimesIn
           );
           
           if (!hasTailOnRoute) {
-            allTripsHaveTail = false;
+            allTripsHaveOtherTails = false;
             break;
           }
         }
         
-        if (allTripsHaveTail && tripsWithCandidate.length > 0) {
+        if (allTripsHaveOtherTails && tripsWithCandidate.length > 0) {
           // All trips with this stop have a tail → this is part of depot route
           nodeTypes[candidateId] = 'tail';
           changed = true;
@@ -3047,10 +3055,11 @@ function buildRouteProfileForCurrentSelection() {
     coreStops
   );
   
-  // 7.6: Ensure all stops have a classification (fallback to 'noncore' for unclassified)
+  // 7.6: Ensure all stops have a classification (fallback to 'passenger' for safety)
+  // Using 'passenger' instead of 'noncore' ensures unclassified stops are visible
   allStopIds.forEach(stopId => {
     if (!nodeTypes[stopId]) {
-      nodeTypes[stopId] = 'noncore';
+      nodeTypes[stopId] = 'passenger';
     }
   });
 
