@@ -1693,7 +1693,7 @@ function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
     
     // Sort by original sequence first (best effort starting point)
     stopTimes.sort((a, b) => 
-      parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0')
+      parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)
     );
     
     // Get coordinates for all stops
