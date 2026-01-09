@@ -2755,7 +2755,7 @@ function buildRouteProfileForCurrentSelection() {
 
   // 5. Wstępne „mocne” krawędzie jako kandydaci kręgosłupa
   const coreEdges = new Set();
-  const minCoreFraction = 0.2; // depot trips ~5%, variants 30-40%
+  const minCoreFraction = 0.4; // heurystyka: ≥ 40% trips
 
   Object.values(edges).forEach(e => {
     const frac = e.count / tripCount;
@@ -2777,62 +2777,39 @@ function buildRouteProfileForCurrentSelection() {
   });
 
   const coreStartCandidates = Object.keys(coreInDeg).filter(sid => (coreInDeg[sid] || 0) === 0);
-  const allCorePaths = [];
+  const visitedCore = new Set();
+  let bestCorePath = [];
 
-  function dfsAllPaths(startId, path, visited) {
+  function dfsCore(startId, path) {
     path.push(startId);
-    visited.add(startId);
-    
+    visitedCore.add(startId);
     const nexts = coreAdj[startId] || [];
-    
     if (!nexts.length) {
-      // End of path - save if ≥2 stops
-      if (path.length >= 2) {
-        allCorePaths.push(path.slice());
+      if (path.length > bestCorePath.length) {
+        bestCorePath = path.slice();
       }
     } else {
-      let hasUnvisited = false;
       nexts.forEach(nid => {
-        if (!visited.has(nid)) {
-          hasUnvisited = true;
-          const newVisited = new Set(visited);
-          dfsAllPaths(nid, path, newVisited);
+        if (!visitedCore.has(nid)) {
+          dfsCore(nid, path);
+        } else {
+          if (path.length > bestCorePath.length) {
+            bestCorePath = path.slice();
+          }
         }
       });
-      
-      // Cycle detected - save if ≥2
-      if (!hasUnvisited && path.length >= 2) {
-        allCorePaths.push(path.slice());
-      }
     }
-    
     path.pop();
+    visitedCore.delete(startId);
   }
 
-  // Run DFS
   if (coreStartCandidates.length) {
-    coreStartCandidates.forEach(sid => dfsAllPaths(sid, [], new Set()));
+    coreStartCandidates.forEach(sid => dfsCore(sid, []));
   } else {
-    Object.keys(coreAdj).forEach(sid => dfsAllPaths(sid, [], new Set()));
+    Object.keys(coreAdj).forEach(sid => dfsCore(sid, []));
   }
 
-  // Merge all paths
-  const coreStopsSet = new Set();
-  allCorePaths.forEach(path => {
-    path.forEach(sid => {
-      if (nodes[sid]) coreStopsSet.add(sid);
-    });
-  });
-
-  // Use longest path for ordering, add remaining at end
-  const longestPath = allCorePaths.reduce((longest, current) => 
-    current.length > longest.length ? current : longest, []
-  );
-
-  const coreStops = longestPath.filter(sid => nodes[sid]);
-  coreStopsSet.forEach(sid => {
-    if (!coreStops.includes(sid)) coreStops.push(sid);
-  });
+  const coreStops = bestCorePath.filter(sid => nodes[sid]);
 
   const coreSet = new Set(coreStops);
 
@@ -2847,54 +2824,94 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-// --- 7. Improved nodeTypes Classification with Depot Detection ---
-const nodeTypes = {};
+// --- 7. Klasyfikacja Tripów (Radykalne Wycinanie Branchów) ---
+const candidateBranchStops = new Set();
+const candidateTailStops = new Set(); 
+  const forbiddenFromBranch = new Set(); 
 
-// Mark core
-coreStops.forEach(sid => {
-  nodeTypes[sid] = 'core';
-});
+  allTrips.forEach(trip => {
+    const stsRaw = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+    const sts = [...stsRaw].sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+    if (sts.length === 0) return;
 
-// Classify non-core
-allTrips.forEach(trip => {
-  const stops = (stopTimesIndex[trip.trip_id] || [])
-    .slice()
-    .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
-  
-  if (!stops.length) return;
-  
-  // Find core stops in trip
-  const tripCoreIndices = [];
-  stops.forEach((st, idx) => {
-    if (coreSet.has(st.stop_id)) {
-      tripCoreIndices.push(idx);
+    const pts = sts.map(st => ({
+      stop_id: st.stop_id,
+      isCore: coreSet.has(st.stop_id),
+      p: String(st.pickup_type || '0'),
+      d: String(st.drop_off_type || '0')
+    }));
+
+    let firstCoreIdx = pts.findIndex(p => p.isCore);
+    let lastCoreIdx = -1;
+    pts.forEach((p, i) => { if (p.isCore) lastCoreIdx = i; });
+
+    const lastPt = pts[pts.length - 1];
+    // Jeśli ostatni stop to 1/1 - to jest zjazd
+    const isTechnicalTrip = (lastPt.p === '1' && lastPt.d === '1');
+
+if (isTechnicalTrip || firstCoreIdx === -1) {
+  // Zjazd: każdy przystanek poza Core trafia na czarną listę
+  pts.forEach(p => {
+    if (!p.isCore) {
+      forbiddenFromBranch.add(p.stop_id);
+      candidateTailStops.add(p.stop_id);     // <--- DODAJ TO!
     }
   });
+} else {
+      // Pasażerski: dodaj do Branchy, ale tylko prefiks i sufiks
+      pts.slice(0, firstCoreIdx).concat(pts.slice(lastCoreIdx + 1)).forEach(p => {
+        if (!p.isCore) candidateBranchStops.add(p.stop_id);
+      });
+    }
+  });
+
+  // Czyścimy Branchy z czarnej listy zjazdowej
+  forbiddenFromBranch.forEach(sid => candidateBranchStops.delete(sid));  
   
-  // No core = depot trip
-  if (tripCoreIndices.length === 0) {
-    stops.forEach(st => {
-      const pType = String(st.pickup_type || '0');
-      const dType = String(st.drop_off_type || '0');
-      if (pType === '1' && dType === '1') {
-        nodeTypes[st.stop_id] = 'tail'; // depot
-      }
-    });
-    return;
+// 8. Zbuduj nodeTypes: core / branch / tail / noncore
+// TAIL MA NAJWYŻSZY PRIORYTET - jeśli przystanek jest na jakimkolwiek zjeździe, to jest tail
+const nodeTypes = {};
+Object.keys(nodes).forEach(sid => {
+  if (coreSet.has(sid)) {
+    nodeTypes[sid] = 'core';
+  } else if (candidateTailStops.has(sid)) {
+    // TAIL MA NAJWYŻSZY PRIORYTET (nawet jeśli jest też w candidateBranchStops)
+    nodeTypes[sid] = 'tail';
+  } else if (candidateBranchStops.has(sid)) {
+    nodeTypes[sid] = 'branch';
+  } else {
+    nodeTypes[sid] = 'noncore';
   }
+});
+// Dodaj do nodeTypes wszystkie przystanki z candidateTailStops, nawet jeśli nie są w nodes
+candidateTailStops.forEach(sid => {
+  if (!nodeTypes[sid]) {
+    nodeTypes[sid] = 'tail';
+  }
+});
+// NOWA POPRAWKA: Dodaj do nodeTypes wszystkie przystanki które są używane w tripach,
+// ale nie trafiły do nodes (bo były 1/1 i zostały pominięte w grafie)
+allTrips.forEach(trip => {
+  const stsRaw = stopTimesIndex[trip.trip_id] || [];
+  const sts = stsRaw
+    .filter(st => st && st.stop_id)
+    .sort((a, b) => (parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)));
   
-  // Classify gaps
-  stops.forEach(st => {
-    if (coreSet.has(st.stop_id)) return;
-    if (nodeTypes[st.stop_id] === 'tail') return; // Don't overwrite tail classification
-    
-    const pType = String(st.pickup_type || '0');
-    const dType = String(st.drop_off_type || '0');
-    
-    if (pType === '1' && dType === '1') {
-      nodeTypes[st.stop_id] = 'tail'; // depot
-    } else {
-      nodeTypes[st.stop_id] = 'branch'; // variant/terminus
+  sts.forEach(st => {
+    const stId = st.stop_id;
+    // Jeśli ten przystanek nie ma typu, sprawdź czy jest na trasie zjazdu
+    if (!nodeTypes[stId]) {
+      const pickup = st.pickup_type;
+      const dropoff = st.drop_off_type;
+      const isStrictTech = (pickup === '1' && dropoff === '1');
+      
+      if (isStrictTech || candidateTailStops.has(stId)) {
+        // Zajezdnia lub zjazd - oznacz jako tail
+        nodeTypes[stId] = 'tail';
+      } else {
+        // Inny nieznany - domyślnie noncore
+        nodeTypes[stId] = 'noncore';
+      }
     }
   });
 });
@@ -2946,77 +2963,6 @@ allTrips.forEach(trip => {
     });
   });
 
-  // 9.5. Pre-compute branchTopology
-  const branchTopology = {};
-
-  allTrips.forEach(trip => {
-    const stops = (stopTimesIndex[trip.trip_id] || [])
-      .slice()
-      .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
-    
-    if (!stops.length) return;
-    
-    // Find core stops
-    const tripCoreStops = [];
-    const tripCoreIndices = [];
-    
-    stops.forEach((st, idx) => {
-      if (coreSet.has(st.stop_id)) {
-        tripCoreStops.push(st.stop_id);
-        tripCoreIndices.push(idx);
-      }
-    });
-    
-    if (tripCoreStops.length === 0) return;
-    
-    // Analyze gaps
-    for (let i = 0; i <= tripCoreStops.length; i++) {
-      let fromCore, toCore, gapStart, gapEnd;
-      
-      if (i === 0) {
-        // Before first core
-        fromCore = null;
-        toCore = tripCoreStops[0];
-        gapStart = 0;
-        gapEnd = tripCoreIndices[0];
-      } else if (i === tripCoreStops.length) {
-        // After last core
-        fromCore = tripCoreStops[i-1];
-        toCore = null;
-        gapStart = tripCoreIndices[i-1] + 1;
-        gapEnd = stops.length;
-      } else {
-        // Between cores
-        fromCore = tripCoreStops[i-1];
-        toCore = tripCoreStops[i];
-        gapStart = tripCoreIndices[i-1] + 1;
-        gapEnd = tripCoreIndices[i];
-      }
-      
-      // Record branch positions
-      for (let j = gapStart; j < gapEnd; j++) {
-        const st = stops[j];
-        if (nodeTypes[st.stop_id] !== 'branch') continue;
-        
-        const posKey = fromCore + "→" + toCore;
-        
-        if (!branchTopology[st.stop_id]) {
-          branchTopology[st.stop_id] = {};
-        }
-        
-        if (!branchTopology[st.stop_id][posKey]) {
-          branchTopology[st.stop_id][posKey] = {
-            fromCore: fromCore,
-            toCore: toCore,
-            count: 0
-          };
-        }
-        
-        branchTopology[st.stop_id][posKey].count++;
-      }
-    }
-  });
-
   // 10. Zapisz profil w state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
@@ -3032,7 +2978,6 @@ allTrips.forEach(trip => {
     stopMetadata,
     coreStationsSet: coreStationsSet,
     tripCoreIndices: tripCoreIndices,
-    branchTopology,
     version: 3,
   };
   state.routeProfiles[key][dir] = profile;
@@ -3085,171 +3030,29 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
 function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
   const profile = getCurrentRouteProfile();
   
-  if (!profile || !Array.isArray(profile.coreStops) || profile.coreStops.length === 0) {
+  if (!profile || !Array.isArray(profile. coreStops) || profile.coreStops.length === 0) {
     return buildMasterList(sortedTrips, tripStopMaps, stopsIndex);
   }
 
-  const { coreStops, branchTopology, nodeTypes } = profile;
-
-  const getStationDisplayName = (stationId, stopIds) => {
-    if (stopsIndex[stationId]?.stop_name) {
-      return stopsIndex[stationId].stop_name;
-    }
-    const firstStop = stopsIndex[stopIds[0]];
-    return firstStop?.stop_name || stationId;
-  };
-
-  // Use topology-based ordering if available
-  if (branchTopology) {
-    // Step 1: Select best position for each branch
-    const branchPlacements = {};
-
-    for (const [stopId, positions] of Object.entries(branchTopology)) {
-      // Skip depot stops
-      if (nodeTypes && nodeTypes[stopId] === 'tail') {
-        continue;
-      }
-      
-      // Find position with maximum count
-      let bestPosition = null;
-      let maxCount = 0;
-      
-      for (const [posKey, data] of Object.entries(positions)) {
-        if (data.count > maxCount) {
-          maxCount = data.count;
-          bestPosition = data;
-        }
-      }
-      
-      if (bestPosition) {
-        branchPlacements[stopId] = {
-          fromCore: bestPosition.fromCore,
-          toCore: bestPosition.toCore,
-          count: maxCount
-        };
-      }
-    }
-
-    // Step 2: Group branches by position
-    const branchGroups = {};
-
-    for (const [stopId, placement] of Object.entries(branchPlacements)) {
-      const key = `${placement.fromCore}→${placement.toCore}`;
-      
-      if (!branchGroups[key]) {
-        branchGroups[key] = {
-          fromCore: placement.fromCore,
-          toCore: placement.toCore,
-          stops: []
-        };
-      }
-      
-      branchGroups[key].stops.push(stopId);
-    }
-
-    // Step 3: Build masterList with core stops as skeleton
-    const stopsByStation = new Map();
-    coreStops.forEach(sid => {
-      const stationId = getStationId(sid, stopsIndex);
-      if (!stopsByStation.has(stationId)) {
-        stopsByStation.set(stationId, []);
-      }
-      stopsByStation.get(stationId).push(sid);
-    });
-
-    let masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
-      name: getStationDisplayName(stationId, stopIds),
-      stopIds: stopIds,
-      id: stopIds[0]
-    }));
-
-    // Sort branch groups by position to avoid index shifting issues
-    // Process from end to beginning of the route
-    const groupsArray = Object.entries(branchGroups).map(([posKey, group]) => ({
-      posKey,
-      ...group
-    }));
-    
-    // Sort by fromCore position (descending), so we insert from end to start
-    groupsArray.sort((a, b) => {
-      const aFromIdx = a.fromCore ? masterList.findIndex(m => 
-        (m.stopIds && m.stopIds.includes(a.fromCore)) || m.id === a.fromCore
-      ) : -1;
-      const bFromIdx = b.fromCore ? masterList.findIndex(m => 
-        (m.stopIds && m.stopIds.includes(b.fromCore)) || m.id === b.fromCore
-      ) : -1;
-      return bFromIdx - aFromIdx; // Descending order
-    });
-
-    // Insert branch groups based on topology
-    for (const group of groupsArray) {
-      const {fromCore, toCore, stops} = group;
-      
-      // Group stops by station
-      const branchByStation = new Map();
-      stops.forEach(sid => {
-        const stationId = getStationId(sid, stopsIndex);
-        if (!branchByStation.has(stationId)) {
-          branchByStation.set(stationId, []);
-        }
-        branchByStation.get(stationId).push(sid);
-      });
-
-      const branchItems = Array.from(branchByStation.entries()).map(([stationId, stopIds]) => ({
-        name: getStationDisplayName(stationId, stopIds),
-        stopIds: stopIds,
-        id: stopIds[0]
-      }));
-
-      if (fromCore === null && toCore !== null) {
-        // Route start - insert BEFORE toCore
-        const toIdx = masterList.findIndex(m => 
-          (m.stopIds && m.stopIds.includes(toCore)) || m.id === toCore
-        );
-        if (toIdx >= 0) {
-          masterList.splice(toIdx, 0, ...branchItems);
-        }
-      } 
-      else if (toCore === null && fromCore !== null) {
-        // Route terminus - insert AFTER fromCore
-        const fromIdx = masterList.findIndex(m => 
-          (m.stopIds && m.stopIds.includes(fromCore)) || m.id === fromCore
-        );
-        if (fromIdx >= 0) {
-          masterList.splice(fromIdx + 1, 0, ...branchItems);
-        }
-      } 
-      else if (fromCore !== null && toCore !== null) {
-        // Internal branch - insert BETWEEN fromCore and toCore
-        const fromIdx = masterList.findIndex(m => 
-          (m.stopIds && m.stopIds.includes(fromCore)) || m.id === fromCore
-        );
-        const toIdx = masterList.findIndex(m => 
-          (m.stopIds && m.stopIds.includes(toCore)) || m.id === toCore
-        );
-        
-        if (fromIdx >= 0 && toIdx > fromIdx) {
-          // Insert after fromCore (before toCore)
-          masterList.splice(fromIdx + 1, 0, ...branchItems);
-        }
-      }
-    }
-
-    return masterList;
-  }
-
-  // FALLBACK: Old logic for backward compatibility (when branchTopology is missing)
-  const coreSet = new Set(coreStops);
+  const { coreStops, nodes } = profile;
 
   // 1. Bazowa lista = kręgosłup - grupuj po stacji
   const stopsByStation = new Map();
   coreStops.forEach(sid => {
     const stationId = getStationId(sid, stopsIndex);
     if (!stopsByStation.has(stationId)) {
-      stopsByStation.set(stationId, []);
+      stopsByStation. set(stationId, []);
     }
     stopsByStation.get(stationId).push(sid);
   });
+
+  const getStationDisplayName = (stationId, stopIds) => {
+    if (stopsIndex[stationId]?.stop_name) {
+      return stopsIndex[stationId]. stop_name;
+    }
+    const firstStop = stopsIndex[stopIds[0]];
+    return firstStop?.stop_name || stationId;
+  };
 
   let masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
     name: getStationDisplayName(stationId, stopIds),
@@ -3258,15 +3061,16 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
   }));
 
   // 2. Znajdź branch-prefiksy
+  const coreSet = new Set(coreStops);
   const branchCandidatesPerCore = {};
 
   sortedTrips.forEach(trip => {
     const sts = tripStopMaps[trip.trip_id] || [];
-    if (!sts.length) return;
+    if (! sts.length) return;
 
     let firstCoreIdx = -1;
     for (let i = 0; i < sts.length; i++) {
-      if (coreSet.has(sts[i].stop_id)) {
+      if (coreSet.has(sts[i]. stop_id)) {
         firstCoreIdx = i;
         break;
       }
@@ -3277,7 +3081,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
     for (let i = 0; i < firstCoreIdx; i++) {
       const sid = sts[i].stop_id;
       if (coreSet.has(sid)) continue;
-      if (!branchCandidatesPerCore[entryCoreStopId]) {
+      if (! branchCandidatesPerCore[entryCoreStopId]) {
         branchCandidatesPerCore[entryCoreStopId] = new Set();
       }
       branchCandidatesPerCore[entryCoreStopId].add(sid);
@@ -3287,7 +3091,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
   // 3. Wstaw branch-prefiksy do masterList
   coreStops.forEach(coreId => {
     const branchesSet = branchCandidatesPerCore[coreId];
-    if (!branchesSet || !branchesSet.size) return;
+    if (!branchesSet || ! branchesSet.size) return;
 
     const branches = Array.from(branchesSet);
     const coreIdx = masterList.findIndex(m => 
@@ -3322,7 +3126,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
 
       masterList.splice(insertPos, 0, {
         id: stopIds[0],
-        name: getStationDisplayName(stationId, stopIds),
+        name:  getStationDisplayName(stationId, stopIds),
         stopIds: stopIds
       });
       insertPos++;
@@ -3357,8 +3161,8 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
       }
       
       if (idx !== -1) {
-        if (masterList[idx].stopIds && !masterList[idx].stopIds.includes(sId)) {
-          masterList[idx].stopIds.push(sId);
+        if (masterList[idx].stopIds && ! masterList[idx].stopIds. includes(sId)) {
+          masterList[idx].stopIds. push(sId);
         }
         lastIdx = idx;
       } else {
@@ -3368,7 +3172,7 @@ function buildMasterListWithProfile(sortedTrips, tripStopMaps, stopsIndex) {
           name,
           stopIds: [sId]
         };
-        masterList.splice(lastIdx + 1, 0, newEntry);
+        masterList. splice(lastIdx + 1, 0, newEntry);
         // Insert the stationId into the cache at the same position
         masterListStationIds.splice(lastIdx + 1, 0, stationId);
         lastIdx++;
