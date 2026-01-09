@@ -1242,6 +1242,12 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
     }
 
     function cacheShapes(shapesIndex, simplified) {
+      // MEMORY OPTIMIZATION: Disabled localStorage cache for shapes
+      // Large GTFS files can exceed localStorage quota and cause performance issues
+      // The cache benefit is minimal compared to the memory/storage overhead
+      return;
+      
+      /* DISABLED CODE:
       try {
         const cacheKey = hashShapesData(shapesIndex);
         
@@ -1277,9 +1283,14 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
           }
         }
       }
+      */
     }
 
     function loadCachedShapes(shapesIndex) {
+      // MEMORY OPTIMIZATION: Disabled localStorage cache for shapes
+      return null;
+      
+      /* DISABLED CODE:
       try {
         const cacheKey = hashShapesData(shapesIndex);
         const cached = localStorage.getItem(cacheKey);
@@ -1310,6 +1321,7 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       } catch (e) {
         return null;
       }
+      */
     }
 
     function simplifyShapes(shapesIndex, tolerance = 0.0003) {
@@ -1942,26 +1954,27 @@ trips.forEach(t => {
 });
 
 // Clean up stops - remove fields not used frequently
+// NOTE: parent_station is KEPT - it's used for grouping stops by station
 stops.forEach(s => {
   if (s) {
     delete s.stop_code;
     delete s.stop_url;
     delete s.location_type;
-    delete s.parent_station;
+    // delete s.parent_station; // KEEP - used for stop grouping
     delete s.stop_timezone;
     delete s.wheelchair_boarding;
     delete s.level_id;
   }
 });
 
-// Clean up stop_times - remove pickup/drop_off types after they've been used
+// Clean up stop_times - Note: pickup_type and drop_off_type are kept as they're used in route profile analysis
+// These fields are relatively small compared to arrival_time which we've already removed
 Object.keys(stopTimesIndex).forEach(tripId => {
   const stopTimes = stopTimesIndex[tripId];
   if (stopTimes) {
-    stopTimes.forEach(st => {
-      // Keep pickup_type and drop_off_type for now - they're used in processing
-      // We'll evaluate if these can be removed in future optimization
-    });
+    // All optimizations for stop_times are already done in parseStopTimesStreamWithWorker
+    // - arrival_time removed (saves ~30-40% memory)
+    // - Only essential fields kept: stop_id, departure_time, stop_sequence, pickup_type, drop_off_type
   }
 });
 
