@@ -4,20 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>GTFS Fusion</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-  <script>
-    // Define exports for fflate UMD compatibility
-    if (typeof exports === 'undefined') {
-      var exports = {};
-    }
-  </script>
   <script src="https://unpkg.com/fflate@0.8.1/umd/index.js"></script>
-  <script>
-    // Expose fflate globally from exports
-    if (typeof exports !== 'undefined' && exports.unzip) {
-      window.fflate = exports;
-    }
-  </script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
@@ -1465,26 +1452,24 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       };
       
       const processLine = (line) => {
-        if (!line. trim()) return;
+        if (!line.trim()) return;
         
         if (!headers) {
-  const rawHeaders = line. split(',').map(h => h.replace(/^"|"$/g, '').trim());  // ← Dodaj .map()
-  headers = {
-    tripIdx: -1,
-    stopIdx: -1,
+          const rawHeaders = line.split(',').map(h => h.replace(/^"|"$/g, '').trim());  // ← Dodaj .map()
+          headers = {
+            tripIdx: -1,
+            stopIdx: -1,
             seqIdx: -1,
-            arrIdx: -1,
             depIdx: -1,
             pickupIdx: -1,
             dropoffIdx: -1
           };
           
-rawHeaders.forEach((h, i) => {
-    const normalized = normalizeKey(h);
+          rawHeaders.forEach((h, i) => {
+            const normalized = normalizeKey(h);
             if (normalized === 'trip_id') headers.tripIdx = i;
             else if (normalized === 'stop_id') headers.stopIdx = i;
             else if (normalized === 'stop_sequence') headers.seqIdx = i;
-            else if (normalized === 'arrival_time') headers.arrIdx = i;
             else if (normalized === 'departure_time') headers.depIdx = i;
             else if (normalized === 'pickup_type') headers.pickupIdx = i;
             else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
@@ -1512,7 +1497,6 @@ rawHeaders.forEach((h, i) => {
         
         stopTimesIndex[tripId].push({
           stop_id: stopId,
-          arrival_time: getCol(cols, headers.arrIdx),
           departure_time: getCol(cols, headers.depIdx),
           stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
           pickup_type: getCol(cols, headers.pickupIdx) || '0',  // ← Removed String()
@@ -1813,21 +1797,10 @@ rawHeaders.forEach((h, i) => {
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
-        // Check if fflate is available
-        let zip;
         let routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile;
         
-        if (typeof fflate === 'undefined') {
-          state.loadingStep = 'Rozpakowywanie ZIP (JSZip)...'; render();
-          zip = await JSZip.loadAsync(file);
-          state.loadingStep = 'Wyodrębnianie plików...'; render();
-          
-          const files = ['routes.txt','trips.txt','stop_times.txt','stops.txt','calendar.txt','calendar_dates.txt','agency.txt','shapes.txt'];
-          [routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile] = files.map(f => zip.file(f));
-        } else {
-          // Use fflate (fast path)
           state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
-          zip = await unzipWithFflate(file);
+          const zip = await unzipWithFflate(file);
           state.loadingStep = 'Wyodrębnianie plików...'; render();
           
           routesFile = findFile(zip.files, 'routes.txt');
@@ -1838,7 +1811,6 @@ rawHeaders.forEach((h, i) => {
           calendarDatesFile = findFile(zip.files, 'calendar_dates.txt');
           agenciesFile = findFile(zip.files, 'agency.txt');
           shapesFile = findFile(zip.files, 'shapes.txt');
-        }
         
         // Walidacja wymaganych plików
         if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
@@ -1859,30 +1831,35 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
         state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
-        const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
+        const stopTimesPromise = parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
           state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
         
-        // Parse shapes.txt if available (optional)
-        let shapesIndex = {};
+        let shapesPromise = Promise.resolve({});
         if (shapesFile) {
           state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
+          shapesPromise = parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
+            state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
+            state.loadingProgressPercent = percent || state.loadingProgressPercent;
+            render();
+          });
+        }
+        
+        const [stopTimesIndex, rawShapes] = await Promise.all([stopTimesPromise, shapesPromise]);
+        
+        // Parse shapes.txt if available (optional)
+        let shapesIndex = {};
+        if (shapesFile && rawShapes) {
           try {
-            const rawShapes = await parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
-              state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
-              state.loadingProgressPercent = percent || state.loadingProgressPercent;
-              render();
-            });
-            
             // Try to load from cache
             let simplifiedShapes = loadCachedShapes(rawShapes);
             
             if (!simplifiedShapes) {
               // Simplify and cache
               state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
-              simplifiedShapes = simplifyShapes(rawShapes, 0.0001);
+              simplifiedShapes = simplifyShapes(rawShapes, 0.0003);
               cacheShapes(rawShapes, simplifiedShapes);
             }
             
