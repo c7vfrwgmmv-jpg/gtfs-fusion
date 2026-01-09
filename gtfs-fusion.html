@@ -1697,7 +1697,7 @@ function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
     );
     
     // Get coordinates for all stops
-    const stopsWithCoords = stopTimes.map((st, originalIdx) => {
+    const stopsWithCoords = stopTimes.map((st) => {
       const stop = stopsIndex[st.stop_id];
       const lat = parseFloat(stop?.stop_lat);
       const lon = parseFloat(stop?.stop_lon);
@@ -1706,7 +1706,7 @@ function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
         return null;
       }
       
-      return { stopTime: st, lat, lon, originalIdx };
+      return { stopTime: st, lat, lon };
     }).filter(Boolean);
     
     // Skip if missing coordinates (broken dataset - can't fix)
