@@ -1738,8 +1738,14 @@ function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
   // Convert to array with coordinates
   const stopsWithCoords = Array.from(allStops).map(stopId => {
     const stop = stopsIndex[stopId];
-    const lat = parseFloat(stop?.stop_lat);
-    const lon = parseFloat(stop?.stop_lon);
+    
+    // Check if stop exists before accessing properties
+    if (!stop) {
+      return null;
+    }
+    
+    const lat = parseFloat(stop.stop_lat);
+    const lon = parseFloat(stop.stop_lon);
     
     if (isNaN(lat) || isNaN(lon)) {
       return null;
