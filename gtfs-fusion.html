@@ -1552,7 +1552,33 @@ function bearingDifference(bearing1, bearing2) {
 }
 
 /**
+ * Calculate representative bearing from a bearing vector
+ * Uses circular mean for more accurate representation across 0/360° boundary
+ * @param {Array<number>} bearingVector - Array of bearings in degrees
+ * @returns {number} Representative bearing in degrees (0-360°)
+ */
+function getRepresentativeBearing(bearingVector) {
+  if (!bearingVector || bearingVector.length === 0) return null;
+  
+  // Calculate circular mean to handle 0/360° wrap-around correctly
+  let sinSum = 0;
+  let cosSum = 0;
+  
+  for (const bearing of bearingVector) {
+    const rad = bearing * TO_RAD;
+    sinSum += Math.sin(rad);
+    cosSum += Math.cos(rad);
+  }
+  
+  const meanRad = Math.atan2(sinSum / bearingVector.length, cosSum / bearingVector.length);
+  const meanBearing = (meanRad * TO_DEG + 360) % 360;
+  
+  return meanBearing;
+}
+
+/**
  * Compare two bearing vectors to determine if they represent opposite directions
+ * Works even when trips start/end at different points by using representative bearings
  * @param {Array<number>} vector1 - First bearing vector
  * @param {Array<number>} vector2 - Second bearing vector
  * @returns {number} 1 if same direction, -1 if opposite, 0 if uncertain
@@ -1560,36 +1586,27 @@ function bearingDifference(bearing1, bearing2) {
 function compareBearingVectors(vector1, vector2) {
   if (!vector1 || !vector2 || vector1.length === 0 || vector2.length === 0) return 0;
   
-  const minLength = Math.min(vector1.length, vector2.length);
-  let sameCount = 0;
-  let oppositeCount = 0;
+  // Calculate representative bearing for each trip
+  const bearing1 = getRepresentativeBearing(vector1);
+  const bearing2 = getRepresentativeBearing(vector2);
   
-  for (let i = 0; i < minLength; i++) {
-    const diff = bearingDifference(vector1[i], vector2[i]);
-    
-    // If angle difference < 60°, consider it same direction
-    if (diff < 60) {
-      sameCount++;
-    }
-    // If angle difference > 120°, consider it opposite direction
-    else if (diff > 120) {
-      oppositeCount++;
-    }
-    // Special case for L/U-shaped routes: 75-105° (perpendicular) suggests opposite directions
-    // This handles routes with 90° turns where reversed trips have perpendicular bearings
-    else if (diff >= 75 && diff <= 105) {
-      oppositeCount += 0.5; // Count as partial evidence of opposite direction
-    }
-    // 60-75° and 105-120° remain ambiguous
+  if (bearing1 === null || bearing2 === null) return 0;
+  
+  // Compare the representative bearings
+  const diff = bearingDifference(bearing1, bearing2);
+  
+  // Same direction: < 60° difference
+  if (diff < 60) {
+    return 1;
   }
-  
-  // Require at least 50% of segments to match directionality for robust detection
-  // This handles L/U-shaped routes where perpendicular segments provide partial evidence
-  const threshold = minLength * 0.5;
-  
-  if (sameCount >= threshold) return 1;
-  if (oppositeCount >= threshold) return -1;
-  return 0;
+  // Opposite or perpendicular (for L/U shapes): > 75° difference
+  else if (diff > 75) {
+    return -1;
+  }
+  // Ambiguous: 60-75°
+  else {
+    return 0;
+  }
 }
 
 /**
