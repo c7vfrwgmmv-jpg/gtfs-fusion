@@ -2687,6 +2687,8 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
 
 // ═══════════════════════════════════════════════════════════════
 // DEBUG UTILITIES
+// These functions are exposed to window for console debugging during development.
+// They don't affect production functionality and can be called via browser console.
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -4119,6 +4121,7 @@ function adjacentSwapOrder(trips, tripMappings, visiblePassengerRowIndices, para
 
 /**
  * Debug helper: compute quality of adjacent-swaps ordering
+ * Available via window.debugAdjacentSwapQuality() for console debugging.
  * 
  * Counts remaining adjacent inversions after ordering, where an inversion is
  * a pair (i, i+1) where left times frequently exceed right times by margin.
