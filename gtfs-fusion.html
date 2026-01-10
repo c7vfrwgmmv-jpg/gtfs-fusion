@@ -1540,6 +1540,79 @@ function clusterByBearing(bearingData) {
 }
 
 /**
+ * Calculate percentage of stops in correct order between two sequences
+ * @param {Array<string>} sequence1 - First stop sequence
+ * @param {Array<string>} sequence2 - Reference stop sequence
+ * @returns {number} Match score between 0 and 1
+ */
+function calculateSequenceMatch(sequence1, sequence2) {
+  if (!sequence1 || !sequence2 || sequence1.length === 0 || sequence2.length === 0) {
+    return 0;
+  }
+  
+  // Calculate percentage of stops in correct order
+  let matches = 0;
+  let lastIdx = -1;
+  
+  sequence1.forEach(stopId => {
+    const idx = sequence2.indexOf(stopId, lastIdx + 1);
+    if (idx > lastIdx) {
+      matches++;
+      lastIdx = idx;
+    }
+  });
+  
+  return matches / Math.max(sequence1.length, sequence2.length);
+}
+
+/**
+ * Detect and override directionless conflicts within same direction_id group
+ * Trips with reversed stop sequences are moved to opposite direction_id
+ * @param {Object} tripsByDirection - Object with '0' and '1' keys containing trip arrays
+ * @param {Object} stopTimesIndex - Index of stop times by trip_id
+ */
+function detectAndOverrideDirectionlessConflicts(tripsByDirection, stopTimesIndex) {
+  Object.keys(tripsByDirection).forEach(directionId => {
+    const trips = tripsByDirection[directionId];
+    if (trips.length <= 1) return;
+    
+    // 1. FIND LONGEST TRIP (reference pattern)
+    let longestTrip = null;
+    let maxStops = 0;
+    
+    trips.forEach(trip => {
+      const stops = stopTimesIndex[trip.trip_id] || [];
+      if (stops.length > maxStops) {
+        maxStops = stops.length;
+        longestTrip = trip;
+      }
+    });
+    
+    if (!longestTrip) return;
+    
+    const referenceSequence = (stopTimesIndex[longestTrip.trip_id] || [])
+      .map(st => st.stop_id);
+    
+    // 2. CHECK EACH TRIP FOR CONFLICTS
+    trips.forEach(trip => {
+      if (trip.trip_id === longestTrip.trip_id) return;
+      
+      const tripStops = (stopTimesIndex[trip.trip_id] || [])
+        .map(st => st.stop_id);
+      
+      // Calculate forward and reverse match scores
+      const forwardMatch = calculateSequenceMatch(tripStops, referenceSequence);
+      const reverseMatch = calculateSequenceMatch([...tripStops].reverse(), referenceSequence);
+      
+      // 3. OVERRIDE if reversed
+      if (reverseMatch > forwardMatch) {
+        trip.direction_id = directionId === '0' ? '1' : '0';
+      }
+    });
+  });
+}
+
+/**
  * Main function to enrich trips with direction_id
  * @param {Array<Object>} trips - Array of trip objects
  * @param {Object} stopTimesIndex - Index of stop times by trip_id
@@ -1662,6 +1735,15 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
         trip.direction_id = '0'; // Fallback
       }
     });
+    
+    // STEP 3C: DIRECTIONLESS CONFLICT DETECTION AND OVERRIDE
+    // Detect trips with reversed sequences within same direction_id group
+    const tripsByDirection = {
+      '0': tripsToProcess.filter(t => (t.direction_id || '0') === '0'),
+      '1': tripsToProcess.filter(t => (t.direction_id || '0') === '1')
+    };
+    
+    detectAndOverrideDirectionlessConflicts(tripsByDirection, stopTimesIndex);
   }
 }
 
