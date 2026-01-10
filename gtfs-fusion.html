@@ -3078,6 +3078,67 @@ function buildRouteProfileForCurrentSelection() {
   allTrips = allTrips.filter(t => (t.direction_id || '0') === dir);
   if (!allTrips.length) return null;
 
+  // 🚏 LOG 1: Sprawdź zebrane trips PRZED jakimkolwiek filtrowaniem
+  console.log(`\n🚏 Filtrowanie zajezdni/depotów:`);
+  console.log(`  Input trips: ${allTrips.length}`);
+  
+  // Sprawdź czy problematyczny trip jest obecny
+  const problematicTripId = '277334823';
+  const problematicTrip = allTrips.find(t => t.trip_id === problematicTripId);
+  
+  if (problematicTrip) {
+    const probStops = stopTimesIndex[problematicTripId] || [];
+    const probSorted = probStops
+      .filter(st => st && st.stop_id)
+      .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+    
+    const firstStopName = probSorted.length > 0 ? (stopsIndex[probSorted[0].stop_id]?.stop_name || probSorted[0].stop_id) : '?';
+    const lastStopName = probSorted.length > 0 ? (stopsIndex[probSorted[probSorted.length - 1].stop_id]?.stop_name || probSorted[probSorted.length - 1].stop_id) : '?';
+    
+    console.log(`  🔍 Trip ${problematicTripId} (Betriebshof Köpenick):`);
+    console.log(`     Status: ✅ ZNALEZIONY w allTrips (NIE został odfiltrowany!)`);
+    console.log(`     Stops: ${probSorted.length}`);
+    if (probSorted.length > 0) {
+      const first3 = probSorted.slice(0, 3).map(s => stopsIndex[s.stop_id]?.stop_name || s.stop_id);
+      console.log(`     Pierwsze 3: ${first3.join(' → ')}`);
+      console.log(`     Pierwszy: "${firstStopName}"`);
+      console.log(`     Ostatni: "${lastStopName}"`);
+    }
+  } else {
+    console.log(`  ℹ️ Trip ${problematicTripId} NIE znaleziony w tej selekcji (może być w innym kierunku/route)`);
+  }
+  
+  // Pokaż przykłady trips z potencjalnymi depotami
+  console.log(`  📋 Przykłady WSZYSTKICH trips (pierwsze 5):`);
+  allTrips.slice(0, 5).forEach(trip => {
+    const stops = stopTimesIndex[trip.trip_id] || [];
+    const sorted = stops
+      .filter(st => st && st.stop_id)
+      .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+    
+    const firstStop = sorted.length > 0 ? (stopsIndex[sorted[0].stop_id]?.stop_name || sorted[0].stop_id) : '?';
+    const lastStop = sorted.length > 0 ? (stopsIndex[sorted[sorted.length - 1].stop_id]?.stop_name || sorted[sorted.length - 1].stop_id) : '?';
+    
+    // Sprawdź czy nazwa zawiera depot keywords
+    const depotKeywords = ['Betriebshof', 'depot', 'Depot', 'DEPOT', 'zajezdnia', 'Zajezdnia'];
+    const hasDepotKeyword = depotKeywords.some(kw => firstStop.includes(kw) || lastStop.includes(kw));
+    const marker = hasDepotKeyword ? ' ⚠️ DEPOT?' : '';
+    
+    console.log(`    - Trip ${trip.trip_id}: ${sorted.length} stops, ${firstStop} → ${lastStop}${marker}`);
+  });
+  
+  // 🎯 Pokaż kryteria filtrowania (jeśli jakieś istnieją)
+  console.log(`  🎯 Kryteria filtrowania:`);
+  console.log(`     - Filtrowanie po direction_id: TAK (${dir})`);
+  console.log(`     - Filtrowanie zajezdni/depotów: BRAK ❌`);
+  console.log(`     - Filtrowanie krótkich trips: BRAK ❌`);
+  console.log(`     - Min liczba stops: BRAK (brak limitu)`);
+  console.log(`  ⚠️ UWAGA: Wszystkie trips przechodzą dalej bez filtrowania depotów!`);
+  
+  // Output po "filtrowaniu" (brak zmian)
+  console.log(`  Output trips: ${allTrips.length} (bez zmian - brak filtrowania!)`);
+  console.log(`  ❌ Odfiltrowano: 0 trips (żadne filtrowanie nie działa!)\n`);
+
   // === NOWA LOGIKA: Budowanie wzorcowej trasy ===
   const CORE_THRESHOLD = 0.10; // 10%
 
@@ -3447,15 +3508,30 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
   });
   
   // Process all trips to add stops not in core
+  const problematicTripId = '277334823';
+  
   sortedTrips.forEach((trip, tripIdx) => {
     const tripStops = tripStopMaps[trip.trip_id] || [];
     let lastMasterIdx = -1;
     
     // 🆕 LOG 3: Tylko dla pierwszego tripu - pokaż WSZYSTKIE operacje
     const isFirstTrip = (tripIdx === 0);
+    const isProblematicTrip = (trip.trip_id === problematicTripId);
     
     if (isFirstTrip) {
       console.log(`\n  🚌 Processing trip #${tripIdx} (${trip.trip_id}):`);
+      console.log(`     Trip ma ${tripStops.length} stops:`, 
+        tripStops.slice(0, 10).map(st => {
+          const stop = stopsIndex[st.stop_id];
+          return stop?.stop_name || st.stop_id;
+        }).join(' → ')
+      );
+    }
+    
+    // Specjalne logi dla problematycznego tripu
+    if (isProblematicTrip) {
+      console.log(`\n  🔍 Processing PROBLEMATIC trip #${tripIdx} (${trip.trip_id}):`);
+      console.log(`     ⚠️ To jest trip z Betriebshof Köpenick!`);
       console.log(`     Trip ma ${tripStops.length} stops:`, 
         tripStops.slice(0, 10).map(st => {
           const stop = stopsIndex[st.stop_id];
@@ -3485,9 +3561,12 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
         lastMasterIdx = existingIdx;
         
         // 🆕 LOG 4: Znaleziono istniejący przystanek
-        if (isFirstTrip && stopIdx < 10) {
+        if ((isFirstTrip || isProblematicTrip) && stopIdx < 10) {
           const stopName = stopsIndex[stopId]?.stop_name || stopId;
-          console.log(`     [${stopIdx}] "${stopName}" → już jest na pozycji [${existingIdx}]`);
+          const depotKeywords = ['Betriebshof', 'depot', 'Depot'];
+          const isDepot = depotKeywords.some(kw => stopName.includes(kw));
+          const marker = isDepot ? ' ⚠️ DEPOT!' : '';
+          console.log(`     [${stopIdx}] "${stopName}" → już jest na pozycji [${existingIdx}]${marker}`);
         }
         
       } else {
@@ -3505,11 +3584,19 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
         lastMasterIdx = insertPos;
         
         // 🆕 LOG 5: Wstawiono nowy przystanek
-        if (isFirstTrip && stopIdx < 10) {
+        if ((isFirstTrip || isProblematicTrip) && stopIdx < 10) {
           const stopName = stopsIndex[stopId]?.stop_name || stopId;
-          console.log(`     [${stopIdx}] "${stopName}" → WSTAWIAM na pozycję [${insertPos}]`);
+          const depotKeywords = ['Betriebshof', 'depot', 'Depot'];
+          const isDepot = depotKeywords.some(kw => stopName.includes(kw));
+          const marker = isDepot ? ' ❌ DEPOT NA POCZĄTKU!' : '';
+          
+          console.log(`     [${stopIdx}] "${stopName}" → WSTAWIAM na pozycję [${insertPos}]${marker}`);
           console.log(`          (lastMasterIdx był: ${insertPos - 1})`);
           console.log(`          masterList teraz: ${masterList.length} stops`);
+          
+          if (isDepot && insertPos === 0) {
+            console.log(`          🚨 PROBLEM: Depot wstawiony na POZYCJĘ [0] - początek masterList!`);
+          }
         }
       }
     });
@@ -3518,6 +3605,22 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
     if (isFirstTrip) {
       console.log(`\n  ✅ masterList po trip #0 (${masterList.length} stops):`);
       console.log(`     ${masterList.slice(0, 12).map(m => m.name || m.id).join(' → ')}`);
+    }
+    
+    // 🆕 LOG 6b: Stan po problematycznym tripie
+    if (isProblematicTrip) {
+      console.log(`\n  ⚠️ masterList po problematycznym trip ${problematicTripId} (${masterList.length} stops):`);
+      console.log(`     ${masterList.slice(0, 12).map(m => m.name || m.id).join(' → ')}`);
+      
+      // Sprawdź czy depot jest na początku
+      if (masterList.length > 0) {
+        const firstStop = masterList[0].name || masterList[0].id;
+        const depotKeywords = ['Betriebshof', 'depot', 'Depot'];
+        const isDepot = depotKeywords.some(kw => firstStop.includes(kw));
+        if (isDepot) {
+          console.log(`     🚨 BŁĄD: masterList zaczyna się od depo "${firstStop}"!`);
+        }
+      }
     }
   });
   
