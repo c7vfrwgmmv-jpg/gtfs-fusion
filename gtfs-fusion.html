@@ -3451,8 +3451,9 @@ function buildRouteProfileForCurrentSelection() {
     console.log(`  📋 Przykłady ODFILTROWANYCH trips:`);
     removedTrips.forEach(trip => {
       const stops = tripStopMaps[trip.trip_id] || [];
+      const lastIndex = stops.length - 1;
       const firstStop = stops[0] ? stopsIndex[stops[0].stop_id]?.stop_name : '?';
-      const lastStop = stops[stops.length - 1] ? stopsIndex[stops[stops.length - 1].stop_id]?.stop_name : '?';
+      const lastStop = lastIndex >= 0 ? stopsIndex[stops[lastIndex].stop_id]?.stop_name : '?';
       console.log(`    - Trip ${trip.trip_id}: ${stops.length} stops, ${firstStop} → ${lastStop}`);
     });
   }
