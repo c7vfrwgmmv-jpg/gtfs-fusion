@@ -3392,14 +3392,28 @@ function buildRouteProfileForCurrentSelection() {
   });
 
   // 🆕 7.7: Log nodeTypes classification results
-  console.log(`\n🔍 Klasyfikacja node types (depot detection):`);
+  console.log(`\n🚏 Klasyfikacja node types (tail/passenger)...`);
   
   const typeCounts = {};
   Object.values(nodeTypes).forEach(type => {
     typeCounts[type] = (typeCounts[type] || 0) + 1;
   });
   
-  console.log(`  Node types: core=${typeCounts.core || 0}, passenger=${typeCounts.passenger || 0}, tail=${typeCounts.tail || 0}`);
+  const tailCount = typeCounts.tail || 0;
+  console.log(`  ✅ Sklasyfikowano stops: ${Object.keys(nodeTypes).length} total, ${tailCount} depotów (tail)`);
+  
+  // Pokaż przykłady depotów (tail)
+  const tailStops = Object.entries(nodeTypes)
+    .filter(([sid, type]) => type === 'tail')
+    .slice(0, 5);
+  
+  if (tailStops.length > 0) {
+    console.log(`  📋 Przykłady depotów (tail):`);
+    tailStops.forEach(([sid, type]) => {
+      const stop = stopsIndex[sid];
+      console.log(`    - ${stop?.stop_name || sid}`);
+    });
+  }
 
   // 🆕 7.8: Filter trips that start or end at depot (tail) stops
   console.log(`\n🚏 Filtrowanie zajezdni/depotów (nowa logika):`);
@@ -3428,7 +3442,19 @@ function buildRouteProfileForCurrentSelection() {
   });
   
   console.log(`  Output trips (po filtrowaniu): ${filteredTrips.length}`);
-  console.log(`  ❌ Odfiltrowano: ${tripsBeforeFilter - filteredTrips.length} trips (zajezdnie/depoty)`);
+  console.log(`  ❌ Odfiltrowano: ${tripsBeforeFilter - filteredTrips.length} trips (wyjazdy/zjazdy z zajezdni)`);
+  
+  // Pokaż przykłady odfiltrowanych trips
+  const removedTrips = allTrips.filter(t => !filteredTrips.includes(t)).slice(0, 3);
+  if (removedTrips.length > 0) {
+    console.log(`  📋 Przykłady ODFILTROWANYCH trips:`);
+    removedTrips.forEach(trip => {
+      const stops = tripStopMaps[trip.trip_id] || [];
+      const firstStop = stops[0] ? stopsIndex[stops[0].stop_id]?.stop_name : '?';
+      const lastStop = stops[stops.length - 1] ? stopsIndex[stops[stops.length - 1].stop_id]?.stop_name : '?';
+      console.log(`    - Trip ${trip.trip_id}: ${stops.length} stops, ${firstStop} → ${lastStop}`);
+    });
+  }
   
   // Sprawdź konkretnie problematyczny trip 277334823:
   const problematicTripIdCheck = '277334823';
