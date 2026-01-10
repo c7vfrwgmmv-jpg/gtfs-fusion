@@ -726,6 +726,11 @@ video {
 <body>
   <div id="root"></div>
   <script>
+// ═══════════════════════════════════════════════════════════════
+// GTFS Fusion - Single Page Application
+// ═══════════════════════════════════════════════════════════════
+// For architectural documentation and refactoring notes, see REFACTORING.md
+// ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
 // 1. CONSTANTS & CONFIGURATION
@@ -936,6 +941,64 @@ let stationNameToIdCache = null;
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
+//
+// DATA PROCESSING PIPELINE OVERVIEW:
+// ══════════════════════════════════
+// 
+// The GTFS data flows through several processing stages:
+//
+// 1. PARSE (CSV → Raw Objects)
+//    - ZIP extraction & CSV parsing
+//    - Worker-based parallel parsing for performance
+//    - Produces raw JavaScript objects
+//
+// 2. NORMALIZE (Raw → Standardized)
+//    - normalizeKey: CSV headers → GTFS standard field names
+//    - normalizeRecord: Clean values (trim, remove quotes, handle nulls)
+//    - Output: Clean GTFS-compliant records
+//
+// 3. INDEX (Records → Lookup Tables)
+//    - Build indexes: stopTimesIndex, stopsIndex, shapesIndex, etc.
+//    - Group related data for fast lookup
+//    - Output: Queryable data structures
+//
+// 4. ENRICH (Add Computed Fields)
+//    - enrichTripsWithDirectionId: Generate missing direction_id
+//    - Shape simplification: Reduce coordinate density
+//    - Route pattern analysis: Build canonical trip patterns
+//    - Output: Enhanced domain model
+//
+// 5. CACHE (Persist Processed Data)
+//    - cacheShapes: Store simplified shapes in localStorage
+//    - Compression: Delta encoding + base36
+//    - TTL: 30 days
+//    - Output: Faster subsequent loads
+//
+// 6. RENDER (Display in UI)
+//    - Map visualization (Leaflet)
+//    - Timetable generation
+//    - escapeHtml: Sanitize for safe HTML rendering
+//    - Output: Interactive web interface
+//
+// FUNCTION PURITY:
+// ────────────────
+// @pure      = No side effects, same input → same output (can be memoized)
+// @impure    = Has side effects (DOM updates, localStorage, mutations)
+// @cached    = Results are memoized internally
+// @presentation = UI-specific logic (not domain logic)
+//
+// MODULARITY:
+// ───────────
+// Functions are organized by concern:
+// - 3.1: Data Normalization (CSV/GTFS cleaning)
+// - 3.2: Time/Date (GTFS temporal logic)
+// - 3.3: Geometry/Geography (WGS84 calculations)
+// - 3.4: Cache/Serialization (localStorage persistence)
+// - 3.5: Data Quality (Heuristics for feed quality)
+// - 3.6: Direction Enrichment (direction_id generation)
+//
+// ═══════════════════════════════════════════════════════════════
+
 // === DOM HELPERS ===
 const $ = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -1605,6 +1668,7 @@ function getTripStopSequence(tripId, stopTimesIndex) {
 
 /**
  * Check if a route is circular (starts and ends at same stop)
+ * @pure Simple check on stop sequence
  * @param {Array<string>} stopSequence - Array of stop_ids
  * @returns {boolean} True if circular
  */
@@ -1613,12 +1677,26 @@ function isCircularRoute(stopSequence) {
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
 
-
-
-
-
 /**
- * Main function to enrich trips with direction_id
+ * Enrich trips with direction_id when missing from GTFS feed
+ * 
+ * Decision Pipeline:
+ * 1. Group trips by route_id
+ * 2. Build stop sequences for each trip
+ * 3. Check for circular routes (all get direction_id=0)
+ * 4. Find longest trip as reference pattern
+ * 5. Create forward and reverse patterns
+ * 6. Score each trip against both patterns (subsequence matching)
+ * 7. Use bearing as tiebreaker when scores are close
+ * 
+ * Edge cases handled:
+ * - Missing stop sequences: Assign direction_id=0
+ * - Circular routes: All trips get direction_id=0 (no meaningful direction)
+ * - Routes with branches: Subsequence matching ignores branch-specific stops
+ * - Close scores: Use geographic bearing as tiebreaker
+ * - Missing geo data: Fallback to sequence score only
+ * 
+ * @impure Mutates trip objects to add direction_id field
  * @param {Array<Object>} trips - Array of trip objects
  * @param {Object} stopTimesIndex - Index of stop times by trip_id
  * @param {Object} stopsIndex - Index of stops by stop_id
