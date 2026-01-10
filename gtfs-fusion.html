@@ -1716,6 +1716,15 @@ function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
   });
   
   console.log(`📍 Stop sequences normalized: ${processedTrips} trips in ${totalGroups} route+direction groups (${skippedTrips} skipped)`);
+  
+  // Debug: pokaż przykład znormalizowanych wartości
+  const firstTripId = Object.keys(stopTimesIndex)[0];
+  if (firstTripId) {
+    console.log('🔍 Przykład po normalizacji (PRZED sortowaniem):', firstTripId);
+    console.log(stopTimesIndex[firstTripId].map(st => 
+      `${st.stop_id}(seq=${st.stop_sequence})`
+    ).join(' → '));
+  }
 }
 
 /**
@@ -2393,6 +2402,20 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
           stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
         });
         console.log('✅ Posortowano stopTimesIndex po normalizacji');
+        
+        // Debug: weryfikacja sortowania
+        const firstTripId = Object.keys(stopTimesIndex)[0];
+        if (firstTripId) {
+          console.log('🔍 Przykład PO sortowaniu:', firstTripId);
+          console.log(stopTimesIndex[firstTripId].map(st => 
+            `${st.stop_id}(seq=${st.stop_sequence})`
+          ).join(' → '));
+          
+          // Sprawdź czy faktycznie posortowane
+          const sequences = stopTimesIndex[firstTripId].map(st => st.stop_sequence);
+          const isSorted = sequences.every((val, i, arr) => !i || arr[i - 1] <= val);
+          console.log(isSorted ? '✅ Kolejność POPRAWNA' : '❌ BŁĄD: Ciągle źle posortowane!');
+        }
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -5422,6 +5445,21 @@ trips.forEach(trip => {
   const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
   tripStopMaps[trip.trip_id] = stopTimes;
 });
+
+// Debug: sprawdź dane przed renderowaniem
+const firstTrip = trips[0];
+if (firstTrip) {
+  const stops = tripStopMaps[firstTrip.trip_id] || [];
+  console.log(`🎨 renderTimetable() - pierwszy trip ${firstTrip.trip_id}:`);
+  console.log(stops.map(st => {
+    const stopName = state.gtfsData.stopsIndex[st.stop_id]?.stop_name || st.stop_id;
+    return `${stopName}(seq=${st.stop_sequence})`;
+  }).join(' → '));
+  
+  const sequences = stops.map(st => st.stop_sequence);
+  const isSorted = sequences.every((val, i, arr) => !i || arr[i - 1] <= val);
+  console.log(isSorted ? '✅ Dane do renderowania POPRAWNE' : '❌ BŁĄD: Dane do renderowania w złej kolejności!');
+}
 const profile = getCurrentRouteProfile();
 const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
 const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : null;
