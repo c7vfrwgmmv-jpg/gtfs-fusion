@@ -3250,7 +3250,31 @@ function buildRouteProfileForCurrentSelection() {
     Object.keys(coreAdj).forEach(sid => dfsCore(sid, []));
   }
 
+  // 🆕 DODAJ LOGI:
+  console.log(`🔍 buildRouteProfile() dla ${key}:`);
+  console.log(`  Trips count: ${allTrips.length}`);
+  console.log(`  Threshold: ${minCoreFraction} (${minCoreFraction*100}%)`);
+  console.log(`  coreEdges count: ${coreEdges.size}`);
+  console.log(`  bestCorePath length: ${bestCorePath.length}`);
+  
+  if (bestCorePath.length > 0) {
+    const coreStopNames = bestCorePath.slice(0, 10).map(sid => {
+      const stop = stopsIndex[sid];
+      return stop?.stop_name || sid;
+    });
+    console.log(`  🎯 bestCorePath (pierwsze 10):`, coreStopNames.join(' → '));
+  }
+  
   const coreStops = bestCorePath.filter(sid => nodes[sid]);
+  
+  console.log(`  ✅ coreStops count: ${coreStops.length}`);
+  if (coreStops.length > 0) {
+    const coreNames = coreStops.slice(0, 10).map(sid => {
+      const stop = stopsIndex[sid];
+      return stop?.stop_name || sid;
+    });
+    console.log(`  📋 coreStops (pierwsze 10):`, coreNames.join(' → '));
+  }
 
   const coreSet = new Set(coreStops);
 
@@ -3449,6 +3473,18 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
   // Process all trips to add stops not in core
   sortedTrips.forEach((trip, tripIdx) => {
     const tripStops = tripStopMaps[trip.trip_id] || [];
+    
+    // 🆕 DODAJ LOG dla pierwszych 3 trips:
+    if (tripIndex < 3) {
+      console.log(`\n  🚌 Processing trip #${tripIndex} (${trip.trip_id}):`);
+      console.log(`     Trip ma ${tripStops.length} stops: ${
+        tripStops.slice(0, 10).map(st => {
+          const stop = stopsIndex[st.stop_id];
+          return stop?.stop_name || st.stop_id;
+        }).join(' → ')
+      }`);
+    }
+    
     let lastMasterIdx = -1;
     
     // 🆕 LOG 3: Tylko dla pierwszego tripu - pokaż WSZYSTKIE operacje
@@ -3529,7 +3565,11 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
 }
 
 function createTripMappings(sortedTrips, tripStopMaps, masterList) {
-  return sortedTrips.map(trip => {
+  // Na początku funkcji:
+  console.log(`🗺️ createTripMappings():`);
+  console.log(`  Trips: ${sortedTrips.length}, masterList: ${masterList.length}`);
+  
+  const mappings = sortedTrips.map(trip => {
     const mapping = {}; let lastM = -1;
     const tripStops = tripStopMaps[trip.trip_id] || [];
     tripStops.forEach(s => {
@@ -3545,6 +3585,16 @@ if ((masterList[i].stopIds && masterList[i].stopIds.includes(sId)) ||
     });
     return mapping;
   });
+  
+  // Przed return:
+  console.log(`  ✅ Utworzono ${mappings.length} mappings`);
+  if (mappings.length > 0 && masterList.length > 0) {
+    const firstMapping = mappings[0];
+    const mappedIndices = Object.keys(firstMapping).map(k => parseInt(k));
+    console.log(`  Pierwszy trip mapuje do pozycji: ${mappedIndices.slice(0, 10).join(', ')}`);
+  }
+  
+  return mappings;
 }
 // ═══════════════════════════════════════════════════════════════
 // 7. TRIP & VARIANT PROCESSING
@@ -3654,6 +3704,20 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
     }
   });
   
+  // 🆕 DODAJ LOG:
+  console.log(`🔀 sortTripsByMostFrequentStop():`);
+  console.log(`  Trips to sort: ${trips.length}`);
+  console.log(`  Most frequent station: ${anchorStationId}`);
+  if (anchorStationId && stopsIndex) {
+    const anchorStop = Object.values(stopsIndex).find(s => 
+      getStationId(s.stop_id, stopsIndex) === anchorStationId
+    );
+    if (anchorStop) {
+      console.log(`  Station name: ${anchorStop.stop_name}`);
+    }
+  }
+  console.log(`  Anchor stop IDs count: ${anchorStopIds.length}`);
+  
   // 3. Podziel tripy na core (przez anchor) i non-core (bez anchor)
   const coreTrips = [];
   const nonCoreTrips = [];
@@ -3668,6 +3732,8 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       nonCoreTrips.push(trip);
     }
   });
+  
+  console.log(`  Core trips: ${coreTrips.length}, Non-core trips: ${nonCoreTrips.length}`);
   
   // 4. Zbierz wszystkie stop_ids z core trips (wspólne przystanki)
   const coreStopIds = new Set();
@@ -3787,6 +3853,20 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
     // Insert at found position
     result.splice(insertIdx, 0, nonCoreTrip);
   });
+  
+  // Przed return result:
+  if (result.length > 0) {
+    const firstTripStops = tripStopMaps[result[0].trip_id] || [];
+    console.log(`  ✅ Pierwszy trip po sortowaniu (${result[0].trip_id}):`);
+    console.log(`     Ma ${firstTripStops.length} stops`);
+    if (firstTripStops.length > 0) {
+      const firstStopNames = firstTripStops.slice(0, 8).map(st => {
+        const stop = stopsIndex[st.stop_id];
+        return stop?.stop_name || st.stop_id;
+      });
+      console.log(`     Pierwsze 8: ${firstStopNames.join(' → ')}`);
+    }
+  }
   
   return result;
 }
@@ -5703,9 +5783,8 @@ state.currentTimetableData.stopDepartures = stopDepartures;
       
       // Main loop: generate each row for each stop in masterList
       masterList.forEach((mStop, mIdx) => {
-        if (mIdx < 5) {
-          console.log(`  [${mIdx}] ${mStop.name}`);
-        }
+        // ZMIEŃ: pokaż WSZYSTKIE przystanki (bez warunku mIdx < 5)
+        console.log(`  [${mIdx}] ${mStop.name}`);
         
         html += '<tr class="hover:bg-gray-50">';
         
