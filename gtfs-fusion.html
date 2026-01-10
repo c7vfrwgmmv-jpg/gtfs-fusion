@@ -5358,7 +5358,7 @@ function renderTimetable() {
         const isRailOrMetro = (canonical === 'rail' || canonical === 'metro');
         const disabled = isRailOrMetro ? 'disabled' : '';
         const buttonClass = isRailOrMetro 
-          ? 'bg-gray-300 text-gray-500 px-4 py-2 rounded cursor-not-allowed' 
+          ? 'bg-gray-300 text-gray-500 px-4 py-2 rounded cursor-not-allowed opacity-60' 
           : 'bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600';
         
         return `<button id="toggle-depot-trips-main" class="${buttonClass}" ${disabled} title="${isRailOrMetro ? 'Filtrowanie niedostępne dla kolei i metra' : ''}">
