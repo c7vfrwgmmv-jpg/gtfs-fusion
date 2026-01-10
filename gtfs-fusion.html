@@ -729,7 +729,8 @@ video {
 // ═══════════════════════════════════════════════════════════════
 // GTFS Fusion - Single Page Application
 // ═══════════════════════════════════════════════════════════════
-// For architectural documentation and refactoring notes, see REFACTORING.md
+// For architectural documentation, see DOCUMENTATION.md
+// For refactoring notes, see REFACTORING.md
 // ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
@@ -761,7 +762,6 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
       'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date'
     };
 
-    // Basic GTFS route_type mapping
     const ROUTE_TYPE_META_BASIC = {
       0: { label: 'Tram', color: '#f59e0b', weight: 3, iconSvg: 'M6 3v13' },
       1: { label: 'Subway', color: '#ef4444', weight: 3, iconSvg: 'M3 6h18v12H3z' },
@@ -775,7 +775,6 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
       12:{ label: 'Monorail', color: '#06b6d4', weight: 3, iconSvg: 'M2 12h20' }
     };
 
-    // Full extended GTFS route types from Google's extended-route-types reference.
     const ROUTE_TYPE_META_EXTENDED = {
 100: { label: 'Railway service', color:'#10b981', weight:4 },          // ← ZMIEŃ
 101: { label: 'High speed rail service', color:'#10b981', weight:4 },  // ← ZMIEŃ
@@ -839,7 +838,6 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
       1300: { label: 'Telecabin / cable car', color:'#7c3aed', weight:3 }, 1301: { label: 'Gondola lift', color:'#06b6d4', weight:3 }
     };
 
-// --- START: Canonical route type collector (use this AFTER ROUTE_TYPE_META_EXTENDED)
 const CANONICAL_CATEGORIES = {
   metro: { label: 'Metro', order: 10 },
   tram: { label: 'Tramwaj', order: 20 },
@@ -861,7 +859,6 @@ const CANONICAL_CATEGORIES = {
 // 2. STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
 
-// Throttle render() during parsing to avoid excessive DOM updates
 let lastRenderTime = 0;
 const RENDER_THROTTLE_MS = 200; // Max 5 FPS
 
@@ -999,11 +996,9 @@ let stationNameToIdCache = null;
 //
 // ═══════════════════════════════════════════════════════════════
 
-// === DOM HELPERS ===
 const $ = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
-// FIX #6: Debounce function for performance optimization
 function debounce(func, wait) {
   let timeout;
   return function executedFunction(...args) {
@@ -1028,28 +1023,12 @@ function debounce(func, wait) {
 // - KEY_ALIAS provides GTFS field name standardization
 // - Future: Could support per-feed alias injection via config
 // ═══════════════════════════════════════════════════════════════
-
-    /**
-     * Escape HTML special characters for safe rendering
-     * @pure UI sanitization layer - separate from data normalization
-     * @param {string} s - String to escape
-     * @returns {string} HTML-safe string
-     */
     function escapeHtml(s) {
       if (s === null || s === undefined) return '';
       return String(s).replace(/[&<>"']/g, function(m) { return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[m]; });
     }
 
-    // Memoization cache for normalizeKey (called millions of times)
     const keyCache = new Map();
-
-    /**
-     * Normalize a CSV header key to standard GTFS field name
-     * @pure Deterministic - same input always produces same output
-     * @cached Results are memoized in keyCache for performance
-     * @param {string} k - Raw CSV header key
-     * @returns {string} Normalized GTFS field name
-     */
     function normalizeKey(k) {
       if (k === null || k === undefined) return k;
       
@@ -1062,14 +1041,6 @@ function debounce(func, wait) {
       keyCache.set(k, normalized);
       return normalized;
     }
-
-    /**
-     * Normalize a complete CSV record to standard GTFS format
-     * Handles: BOM removal, whitespace trimming, quote stripping
-     * Pipeline stage: Raw CSV → Normalized GTFS record
-     * @param {Object} rec - Raw CSV record with original keys
-     * @returns {Object} Normalized record with GTFS-standard keys and cleaned values
-     */
     function normalizeRecord(rec) {
       const out = {};
       Object.keys(rec).forEach(origKey => {
@@ -1095,13 +1066,6 @@ function debounce(func, wait) {
 // - GTFS dates are always in local timezone (YYYYMMDD format, no TZ info)
 // - Date parsing/formatting is bidirectional (GTFS ↔ Date object)
 // ═══════════════════════════════════════════════════════════════
-
-    /**
-     * Convert GTFS time string to minutes since midnight
-     * @pure Domain layer conversion
-     * @param {string} timeStr - GTFS time format "HH:MM:SS" (can be >24h)
-     * @returns {number} Minutes since midnight (can exceed 1440 for late-night service)
-     */
     function timeToMinutes(timeStr) {
       if (!timeStr) return 0;
       const parts = timeStr.split(':');
@@ -1109,13 +1073,6 @@ function debounce(func, wait) {
       const m = parseInt(parts[1] || '0', 10);
       return h * 60 + m;
     }
-
-    /**
-     * Convert minutes since midnight back to GTFS time format
-     * @pure Inverse of timeToMinutes
-     * @param {number} minutes - Minutes since midnight
-     * @returns {string} GTFS time format "HH:MM:SS" (preserves >24h values)
-     */
     function minutesToTime(minutes) {
       if (!minutes && minutes !== 0) return '';
       const h = Math.floor(minutes / 60);
@@ -1123,14 +1080,6 @@ function debounce(func, wait) {
       const s = 0;
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
-
-    /**
-     * Format time for display (presentation layer)
-     * Wraps times ≥24h to 0-23h range for user-friendly display
-     * @presentation Modifies times for UI display only
-     * @param {string} time - GTFS time string
-     * @returns {string} Display time in HH:MM format (wrapped to 24h)
-     */
     function formatTime(time) {
       if (!time) return '<';
       const str = String(time);
@@ -1140,24 +1089,10 @@ function debounce(func, wait) {
       if (hours >= 24) hours = hours - 24;
       return `${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}`;
     }
-
-    /**
-     * Parse GTFS date string (YYYYMMDD) to Date object
-     * @pure Assumes local timezone (GTFS spec does not include timezone info)
-     * @param {string} dateStr - GTFS date format "YYYYMMDD"
-     * @returns {Date|null} JavaScript Date object in local timezone, or null if invalid
-     */
     function parseGTFSDate(dateStr) {
       if(!dateStr || dateStr.length!==8) return null;
       return new Date(parseInt(dateStr.substring(0,4)), parseInt(dateStr.substring(4,6)) - 1, parseInt(dateStr.substring(6,8)));
     }
-
-    /**
-     * Format Date object to GTFS date string
-     * @pure Inverse of parseGTFSDate
-     * @param {Date} date - JavaScript Date object
-     * @returns {string} GTFS date format "YYYYMMDD"
-     */
     function formatDateToGTFS(date) {
       return date.getFullYear() + String(date.getMonth()+1).padStart(2,'0') + String(date.getDate()).padStart(2,'0');
     }
@@ -1176,19 +1111,9 @@ function debounce(func, wait) {
 // - Coverage calculation: Heuristic for quality assessment, not strict validation
 // - These functions are GTFS-agnostic and could be reused for other geo apps
 // ═══════════════════════════════════════════════════════════════
-
-    /**
-     * Simplify polyline using Douglas-Peucker algorithm
-     * Used during shape parsing/caching to reduce data size
-     * @pure Algorithm operates on coordinate arrays
-     * @param {Array<[number, number]>} points - Array of [lat, lon] coordinates
-     * @param {number} tolerance - Simplification tolerance in degrees (default: 0.0001 ≈ 11m)
-     * @returns {Array<[number, number]>} Simplified coordinate array
-     */
     function simplifyDouglasPeucker(points, tolerance = 0.0001) {
       if (!points || points.length <= 2) return points;
       
-      // Calculate perpendicular distance from point to line segment
       function perpendicularDistance(point, lineStart, lineEnd) {
         const [x, y] = point;
         const [x1, y1] = lineStart;
@@ -1207,12 +1132,10 @@ function debounce(func, wait) {
         return numerator / denominator;
       }
       
-      // Recursive simplification
       function simplifyRecursive(points, tolerance, startIdx, endIdx) {
         let maxDistance = 0;
         let maxIndex = 0;
         
-        // Find point with maximum distance from line
         for (let i = startIdx + 1; i < endIdx; i++) {
           const distance = perpendicularDistance(
             points[i],
@@ -1241,16 +1164,6 @@ function debounce(func, wait) {
       
       return simplifyRecursive(points, tolerance, 0, points.length - 1);
     }
-
-/**
- * Calculate great-circle distance between two WGS84 coordinates using Haversine formula
- * @pure Geographic calculation - no side effects
- * @param {number} lat1 - Start latitude in decimal degrees
- * @param {number} lon1 - Start longitude in decimal degrees
- * @param {number} lat2 - End latitude in decimal degrees
- * @param {number} lon2 - End longitude in decimal degrees
- * @returns {number} Distance in meters
- */
 function haversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000; // Earth radius in meters
   const φ1 = lat1 * Math.PI / 180;
@@ -1266,14 +1179,6 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
 
   return R * c;
 }
-
-/**
- * Calculate how well a shape covers a sequence of stops
- * Heuristic for data quality assessment - not a strict validation rule
- * @param {Array<Object>} stops - Array of stop objects with lat/lon
- * @param {Array<[number, number]>} shapePoints - Array of [lat, lon] shape coordinates
- * @returns {Object} Coverage analysis with percentage and nearby stops
- */
 function calculateShapeCoverage(stops, shapePoints) {
   const MAX_DISTANCE_METERS = 100; // 100m tolerance (configurable heuristic)
   const nearbyStops = [];
@@ -1313,14 +1218,6 @@ function calculateShapeCoverage(stops, shapePoints) {
     nearbyStops: nearbyStops
   };
 }
-
-/**
- * Fill gaps in shape data by connecting stops with shape segments or straight lines
- * @param {Array<Object>} stops - Array of stop objects
- * @param {Array<[number, number]>} shapePoints - Shape coordinate array  
- * @param {Array<Object>} nearbyStops - Stops matched to shape points
- * @returns {Array<[number, number]>} Complete route geometry
- */
 function fillShapeGaps(stops, shapePoints, nearbyStops) {
   const result = [];
   
@@ -1374,22 +1271,13 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
 // - Compression: Delta encoding + base36 (stable, lossy to 6 decimal places ≈ 0.11m precision)
 // - Cleanup: Best-effort on QuotaExceededError (not deterministic)
 // ═══════════════════════════════════════════════════════════════
-
-    /**
-     * Compress coordinate array using delta encoding and base36
-     * Lossy compression: preserves 6 decimal places (≈0.11m precision)
-     * @param {Array<[number, number]>} coords - Array of [lat, lon] coordinates
-     * @returns {string} Compressed string representation
-     */
     function compressCoordinates(coords) {
       if (!coords || coords.length === 0) return '';
       
-      // Delta encode: store first point, then differences
       const deltas = [];
       let prevLat = 0, prevLon = 0;
       
       for (const [lat, lon] of coords) {
-        // Multiply by 1e6 to preserve 6 decimal places, then round to integer
         const latInt = Math.round(lat * 1e6);
         const lonInt = Math.round(lon * 1e6);
         
@@ -1400,7 +1288,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
         prevLon = lonInt;
       }
       
-      // Convert to base64-like compact string
       return deltas.map(d => d.toString(36)).join(',');
     }
 
@@ -1438,7 +1325,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       try {
         const cacheKey = hashShapesData(shapesIndex);
         
-        // Compress each shape's coordinates
         const compressed = {};
         Object.keys(simplified).forEach(shapeId => {
           compressed[shapeId] = compressCoordinates(simplified[shapeId]);
@@ -1480,14 +1366,12 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
         
         const data = JSON.parse(cached);
         
-        // Check if cache is not too old (30 days)
         const age = Date.now() - data.timestamp;
         if (age > 30 * 24 * 60 * 60 * 1000) {
           localStorage.removeItem(cacheKey);
           return null;
         }
         
-        // Decompress coordinates
         const shapes = {};
         Object.keys(data.shapes).forEach(shapeId => {
           if (data.version === 2) {
@@ -1543,13 +1427,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
 // - Heuristics are currently hardcoded but could be made configurable
 // - These rules encode domain knowledge about transit data quality
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Find the most common string in an array (consensus-based data cleaning)
- * @pure Frequency counting algorithm
- * @param {Array<string>} arr - Array of strings to analyze
- * @returns {string|null} Most frequent non-empty string, or null if none found
- */
 function mostCommonString(arr) {
   const counts = Object.create(null);
   for (const s of arr) {
@@ -1562,15 +1439,6 @@ function mostCommonString(arr) {
   Object.keys(counts).forEach(k => { if (counts[k] > bestCount) { best = k; bestCount = counts[k]; }});
   return best;
 }
-
-/**
- * Heuristic to detect uninformative route labels
- * Rejects: empty, too short, numeric-only (unless differs from shortName)
- * Domain knowledge: Many feeds use numeric codes as long_name, which is not useful
- * @param {string} s - Label to check
- * @param {string} shortName - Route short_name for comparison
- * @returns {boolean} True if label appears to be garbage/uninformative
- */
 function looksLikeGarbageLabel(s, shortName) {
   if (!s) return true;
   const t = String(s).trim();
@@ -1598,17 +1466,6 @@ function looksLikeGarbageLabel(s, shortName) {
 // - Determinism: Stable within a feed, but may vary between feeds with different data
 // - This is a decision pipeline, not a single function (multi-stage enrichment)
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Calculate bearing (azimuth) between two geographic points
- * Reused from geometry module for direction detection
- * @pure Geographic calculation
- * @param {number} lat1 - Start latitude
- * @param {number} lon1 - Start longitude
- * @param {number} lat2 - End latitude
- * @param {number} lon2 - End longitude
- * @returns {number} Bearing in degrees (0-360)
- */
 const TO_RAD = Math.PI / 180;
 const TO_DEG = 180 / Math.PI;
 function calculateBearing(lat1, lon1, lat2, lon2) {
@@ -1620,18 +1477,8 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
   let bearing = Math.atan2(y, x) * TO_DEG;
   return (bearing + 360) % 360; // Normalize to 0-360
 }
-
-/**
- * Score how well a trip sequence matches a reference pattern
- * Uses subsequence matching: ignores branch-specific stops, matches trunk stops
- * @pure Longest common subsequence scoring
- * @param {Array<string>} tripSeq - Trip stop sequence to score
- * @param {Array<string>} pattern - Reference pattern to match against
- * @returns {number} Score from 0 to 1 representing the ratio of matched stops
- */
 function tripSequenceScore(tripSeq, pattern) {
   // Count how many stops from tripSeq appear in correct order in pattern
-  // Only consider stops that exist in the pattern (ignore branch-specific stops)
   const patternSet = new Set(pattern);
   const relevantStops = tripSeq.filter(stop => patternSet.has(stop));
   
@@ -1653,56 +1500,16 @@ function tripSequenceScore(tripSeq, pattern) {
   
   return matchCount / relevantStops.length;
 }
-
-/**
- * Get stop sequence for a trip
- * @param {string} tripId - Trip ID
- * @param {Object} stopTimesIndex - Index of stop times by trip_id
- * @returns {Array<string>} Array of stop_ids in sequence
- */
 function getTripStopSequence(tripId, stopTimesIndex) {
   const stopTimes = stopTimesIndex[tripId];
   if (!stopTimes || stopTimes.length === 0) return [];
   return stopTimes.map(st => st.stop_id);
 }
-
-/**
- * Check if a route is circular (starts and ends at same stop)
- * @pure Simple check on stop sequence
- * @param {Array<string>} stopSequence - Array of stop_ids
- * @returns {boolean} True if circular
- */
 function isCircularRoute(stopSequence) {
   if (!stopSequence || stopSequence.length < 2) return false;
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
-
-/**
- * Enrich trips with direction_id when missing from GTFS feed
- * 
- * Decision Pipeline:
- * 1. Group trips by route_id
- * 2. Build stop sequences for each trip
- * 3. Check for circular routes (all get direction_id=0)
- * 4. Find longest trip as reference pattern
- * 5. Create forward and reverse patterns
- * 6. Score each trip against both patterns (subsequence matching)
- * 7. Use bearing as tiebreaker when scores are close
- * 
- * Edge cases handled:
- * - Missing stop sequences: Assign direction_id=0
- * - Circular routes: All trips get direction_id=0 (no meaningful direction)
- * - Routes with branches: Subsequence matching ignores branch-specific stops
- * - Close scores: Use geographic bearing as tiebreaker
- * - Missing geo data: Fallback to sequence score only
- * 
- * @impure Mutates trip objects to add direction_id field
- * @param {Array<Object>} trips - Array of trip objects
- * @param {Object} stopTimesIndex - Index of stop times by trip_id
- * @param {Object} stopsIndex - Index of stops by stop_id
- */
 function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
-  // Group trips by route_id
   const tripsByRoute = {};
   
   for (const trip of trips) {
@@ -1719,21 +1526,18 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
   for (const routeId in tripsByRoute) {
     const routeTrips = tripsByRoute[routeId];
     
-    // Filter trips that need direction_id
     const tripsToProcess = routeTrips.filter(t => 
       !t.direction_id || t.direction_id === ''
     );
     
     if (tripsToProcess.length === 0) continue;
     
-    // STEP 1: Build stop sequences
     const tripPatterns = tripsToProcess.map(trip => ({
       tripId: trip.trip_id,
       trip: trip,
       sequence: getTripStopSequence(trip.trip_id, stopTimesIndex)
     }));
     
-    // Filter out trips without stop sequences
     const validPatterns = tripPatterns.filter(p => p.sequence.length > 0);
     
     if (validPatterns.length === 0) {
@@ -1742,7 +1546,6 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       continue;
     }
     
-    // STEP 2: Check for circular routes
     const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
     if (isCircular) {
       // All trips are circular, assign direction 0
@@ -1751,7 +1554,6 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     }
     
     // STEP 3: Reward-only subsequence matching with bearing tiebreaker
-    // Find the longest trip to use as the reference pattern
     let refPattern = null;
     let maxLen = 0;
     
@@ -1768,11 +1570,9 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       continue;
     }
     
-    // Create forward and reverse patterns
     const patternFwd = refPattern.sequence;
     const patternRev = [...patternFwd].reverse();
     
-    // Calculate reference bearing (from first to last stop of pattern)
     let refBearing = null;
     if (stopsIndex && patternFwd.length >= 2) {
       const firstStop = stopsIndex[patternFwd[0]];
@@ -1822,7 +1622,6 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
             if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
               const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
               
-              // Calculate bearing difference (accounting for wrap-around)
               let diff = Math.abs(tripBearing - refBearing);
               if (diff > 180) diff = 360 - diff;
               
@@ -1850,7 +1649,6 @@ function parseCSV(text) {
   const lines = text.split(/\r?\n/);
   if (lines.length === 0) return [];
   
-  // Helper:  parse CSV line with proper quote handling
   function parseCSVLine(line) {
     const result = [];
     let current = '';
@@ -1883,7 +1681,6 @@ function parseCSV(text) {
     return result;
   }
   
-  // Parse header
   const headerLine = lines[0]. replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
   
@@ -1926,7 +1723,6 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       
       // ═══ REMOVED smartSplit - use native split! ═══
       
-      // Fast column getter - minimal operations
       const getCol = (cols, idx) => {
         if (idx === -1 || idx >= cols.length) return '';
         let val = cols[idx];
@@ -2009,7 +1805,6 @@ rawHeaders.forEach((h, i) => {
         }
       };
       
-      // Process arrayBuffer in chunks (same as before)
       let offset = 0;
       while (offset < arrayBuffer.byteLength) {
         const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
@@ -2089,7 +1884,6 @@ rawHeaders.forEach((h, i) => {
                 return;
               }
               
-              // Parse header
               const headerLine = lines[0];
               const rawHeaders = smartSplit(headerLine);
               const headers = rawHeaders.map(h => normalizeKey(h));
@@ -2143,7 +1937,6 @@ rawHeaders.forEach((h, i) => {
                 }
               }
               
-              // Sort points by sequence for each shape
               const shapesIndex = {};
               Object.keys(shapesData).forEach(shapeId => {
                 const points = shapesData[shapeId];
@@ -2214,7 +2007,6 @@ rawHeaders.forEach((h, i) => {
                 return;
               }
               
-              // Create JSZip-compatible structure
               const files = {};
               
               for (const [path, data] of Object.entries(unzipped)) {
@@ -2227,7 +2019,6 @@ rawHeaders.forEach((h, i) => {
                   async: function(type) {
                     return Promise.resolve().then(() => {
                       if (type === 'string') {
-                        // Decode UTF-8 using TextDecoder
                         const decoder = new TextDecoder('utf-8');
                         return decoder.decode(this._data);
                       } else if (type === 'arraybuffer') {
@@ -2323,7 +2114,6 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
           render();
         });
         
-        // Parse shapes.txt if available (optional)
         let shapesIndex = {};
         if (shapesFile) {
           state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
@@ -2334,7 +2124,6 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
               render();
             });
             
-            // Try to load from cache
             let simplifiedShapes = loadCachedShapes(rawShapes);
             
             if (!simplifiedShapes) {
@@ -2399,20 +2188,17 @@ state.columnOrderCache = {};
 const dates = generateAvailableDates(calendar, calendarDates);
 state.availableDates = dates;
 if (dates.length > 0) {
-  // Get today's date in GTFS format (YYYYMMDD)
   const today = new Date();
   const todayStr = today.getFullYear() + 
     String(today.getMonth() + 1).padStart(2, '0') + 
     String(today.getDate()).padStart(2, '0');
   
-  // Find today's date or the closest earlier date
   let selectedDate = null;
   
   // Check if today exists in dates
   if (dates.some(d => d.value === todayStr)) {
     selectedDate = todayStr;
   } else {
-    // Find the latest date that is before or equal to today
     const earlierDates = dates.filter(d => d.value <= todayStr);
     if (earlierDates.length > 0) {
       selectedDate = earlierDates[earlierDates.length - 1].value;
@@ -2522,7 +2308,6 @@ function buildLogicalRoutes(routes, agenciesIndex) {
     const shortRaw = (r.route_short_name || r.route_id || '').trim();
     const shortKey = shortRaw.toLowerCase();
 
-    // używamy canonical route-type, żeby np. S-Bahn S1 != autobus S1
     const catInfo = collectRouteType(r);
     const cat = (catInfo && catInfo.canonical) ? catInfo.canonical : 'other';
 
@@ -2667,6 +2452,105 @@ function generateAvailableDates(calendar, calendarDates) {
       
       return null;
     }
+    function calculateEaster(year) {
+      const a = year % 19;
+      const b = Math.floor(year / 100);
+      const c = year % 100;
+      const d = Math.floor(b / 4);
+      const e = b % 4;
+      const f = Math.floor((b + 8) / 25);
+      const g = Math.floor((b - f + 1) / 3);
+      const h = (19 * a + b - d - g + 15) % 30;
+      const i = Math.floor(c / 4);
+      const k = c % 4;
+      const l = (32 + 2 * e + 2 * i - h - k) % 7;
+      const m = Math.floor((a + 11 * h + 22 * l) / 451);
+      const month = Math.floor((h + l - 7 * m + 114) / 31);
+      const day = ((h + l - 7 * m + 114) % 31) + 1;
+      return new Date(year, month - 1, day);
+    }
+    function getPolishHolidays(year) {
+      const holidays = [];
+      
+      // Fixed-date holidays
+      holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
+      holidays.push({ date: `${year}0102`, name: 'Dzień po Nowym Roku' });
+      holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
+      holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie Najświętszej Maryi Panny' });
+      holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
+      holidays.push({ date: `${year}1224`, name: 'Wigilia' });
+      holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
+      holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt Bożego Narodzenia' });
+      holidays.push({ date: `${year}1231`, name: 'Sylwester' });
+      
+      const easter = calculateEaster(year);
+      
+      const maundyThursday = new Date(easter);
+      maundyThursday.setDate(easter.getDate() - 3);
+      holidays.push({
+        date: formatDateToGTFS(maundyThursday),
+        name: 'Wielki Czwartek'
+      });
+      
+      const goodFriday = new Date(easter);
+      goodFriday.setDate(easter.getDate() - 2);
+      holidays.push({
+        date: formatDateToGTFS(goodFriday),
+        name: 'Wielki Piątek'
+      });
+      
+      // Easter Sunday
+      holidays.push({
+        date: formatDateToGTFS(easter),
+        name: 'Wielkanoc'
+      });
+      
+      const easterMonday = new Date(easter);
+      easterMonday.setDate(easter.getDate() + 1);
+      holidays.push({
+        date: formatDateToGTFS(easterMonday),
+        name: 'Poniedziałek Wielkanocny'
+      });
+      
+      const corpusChristi = new Date(easter);
+      corpusChristi.setDate(easter.getDate() + 60);
+      holidays.push({
+        date: formatDateToGTFS(corpusChristi),
+        name: 'Boże Ciało'
+      });
+      
+      return holidays;
+    }
+    function findNearbyHolidays(referenceDateStr) {
+      const refDate = parseGTFSDate(referenceDateStr);
+      if (!refDate) return [];
+      
+      const year = refDate.getFullYear();
+      const holidays = [
+        ...getPolishHolidays(year),
+        ...getPolishHolidays(year + 1)  // Include next year for edge cases
+      ];
+      
+      const nearby = [];
+      holidays.forEach(holiday => {
+        const holidayDate = parseGTFSDate(holiday.date);
+        if (!holidayDate) return;
+        
+        const diffMs = holidayDate - refDate;
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        
+        // Include holidays only in the upcoming week (0 to 7 days in the future)
+        if (diffDays >= 0 && diffDays <= 7) {
+          nearby.push({
+            ...holiday,
+            dateObj: holidayDate,
+            daysFromRef: diffDays
+          });
+        }
+      });
+      
+      return nearby;
+    }
 
     /**
      * Calculate Easter Sunday for a given year using Meeus/Jones/Butcher algorithm
@@ -2795,7 +2679,6 @@ function buildStationNameCache(stopsIndex) {
   
   stationNameToIdCache = new Map();
   
-  // Znajdź wszystkie "stacje główne" - czyli stop_id które są parent_station dla innych
   const parentStationIds = new Set();
   Object.values(stopsIndex).forEach(stop => {
     if (stop.parent_station && stop.parent_station. trim()) {
@@ -2823,7 +2706,6 @@ function getStationId(stopId, stopsIndex) {
   const stop = stopsIndex[stopId];
   if (!stop) return stopId;
   
-  // PRIORYTET 1: parent_station (jeśli istnieje)
   const parent = stop.parent_station;
   if (parent && parent.trim() !== '') {
     return parent. trim();
@@ -2856,9 +2738,7 @@ function getStationIdWithPolicy(stopId, stopsIndex, allowedStationSet) {
 // ═══════════════════════════════════════════════════════════════
 // === KROK 1: Budowa grafu trasy i profilu core dla logical route ===
 
-// Helper: Normalize GTFS pickup/dropoff types (treat on-demand as passenger)
 // Note: This is used during classification to treat on-demand (2,3) as regular passenger (0)
-// For display purposes, on-demand detection happens before normalization
 function normalizePickupDropoffType(value) {
   const normalized = String(value || '0').trim();
   // 2 = phone agency, 3 = coordinate with driver → treat as 0 (passenger)
@@ -2866,12 +2746,10 @@ function normalizePickupDropoffType(value) {
   return normalized;
 }
 
-// Helper: Calculate edge frequency per stop
 function calculateStopEdgeFrequency(trips, tripStopMaps) {
   const edgeFrequency = {};
   const totalTrips = trips.length;
   
-  // Safety check for empty trips
   if (totalTrips === 0) {
     return edgeFrequency;
   }
@@ -2884,7 +2762,6 @@ function calculateStopEdgeFrequency(trips, tripStopMaps) {
     }
   });
   
-  // Convert to percentages
   Object.keys(edgeFrequency).forEach(key => {
     edgeFrequency[key] = edgeFrequency[key] / totalTrips;
   });
@@ -2892,26 +2769,21 @@ function calculateStopEdgeFrequency(trips, tripStopMaps) {
   return edgeFrequency;
 }
 
-// Helper: Find low-frequency candidates with tier classification
 function computeCoreBoundaryFrequency(edgeFrequency, coreStops) {
   // For each non-core stop, compute max frequency of edges connecting to any core stop
-  // Returns Map: stop_id -> boundaryFreq
   const boundaryFreq = new Map();
   const coreSet = new Set(coreStops);
   
   Object.entries(edgeFrequency).forEach(([edge, freq]) => {
     const [from, to] = edge.split('->');
     
-    // Check if edge crosses core boundary (one end is core, other is not)
     const fromIsCore = coreSet.has(from);
     const toIsCore = coreSet.has(to);
     
     if (fromIsCore && !toIsCore) {
-      // core -> non-core
       const current = boundaryFreq.get(to) || 0;
       boundaryFreq.set(to, Math.max(current, freq));
     } else if (!fromIsCore && toIsCore) {
-      // non-core -> core
       const current = boundaryFreq.get(from) || 0;
       boundaryFreq.set(from, Math.max(current, freq));
     }
@@ -2925,18 +2797,15 @@ function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
   const tier2 = new Set();  // 6-10%
   
   allStops.forEach(stopId => {
-    // Find all edges involving this stop
     const edges = Object.keys(edgeFrequency).filter(e => 
       e.startsWith(stopId + '->') || e.endsWith('->' + stopId)
     );
     
-    // If ALL edges are below threshold → candidate
     const allLowFreq = edges.every(e => edgeFrequency[e] < threshold);
     
     // Skip if not a low-frequency candidate or has no edges
     if (!allLowFreq || edges.length === 0) return;
     
-    // Calculate max edge frequency for this stop
     const maxEdgeFreq = Math.max(...edges.map(e => edgeFrequency[e]));
     
     // Classify into tiers
@@ -2950,9 +2819,7 @@ function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
   return { tier1, tier2 };
 }
 
-// Helper: Check if stop is between core start and end
 function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
-  // Find positions of stopId, coreStart, coreEnd in trip
   let stopIdx = -1;
   let coreStartIdx = -1;
   let coreEndIdx = -1;
@@ -2974,12 +2841,10 @@ function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
   return false;
 }
 
-// Helper: Recursive tail detection with 2-tier classification
 function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTimesIndex, coreStops) {
   const nodeTypes = {};
   const coreSet = new Set(coreStops);
   
-  // Safety check: if no core stops, candidates will be classified in buildRouteProfileForCurrentSelection
   if (!coreStops || coreStops.length === 0) {
     return nodeTypes;
   }
@@ -2987,7 +2852,6 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
   const coreStart = coreStops[0];
   const coreEnd = coreStops[coreStops.length - 1];
   
-  // Extract tier sets
   const tier1Candidates = candidateTiers.tier1 || new Set();
   const tier2Candidates = candidateTiers.tier2 || new Set();
   
@@ -3000,12 +2864,10 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
     nodeTypes[stopId] = 'core';
   });
   
-  // Helper function to classify a candidate with tier-specific fallback
   const classifyCandidate = (candidateId, fallbackType) => {
     // Skip if already classified
     if (nodeTypes[candidateId]) return false;
     
-    // TEST 1: Check if candidate appears BETWEEN coreStart and coreEnd in any trip
     let appearsBetweenCore = false;
     
     for (const trip of trips) {
@@ -3022,7 +2884,6 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
       return true;
     }
     
-    // TEST 2: Get pickup/dropoff flags for this stop (check all occurrences)
     let hasPickup1 = false;
     let hasDropoff1 = false;
     let hasNormalFlags = false;
@@ -3051,7 +2912,6 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
     
     // TEST 3: If all flags are 0/0 (after normalization) → recursive test
     if (hasNormalFlags) {
-      // Check: do ALL trips with this stop have a tail stop somewhere on their route?
       const tripsWithCandidate = trips.filter(trip => {
         const stops = tripStopMaps[trip.trip_id] || [];
         return stops.some(s => s.stop_id === candidateId);
@@ -3062,10 +2922,8 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
       for (const trip of tripsWithCandidate) {
         const stops = tripStopMaps[trip.trip_id] || [];
         
-        // Get stops OUTSIDE core for this trip
         const stopsOutsideCore = stops.filter(s => !coreSet.has(s.stop_id));
         
-        // Check if any stop outside core (excluding candidate itself) is marked as tail
         const hasTailOnRoute = stopsOutsideCore.some(s => 
           s.stop_id !== candidateId && nodeTypes[s.stop_id] === 'tail'
         );
@@ -3119,7 +2977,6 @@ function getCurrentRouteProfile() {
 
   const dir = state.selectedDirection || '0';
 
-  // Ustal klucz
   let key;
   if (state.selectedRouteGroup) {
     key = getLogicalRouteKeyFromGroup(state.selectedRouteGroup);
@@ -3177,10 +3034,8 @@ function buildRouteProfileForCurrentSelection() {
   allTrips = allTrips.filter(t => (t.direction_id || '0') === dir);
   if (!allTrips.length) return null;
 
-  // === NOWA LOGIKA: Budowanie wzorcowej trasy ===
   const CORE_THRESHOLD = 0.10; // 10%
 
-  // Zlicz krawędzie między STACJAMI (nie przystankami)
   const stationEdgeFrequency = {};
   const allTripStationData = []; // będziemy potrzebować później
 
@@ -3206,7 +3061,6 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-  // Compute stationMergeAllowed: stations that appear at most once per trip
   const stationMaxOccurrence = new Map();
   allTripStationData.forEach(({ stationIds }) => {
     const stationCounts = new Map();
@@ -3227,7 +3081,6 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-  // Określ wzorcowe krawędzie i stacje
   const totalTripsCount = allTrips.length;
   const coreStationsSet = new Set();
 
@@ -3239,7 +3092,6 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-  // Dla każdego tripa oblicz firstCoreIdx i lastCoreIdx
   const tripCoreIndices = {};
   allTripStationData.forEach(({ tripId, stationIds, stopIds }) => {
     const isCore = stationIds.map(sid => coreStationsSet.has(sid));
@@ -3374,7 +3226,6 @@ function buildRouteProfileForCurrentSelection() {
 
   const coreSet = new Set(coreStops);
 
-  // Wstępne typy krawędzi core/noncore
   const edgeTypes = {};
   Object.keys(edges).forEach(k => {
     const e = edges[k];
@@ -3423,7 +3274,6 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
   
-  // Merge boundary candidates with existing candidates
   const mergedTiers = {
     tier1: new Set([...candidateTiers.tier1, ...tier1Boundary]),
     tier2: new Set([...candidateTiers.tier2, ...tier2Boundary])
@@ -3516,7 +3366,6 @@ function buildRouteProfileForCurrentSelection() {
 }
 
 function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
-  // Step 1: Get core stops from profile
   const profile = getCurrentRouteProfile();
   if (!profile || !profile.coreStops) {
     // This should never happen, but fail gracefully
@@ -3526,7 +3375,6 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
   const coreStops = profile.coreStops;
   const allowedSet = profile.stationMergeAllowed;
   
-  // Step 2: Group core stops by station (merged stops)
   const stopsByStation = new Map();
   
   coreStops.forEach(stopId => {
@@ -3537,7 +3385,6 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
     stopsByStation.get(stationId).push(stopId);
   });
   
-  // Step 3: Build base master list from core
   const getStationDisplayName = (stationId, stopIds) => {
     if (stopsIndex[stationId]?.stop_name) {
       return stopsIndex[stationId].stop_name;
@@ -3546,7 +3393,6 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
     return firstStop?.stop_name || stationId;
   };
 
-  // Base master list = core stops grouped by station
   const masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
     id: stopIds[0],
     name: getStationDisplayName(stationId, stopIds),
@@ -3554,7 +3400,6 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
   }));
   
   // Step 4: Add branch stops (stops outside core)
-  // Cache stationId for each masterList entry for performance
   const masterListStationIds = masterList.map(entry => {
     return getStationIdWithPolicy(entry.stopIds[0], stopsIndex, allowedSet);
   });
@@ -3568,7 +3413,6 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
       const stopId = stopTime.stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
       
-      // Find if this station already exists in masterList
       let existingIdx = -1;
       for (let i = 0; i < masterListStationIds.length; i++) {
         if (masterListStationIds[i] === stationId) {
@@ -3584,14 +3428,12 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
         }
         lastMasterIdx = existingIdx;
       } else {
-        // NEW station - insert RIGHT AFTER the last common stop
         const newEntry = {
           id: stopId,
           name: getStationDisplayName(stationId, [stopId]),
           stopIds: [stopId]
         };
         
-        // Insert after lastMasterIdx (or at beginning if no common stop yet)
         const insertPos = lastMasterIdx + 1;
         masterList.splice(insertPos, 0, newEntry);
         masterListStationIds.splice(insertPos, 0, stationId);
@@ -3651,11 +3493,6 @@ if ((masterList[i].stopIds && masterList[i].stopIds.includes(sId)) ||
 // - On route/group change
 // - On direction change
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Get the canonical cache key for the current route/group selection
- * Returns a key like 'group::123' or 'raw::route_id'
- */
 function getCanonicalKeyForCurrentSelection() {
   if (!state.selectedRoute) return null;
   
@@ -3667,23 +3504,6 @@ function getCanonicalKeyForCurrentSelection() {
   }
   return key;
 }
-
-/**
- * Build a canonical master list from ALL trips (no date filter, tail included).
- * This list is stable per route/group + direction and never changes.
- * Only visibility is filtered at render time.
- * 
- * Algorithm:
- * 1. Get core stops from profile (ordered sequence of main stations)
- * 2. Define segments: pre-core, windows between consecutive cores, post-core
- * 3. For each segment, collect all branch stations that appear in that segment
- * 4. Rank branch stations by median normalized position within the segment
- * 5. Stable tie-breaking: name, then stop_id
- * 6. Build final list: pre-core, first core, [windows with branches], last core, post-core
- * 
- * Pre-core: Stops before the first core station (e.g., variant starting points)
- * Post-core: Stops after the last core station (e.g., variant ending points)
- */
 function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex) {
   if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
     return null; // Fallback to old behavior
@@ -3693,7 +3513,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   const nodeTypes = profile.nodeTypes || {};
   const allowedSet = profile.stationMergeAllowed;
   
-  // Helper to get station display name
   const getStationDisplayName = (stationId, stopIds) => {
     if (stopsIndex[stationId]?.stop_name) {
       return stopsIndex[stationId].stop_name;
@@ -3702,7 +3521,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     return firstStop?.stop_name || stationId;
   };
 
-  // Step 1: Build core stations list (merged by station)
   const coreStationGroups = [];
   const seenStations = new Set();
   
@@ -3716,7 +3534,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         isCore: true
       });
     } else {
-      // Add to existing core station group
       const group = coreStationGroups.find(g => g.stationId === stationId);
       if (group && !group.stopIds.includes(stopId)) {
         group.stopIds.push(stopId);
@@ -3725,7 +3542,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   });
 
   // Step 2: Build windows between consecutive core stations
-  // For each window [coreIdx -> coreIdx+1], collect branch stations
   const windows = [];
   for (let i = 0; i < coreStationGroups.length - 1; i++) {
     windows.push({
@@ -3735,7 +3551,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     });
   }
 
-  // Step 2b: Pre-core and post-core segments
   const preCore = new Map(); // stationId -> { stopIds: [], positions: [] }
   const postCore = new Map(); // stationId -> { stopIds: [], positions: [] }
 
@@ -3748,13 +3563,11 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
     if (sortedStops.length === 0) return;
 
-    // Map stop positions in this trip
     const stopPositions = new Map();
     sortedStops.forEach((st, idx) => {
       stopPositions.set(st.stop_id, idx);
     });
 
-    // Find positions of core stations in this trip
     const corePositions = coreStationGroups.map(coreGroup => {
       for (const stopId of coreGroup.stopIds) {
         if (stopPositions.has(stopId)) {
@@ -3764,7 +3577,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       return null;
     }).filter(x => x !== null);
 
-    // Find first and last core positions in this trip
     const firstCorePos = corePositions.length > 0 
       ? Math.min(...corePositions.map(cp => cp.position))
       : -1;
@@ -3772,7 +3584,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       ? Math.max(...corePositions.map(cp => cp.position))
       : -1;
 
-    // Collect pre-core stops (before first core)
     if (firstCorePos > 0) {
       for (let pos = 0; pos < firstCorePos; pos++) {
         const stopTime = sortedStops[pos];
@@ -3782,7 +3593,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
         
-        // Normalize position relative to firstCorePos [0, 1)
         const normalizedPos = pos / firstCorePos;
         
         if (!preCore.has(stationId)) {
@@ -3800,7 +3610,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       }
     }
 
-    // Collect post-core stops (after last core)
     if (lastCorePos >= 0 && lastCorePos < sortedStops.length - 1) {
       const tripLength = sortedStops.length;
       for (let pos = lastCorePos + 1; pos < tripLength; pos++) {
@@ -3811,7 +3620,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
         
-        // Normalize position relative to trip length [0, 1)
         const normalizedPos = (pos - lastCorePos) / (tripLength - lastCorePos);
         
         if (!postCore.has(stationId)) {
@@ -3833,7 +3641,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     for (let winIdx = 0; winIdx < windows.length; winIdx++) {
       const window = windows[winIdx];
       
-      // Find positions of start and end core in this trip
       const startPos = corePositions.find(cp => cp.coreGroup === window.startCore);
       const endPos = corePositions.find(cp => cp.coreGroup === window.endCore);
       
@@ -3841,7 +3648,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         continue; // Skip if window not traversed in this trip
       }
 
-      // Collect all stations between start and end (exclusive)
       const windowLength = endPos.position - startPos.position;
       
       for (let pos = startPos.position + 1; pos < endPos.position; pos++) {
@@ -3852,7 +3658,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
         
-        // Calculate normalized position within window [0, 1]
         const normalizedPos = (pos - startPos.position) / windowLength;
         
         if (!window.branches.has(stationId)) {
@@ -3871,13 +3676,10 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     }
   });
 
-  // Step 4: Rank branch stations by median position and build final list
   const finalRows = [];
   
-  // Helper function to create sorted branch entries from a Map
   const createSortedBranchEntries = (branchMap) => {
     const branchEntries = Array.from(branchMap.entries()).map(([stationId, data]) => {
-      // Calculate median position
       const sorted = data.positions.slice().sort((a, b) => a - b);
       const mid = Math.floor(sorted.length / 2);
       const median = sorted.length % 2 === 0
@@ -3905,7 +3707,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     return branchEntries;
   };
 
-  // Add pre-core stops (before first core station)
   const preCoreBranches = createSortedBranchEntries(preCore);
   preCoreBranches.forEach(branch => {
     finalRows.push({
@@ -3926,7 +3727,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
   // For each window, add sorted branches, then the next core station
   windows.forEach((window, winIdx) => {
-    // Sort branches by median position
     const branchEntries = createSortedBranchEntries(window.branches);
 
     // Add branches to final list
@@ -3939,7 +3739,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       });
     });
 
-    // Add next core station
     const nextCore = window.endCore;
     finalRows.push({
       id: nextCore.stopIds[0],
@@ -3949,7 +3748,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     });
   });
 
-  // Add post-core stops (after last core station)
   const postCoreBranches = createSortedBranchEntries(postCore);
   postCoreBranches.forEach(branch => {
     finalRows.push({
@@ -3962,11 +3760,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
   return finalRows;
 }
-
-/**
- * Ensure canonical master list exists for current selection.
- * Returns the canonical master list or null if fallback needed.
- */
 function ensureCanonicalMasterListForCurrentSelection() {
   const key = getCanonicalKeyForCurrentSelection();
   if (!key) return null;
@@ -3978,13 +3771,11 @@ function ensureCanonicalMasterListForCurrentSelection() {
     return state.canonicalMasterLists[key][dir];
   }
 
-  // Need to build it
   const profile = getCurrentRouteProfile();
   if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
     return null; // Fallback
   }
 
-  // Get ALL trips for this route/group + direction (no date filter)
   const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData;
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
@@ -4006,7 +3797,6 @@ function ensureCanonicalMasterListForCurrentSelection() {
   allTrips = allTrips.filter(t => (t.direction_id || '0') === dir);
   if (!allTrips.length) return null;
 
-  // Build canonical list
   const rows = buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex);
   
   if (!rows) return null;
@@ -4019,11 +3809,6 @@ function ensureCanonicalMasterListForCurrentSelection() {
 
   return rows;
 }
-
-/**
- * Invalidate canonical cache for current route/group.
- * Called when route, group, or direction changes.
- */
 function invalidateCanonicalCacheForCurrentSelection() {
   const key = getCanonicalKeyForCurrentSelection();
   if (key && state.canonicalMasterLists[key]) {
@@ -4104,13 +3889,11 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   trips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     stops.forEach(s => {
-      // getStationId zwraca parent_station || stop_id (merguje przystanki!)
       const stationId = getStationId(s.stop_id, stopsIndex);
       stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
     });
   });
   
-  // Znajdź most frequent station
   let maxCount = 0;
   let anchorStationId = null;
   stationCounts.forEach((count, stId) => {
@@ -4201,13 +3984,11 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   });
   
   // 6. Inject non-core trips into sorted core list chronologically
-  // For each non-core trip, find insertion point based on first common stop time
   const result = [...coreData.map(cd => cd.trip)]; // Start with sorted core trips
   
   nonCoreTrips.forEach(nonCoreTrip => {
     const nonCoreStops = tripStopMaps[nonCoreTrip.trip_id] || [];
     
-    // Find first stop that exists in core trips
     let insertionTime = null;
     let commonStopId = null;
     for (let i = 0; i < nonCoreStops.length; i++) {
@@ -4231,14 +4012,12 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       }
     }
     
-    // Find insertion point: compare with core trips' time at the SAME stop (or anchor if not present)
     let insertIdx = result.length; // Default: append at end
     
     for (let i = 0; i < result.length; i++) {
       const coreTrip = result[i];
       const coreStops = tripStopMaps[coreTrip.trip_id] || [];
       
-      // Find core trip's time at the common stop (if it has it)
       let coreTimeAtCommon = null;
       if (commonStopId) {
         const coreStop = coreStops.find(s => s.stop_id === commonStopId);
@@ -4252,7 +4031,6 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       
       // If core trip doesn't have the common stop, use its anchor time as fallback
       if (!coreTimeAtCommon) {
-        // Find this core trip's anchor time
         for (let j = 0; j < coreStops.length; j++) {
           if (anchorStopIds.includes(coreStops[j].stop_id)) {
             coreTimeAtCommon = coreStops[j].departure_time || coreStops[j].arrival_time;
@@ -4277,50 +4055,16 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   
   return result;
 }
-
-/**
- * Configuration for adjacent-swaps column ordering algorithm
- * 
- * Parameters:
- * - voteThreshold: minimum number of row-votes required to swap a pair (default: 4)
- * - marginMinutes: time difference margin to avoid swapping on jitter (default: 2)
- * - maxPasses: maximum number of bubble-sort passes to limit runtime (default: 8)
- */
 const adjacentSwapOrderConfig = {
   voteThreshold: 4,
   marginMinutes: 2,
   maxPasses: 8
 };
-
-/**
- * Adjacent-swaps column ordering algorithm
- * 
- * Performs local corrections on the trips array based on row-wise time comparisons
- * across visible passenger rows only. Unlike global pairwise ranking, this uses
- * a bubble-sort approach with voting:
- * - Compare adjacent pairs across multiple passes
- * - For each pair, count row votes favoring a swap (left time > right time + margin)
- * - If votesSwap >= voteThreshold, swap the pair
- * - Repeat for maxPasses iterations to allow corrections to propagate
- * 
- * Benefits:
- * - Produces locally monotone ordering (minimizes adjacent inversions)
- * - Deterministic and stable with proper parameter tuning
- * - Lower complexity than global pairwise: O(n·rows·passes) vs O(n²·rows)
- * - Works well for routes with mostly consistent trip progression
- * 
- * @param {Array} trips - Array of trip objects in current initial order
- * @param {Array} tripMappings - Array of mapping objects [tripIdx][rowIdx] = stopTime
- * @param {Array} visiblePassengerRowIndices - Row indices to consider (exclude tail rows)
- * @param {Object} params - { voteThreshold, marginMinutes, maxPasses }
- * @returns {Array} Reordered trips array
- */
 function adjacentSwapOrder(trips, tripMappings, visiblePassengerRowIndices, params) {
   if (!trips || trips.length <= 1) return trips;
   
   const { voteThreshold, marginMinutes, maxPasses } = params;
   
-  // Work with copies to avoid mutating inputs
   const orderedTrips = trips.slice();
   const orderedMappings = tripMappings.slice();
   
@@ -4375,17 +4119,6 @@ function adjacentSwapOrder(trips, tripMappings, visiblePassengerRowIndices, para
   
   return orderedTrips;
 }
-
-/**
- * Find the most common trip pattern (sequence of stops) for a given stop.
- * Used to identify the typical route variant that serves a stop.
- * 
- * @param {Array} trips - List of trip objects
- * @param {Object} stopTimesIndex - Map of trip_id -> stopTimes array
- * @param {string} stopId - The stop ID to analyze
- * @param {Array} activeServices - List of active service IDs
- * @returns {Object|null} Object with tripId, stopIds array, and frequency count
- */
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
   const patternCounts = new Map(); // klucz: "stop1,stop2,stop3...", wartość: count
   const patternToTrip = new Map(); // mapowanie pattern → przykładowy trip_id
@@ -4397,7 +4130,6 @@ function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServic
     // Sprawdź czy trip przechodzi przez nasz przystanek
     if (!stopTimes.some(st => st.stop_id === stopId)) return;
     
-    // Zbuduj "sygnaturę" tripu (sekwencja stop_id)
     const sorted = [...stopTimes].sort((a, b) => 
       parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0')
     );
@@ -4409,7 +4141,6 @@ function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServic
     }
   });
   
-  // Znajdź pattern z największą liczbą wystąpień
   let maxCount = 0;
   let mostFrequentPattern = null;
   
@@ -4583,7 +4314,6 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
 // ═══════════════════════════════════════════════════════════════
 // 9. MAP RENDERING
 // ═══════════════════════════════════════════════════════════════
-    // small utilities consolidated
     function resetMap() {
       if (window.leafletMap) {
         try { window.leafletMap.remove(); } catch(e) {}
@@ -4628,7 +4358,6 @@ async function generateHybridLineGeometry(stops, shapeId, routeType) {
   
   const shapePoints = shapesIndex[shapeId];
   
-  // Validate shape coverage
   const coverage = calculateShapeCoverage(stops, shapePoints);
   
   // If good coverage (>70%), use hybrid approach
@@ -4646,7 +4375,6 @@ async function updateMap() {
   
   const variantsData = state._lastVariants || computeVariantsForRoute();
 
-  // trips z całej grupy route_id (jeśli jest grupa)
   let routeIds = [state.selectedRoute.route_id];
   if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
     routeIds = state.selectedRouteGroup.members
@@ -4660,7 +4388,6 @@ async function updateMap() {
     routeTripsAll = routeTripsAll.concat(arr);
   });
 
-  // Calculate initial center from route data before initializing map
   let initialCenter = [51.94, 13.88]; // Default fallback
   let initialZoom = 11;
   
@@ -4672,7 +4399,6 @@ async function updateMap() {
     }
     const sel = variantsData.variantDetails[variantId];
     if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
-      // Calculate center from stops
       const validStops = sel.stopDetails.filter(s => s && s.stop_lat && s.stop_lon && !isNaN(parseFloat(s.stop_lat)) && !isNaN(parseFloat(s.stop_lon)));
       if (validStops.length > 0) {
         const lats = validStops.map(s => parseFloat(s.stop_lat));
@@ -4830,10 +4556,8 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
     return;
   }
   
-  // Zbierz dane tras
   const result = collectRoutesForStop(stopId, selectedDate, []);
   
-  // No limit - removed tooMany check
   const routesData = result.routes || [];
   
   // Initialize map only once
@@ -4855,10 +4579,8 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
       const { route, stops, color, direction, shapeId } = routeData;
       const layerKey = `${route.route_id}_${direction}`;
       
-      // Create a feature group for this route
       const layer = window.L.featureGroup();
       
-      // Draw main route stops (core + branch, excluding branch_start and branch_end)
       const mainRouteStops = stops.filter(s => s.type === 'core' || s.type === 'branch');
       
       if (mainRouteStops.length > 1) {
@@ -4981,20 +4703,16 @@ function renderRouteTable() {
   const logicalRoutes = state.gtfsData.logicalRoutes || [];
   const baseRoutes = (state.gtfsData.routes || []).slice();
 
-  // helper: reprezentant grupy logicznej
   function reprOf(group) {
     return (group && group.members && group.members[0]) || null;
   }
 
-// Twoje wyświetlanie (np. w labelOf)
 function labelOf(group) {
-    // Bierz od reprezentanta (czyli pierwszego route z grupy)
     const r = reprOf(group);
     if (!r) return group?.route_short_name || '';
     return r.route_short_name || r.route_id || group.route_short_name || '';
 }
 
-  // sortowanie logicznych grup po numerze linii
   function sortGroupsByRouteId(arr) {
     return arr.slice().sort((a, b) => {
       const la = String(labelOf(a) || '').trim();
@@ -5003,7 +4721,6 @@ function labelOf(group) {
     });
   }
 
-  // sortowanie surowych routes po route_short_name / route_id
   function sortRoutesById(routes) {
     return routes.slice().sort((a, b) => {
       const la = String(a.route_short_name || a.route_id || '').trim();
@@ -5203,7 +4920,6 @@ btn.innerHTML = `
 }
 
 function selectRoute(route) {
-  // Save scroll position before navigating away from ROUTES_LIST
   const container = document.querySelector('#routes-list-container');
   if (container) {
     state.routesListScrollPosition = container.scrollTop || 0;
@@ -5271,14 +4987,12 @@ function searchStopsInIndex(query, groupsArray) {
 }
 
 function getOrBuildGroupsArray(stopsData) {
-  // Simple hash based on stops count
   const currentHash = stopsData.length + '_' + (stopsData[0]?.stop_id || '');
   
   if (cachedGroupsArray && lastStopsDataHash === currentHash) {
     return cachedGroupsArray;
   }
   
-  // Grupuj przystanki według nazwy bazowej (bez numerów)
   const stopGroups = new Map();
   stopsData.forEach(stop => {
     const stopName = stop.stop_name || '';
@@ -5332,7 +5046,6 @@ function renderVirtualStopsList(groupsToRender) {
   const scrollTop = container.scrollTop || 0;
   const itemHeight = state.virtualListItemHeight;
   
-  // Calculate visible range with buffer
   const bufferSize = 5;
   const visibleCount = Math.ceil(containerHeight / itemHeight) + bufferSize * 2;
   const startIndex = Math.max(0, Math.floor(scrollTop / itemHeight) - bufferSize);
@@ -5396,7 +5109,6 @@ function renderStopsView() {
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
   
-  // Zbierz wszystkie przystanki z liczbą tras
   const stopsData = [];
   const stopToRoutes = new Map();
   
@@ -5428,25 +5140,20 @@ function renderStopsView() {
   // Sortuj alfabetycznie
   stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));
   
-  // FAZA 2.5: Use cached groupsArray
   const groupsArray = getOrBuildGroupsArray(stopsData);
   
-  // FAZA 1.3: Use search index instead of direct filtering
   const searchQuery = state.stopsListSearchQuery;
   const filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
   
-  // FAZA 2.4: Use virtual list for performance or regular list for small datasets
   const useVirtualList = filteredGroups.length > 100; // Threshold
 
   if (useVirtualList) {
     renderVirtualStopsList(filteredGroups);
   } else {
-    // FAZA 1.5: Implement pagination for better initial load performance
     const groupsPerPage = state.stopsListPageSize;
     const totalGroups = filteredGroups.length;
     const groupsToShow = filteredGroups.slice(0, state.stopsListPage * groupsPerPage);
 
-    // Renderuj listę (bez pola wyszukiwania - jest teraz w nagłówku)
     let html = '';
 
     groupsToShow.forEach(group => {
@@ -5494,7 +5201,6 @@ function renderStopsView() {
 
     stopsList.innerHTML = html;
 
-    // FAZA 1.5: Handle "Load More" button
     const loadMoreBtn = $('load-more-stops');
     if (loadMoreBtn) {
       loadMoreBtn.addEventListener('click', () => {
@@ -5522,19 +5228,16 @@ function renderStopsView() {
     }
   }
 
-  // Obsługa pola wyszukiwania (z nagłówka, nie dynamicznie renderowane)
   const searchInput = $('stops-search-input-header');
   if (searchInput) {
     // Update value to match current state
     searchInput.value = state.stopsListSearchQuery;
     
-    // Remove old event listener if exists
     const oldHandler = searchInput._searchHandler;
     if (oldHandler) {
       searchInput.removeEventListener('input', oldHandler);
     }
     
-    // FAZA 1.6: Add debounced event listener for better performance
     const debouncedSearch = debounce((value) => {
       state.stopsListSearchQuery = value;
       state.stopsListPage = 1; // FAZA 1.6: Reset pagination on search
@@ -5562,7 +5265,6 @@ function renderStopsView() {
   // Initialize map immediately (removed setTimeout for better responsiveness)
   if (!stopsMap || stopsMap.offsetParent === null) return;
   
-  // Restore map state if returning from STOP_DETAIL
   let initialCenter = [52.23, 21.01];
   let initialZoom = 12;
   
@@ -5579,7 +5281,6 @@ function renderStopsView() {
       maxZoom: 19
     }).addTo(map);
     
-    // Create marker cluster group with neutral colors
     const markers = window.L.markerClusterGroup({
       maxClusterRadius: 30,
       spiderfyOnMaxZoom: true,
@@ -5678,7 +5379,6 @@ function renderStopsView() {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
     }
   
-  // Event delegation for stop groups - toggle expand/collapse + zoom map
   const stopsListContainer = stopsList.parentElement || stopsList;
   
   if (stopsListContainer) {
@@ -5734,7 +5434,6 @@ function renderStopsView() {
     stopsListContainer.addEventListener('click', groupHandler);
   }
 
-  // Event delegation for stop items - navigate to STOP_DETAIL
   const stopsList_el = $('stops-list');
   if (stopsList_el) {
     // Remove old handler if exists
@@ -5742,14 +5441,12 @@ function renderStopsView() {
       stopsList_el.removeEventListener('click', stopsList_el._stopItemHandler);
     }
     
-    // Add delegated handler
     const handler = (e) => {
       const stopItem = e.target.closest('.stop-item');
       if (!stopItem) return;
       
       const stopId = stopItem.getAttribute('data-stop-id');
       
-      // Search in groupsArray for the stop
       const groupsArray = getOrBuildGroupsArray(stopsData);
       let stop = null;
       
@@ -5786,7 +5483,6 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
   const activeServices = getServicesForDate(selectedDate);
   const routesData = [];
   
-  // Zbierz wszystkie linie przechodzące przez ten przystanek
   const routesAtStop = new Map();
   
   state.gtfsData.routes.forEach(route => {
@@ -5808,7 +5504,6 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     }
   });
   
-  // Jeśli jest filtr, zostaw tylko wybrane
   let routesToProcess = Array. from(routesAtStop.values());
   if (filteredRouteIds.length > 0) {
     routesToProcess = routesToProcess.filter(rd => filteredRouteIds.includes(rd.route.route_id));
@@ -5822,7 +5517,6 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     const activeTrips = trips.filter(t => activeServices.includes(t.service_id));
     
     // UPROSZCZENIE: dla przystanku jest tylko jeden kierunek tej linii
-    // Znajdź najpopularniejszą sekwencję przystanków
     const representative = findMostFrequentTripPattern(
       activeTrips, 
       state.gtfsData.stopTimesIndex,
@@ -5832,7 +5526,6 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     
     if (!representative) return; // Brak tripów przez ten przystanek
     
-    // Zbuduj listę przystanków z reprezentatywnego tripu
     const stopsToDraw = [];
     representative.stopIds.forEach(sid => {
       const stop = state.gtfsData.stopsIndex[sid];
@@ -5854,7 +5547,6 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     if (stopsToDraw.length > 1) {
       const meta = getRouteTypeMeta(route.route_type);
       
-      // Pobierz shape_id i direction_id z reprezentatywnego tripu
       const representativeTrip = activeTrips.find(t => t.trip_id === representative.tripId);
       const shapeId = representativeTrip?.shape_id || null;
       const direction = representativeTrip?.direction_id || '0';
@@ -5899,7 +5591,6 @@ function updateDeparturesTable() {
   const tableContainer = document.querySelector('#stop-detail-departures-table');
   if (!tableContainer || !state.stopDetailDepartures) return;
   
-  // Filter departures based on current filter
   let filteredDepartures = state.stopDetailDepartures;
   if (state.stopViewFilteredRoutes.length > 0) {
     filteredDepartures = state.stopDetailDepartures.filter(d => 
@@ -5976,7 +5667,6 @@ function renderTimetable() {
     <div id="schedule-table-root"></div>
 `;
       $('toggle-depot-trips-main').onclick = () => { 
-        // FIX #4: Save scroll position before toggling
         const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
         const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
         const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
@@ -5996,7 +5686,6 @@ function renderTimetable() {
 
       const tableRoot = $('schedule-table-root'); if (!tableRoot) return;
 
-// === STEP 1: Get ALL trips for current route/group + direction ===
 const trips = getAllTripsForRoute();
 if (trips.length === 0) {
   tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No schedule available.</div>";
@@ -6011,11 +5700,9 @@ if (variantsData && variantsData.variantDetails) {
   if (available.length>0 && !available.includes(state.selectedVariant)) state.selectedVariant = available[0];
 }
 
-// === STEP 2: Try to get canonical master list (stable rows) ===
 let masterList = ensureCanonicalMasterListForCurrentSelection();
 let usingCanonical = !!masterList;
 
-// Build tripStopMaps for current date's trips (all stops, including tail)
 const tripStopMaps = {};
 trips.forEach(trip => {
   const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
@@ -6028,7 +5715,6 @@ const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
 const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : null;
 
 // === STEP 3: Process trips (detect tail stops, filter if needed) ===
-// This determines which TRIPS to show, not which ROWS
 const thresh = state.threshold/100;
 const totalTrips = trips.length;
 const edgeCount = {};
@@ -6044,7 +5730,6 @@ const processedTrips = trips.map(trip => {
   const stops = tripStopMaps[trip.trip_id] || [];
   let pStops = [];
   
-  // Find first and last core indices for this trip (if profile exists)
   let firstCoreIdx = -1;
   let lastCoreIdx = -1;
   
@@ -6062,7 +5747,6 @@ const processedTrips = trips.map(trip => {
     const s = stops[i];
     const sId = s.stop_id;
 
-    // Odczytaj metadane z profilu (jeśli dostępne)
     const meta = stopMetadata ? stopMetadata[sId] : null;
     const profileNodeType = nodeTypes ? nodeTypes[sId] : null;
     
@@ -6070,7 +5754,6 @@ const processedTrips = trips.map(trip => {
     let isOnDemand = false;
 
     if (meta) {
-      // === NEW LOGIC: Use profile nodeTypes (with recursive classification) ===
       const nodeType = nodeTypes[sId];
       
       if (nodeType === 'tail') {
@@ -6079,13 +5762,11 @@ const processedTrips = trips.map(trip => {
       } else if (nodeType === 'passenger' || nodeType === 'core') {
         // Passenger stop (including branches between core)
         isStopTech = false;
-        // Check for on-demand BEFORE normalization (types 2,3 are on-demand)
         const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
         const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
         isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
       } else {
         // Fallback for unclassified stops (noncore, branch, etc.)
-        // Check GTFS flags to determine if technical
         const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
         const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
         const isStrictlyTechnical = (pType === "1" && dType === "1");
@@ -6104,7 +5785,6 @@ const processedTrips = trips.map(trip => {
       }
       
     } else {
-      // === FALLBACK: Stara logika (jeśli brak profilu lub metadanych) ===
       const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
       const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
 
@@ -6150,7 +5830,6 @@ const processedTrips = trips.map(trip => {
     }
   }
   
-  // Determine if trip has passenger stops INSIDE core (between first and last core)
   let hasPassengerInsideCore = false;
   if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
     // Check for passenger stops between first and last core
@@ -6172,7 +5851,6 @@ if (processedTrips.length === 0) {
   return; 
 }
 
-// === STEP 4: Build/sort trips and create mappings ===
 let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps, state.gtfsData.stopsIndex);
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
@@ -6197,10 +5875,8 @@ if (!masterList || masterList.length === 0) {
   return;
 }
 
-// Create trip mappings against canonical/fallback master list
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
-// === STEP 6: Compute visible row indices (FILTER rows, never reorder) ===
 const visibleRowIndices = [];
 const visiblePassengerRowIndices = []; // Only passenger rows (excluding tail)
 
@@ -6211,7 +5887,6 @@ masterList.forEach((mStop, mIdx) => {
   }
   
   // Rule 2: Hide rows with no departures for current date in any trip
-  // (Check if at least one trip in sortedTrips has a stop time at this row)
   let hasAnyDeparture = false;
   for (let tripIdx = 0; tripIdx < sortedTrips.length; tripIdx++) {
     const mapping = tripMappings[tripIdx];
@@ -6235,7 +5910,6 @@ masterList.forEach((mStop, mIdx) => {
 });
 
 // === STEP 7: Apply adjacent-swaps column ordering (reorder TRIPS, not rows) ===
-// Separate trips into service (with passenger inside core) and depot (without)
 const serviceTrips = [];
 const depotTrips = [];
 
@@ -6247,12 +5921,10 @@ sortedTrips.forEach(trip => {
   }
 });
 
-// Build cache key for column order
 const key = getCanonicalKeyForCurrentSelection() || 'fallback';
 const dir = state.selectedDirection || '0';
 const columnOrderCacheKey = `${key}::${dir}::${state.selectedDate}::${state.showAllTrips}`;
 
-// Order service trips using adjacent-swaps algorithm on passenger rows only
 let orderedServiceTrips = serviceTrips;
 if (usingCanonical && serviceTrips.length > 0) {
   const serviceTripMappings = serviceTrips.map(trip => {
@@ -6290,9 +5962,7 @@ if (usingCanonical && serviceTrips.length > 0) {
   }
 }
 
-// Order depot trips by firstCoreTime
 const orderedDepotTrips = depotTrips.slice().sort((a, b) => {
-  // Get firstCoreTime for each trip
   const getFirstCoreTime = (trip) => {
     if (!profile || !profile.coreStops) return null;
     const coreStopsSet = new Set(profile.coreStops);
@@ -6323,7 +5993,6 @@ const orderedDepotTrips = depotTrips.slice().sort((a, b) => {
   return a.trip_id.localeCompare(b.trip_id);
 });
 
-// Combine: service trips first (adjacent-swaps ordered), then depot trips (by firstCoreTime)
 let orderedTrips;
 if (state.showAllTrips) {
   orderedTrips = [...orderedServiceTrips, ...orderedDepotTrips];
@@ -6332,7 +6001,6 @@ if (state.showAllTrips) {
   orderedTrips = orderedServiceTrips;
 }
 
-// Rebuild trip mappings in the new order
 const orderedTripMappings = orderedTrips.map(trip => {
   const originalIdx = sortedTrips.findIndex(t => t.trip_id === trip.trip_id);
   return tripMappings[originalIdx];
@@ -6346,12 +6014,10 @@ const finalTripMappings = orderedTripMappings;
 // Store all trips (including those that might be hidden)
 state.currentTimetableData.allTrips = trips; // Store ALL trips before filtering
 
-// Build stopDepartures map for each stop in masterList
 const stopDepartures = {};
 masterList.forEach((mStop) => {
   const allStopIds = mStop.stopIds || [mStop.id];
   
-  // Collect all departures for this stop (including hidden trips)
   const departures = [];
   
   // Go through ALL trips (not just sortedTrips) to include hidden ones
@@ -6382,7 +6048,6 @@ masterList.forEach((mStop) => {
 state.currentTimetableData.stopDepartures = stopDepartures;
 // === END CACHED DATA ===
       
-      // Tabela z pełnym obramowaniem
       let html = '<div class="overflow-x-auto"><table class="text-sm border-collapse border border-gray-300 w-full bg-white"><thead class="bg-gray-50 sticky top-0">';
       html += '<tr>';
       
@@ -6411,7 +6076,6 @@ state.currentTimetableData.stopDepartures = stopDepartures;
         // Note: mStop.id and mStop.name are escaped to prevent XSS
         html += `<td class="p-2 font-medium sticky left-0 bg-white border border-gray-300 cursor-pointer hover:bg-blue-50 z-10" style="min-width:250px; padding-left: 10px;" onclick="openStopTimetable('${escapeHtml(mStop.id)}')">${escapeHtml(mStop.name)}${isOnDemandStop ? ' <span style="color: #ff0000; font-style: normal; margin-left: 4px;">&#128276;</span>' : ''}</td>`;
 
-        // FIX #8: Check if this is a merged stop for tooltips on time cells
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
 
         // Inner loop: generate time cells for each trip
@@ -6420,7 +6084,6 @@ state.currentTimetableData.stopDepartures = stopDepartures;
           const trip = sortedTrips[tripIdx];
           
           if (stopMatch) {
-            // Zbuduj tooltip dla TEGO KONKRETNEGO stop_id (nie pierwszego!)
             let cellTooltip = '';
             
             if (isMergedStop) {
@@ -6473,11 +6136,9 @@ state.currentTimetableData.stopDepartures = stopDepartures;
             const cellRect = this.getBoundingClientRect();
             const tooltipRect = tooltip.getBoundingClientRect();
             
-            // Position tooltip above the cell, centered
             const top = cellRect.top - tooltipRect.height - 8;
             const left = cellRect.left + (cellRect.width / 2) - (tooltipRect.width / 2);
             
-            // Adjust if tooltip would go off-screen
             const finalTop = Math.max(10, top);
             const finalLeft = Math.max(10, Math.min(left, window.innerWidth - tooltipRect.width - 10));
             
@@ -6750,7 +6411,7 @@ function openStopTimetable(stopId) {
               alternativeTermini.set(tripHeadsign, nextLetter);
               nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
             }
-            terminusKey = alternativeTermini.get(tripHeadsign);
+            terminusKey = alternateTermini.get(tripHeadsign);
           } else if (!tripHeadsign) {
             const terminusStop = state.gtfsData.stopsIndex[terminusStopId];
             const terminusName = terminusStop?.stop_name || terminusStopId;
@@ -7052,6 +6713,48 @@ function openStopTimetable(stopId) {
   if (legendParts.length > 0) {
     legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
   }
+  
+  if (legendParts.length > 0) {
+    legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
+  }
+
+  let tableHeaderHTML = `<tr style="background: #e5e7eb;">
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Dzień powszedni</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(saturdayColumn.name)}</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(sundayColumn.name)}</th>`;
+  
+  // Add weekday holiday columns
+  weekdayHolidayColumns.forEach(hCol => {
+    tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(hCol.name)}</th>`;
+  });
+  
+  tableHeaderHTML += `</tr>`;
+  
+  let tableBodyHTML = `<tr>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(weekdayTimes)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayColumn.times)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayColumn.times)}</td>`;
+  
+  // Add weekday holiday column data
+  weekdayHolidayColumns.forEach(hCol => {
+    tableBodyHTML += `<td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(hCol.times)}</td>`;
+  });
+  
+  tableBodyHTML += `</tr>`;
+
+  let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
+  
+  if (state.selectedRoute) {
+    headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div>`;
+  }
+  
+  headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div>`;
+  
+  if (mainDestination && state.selectedRoute) {
+    headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination)}</span></div>`;
+  }
+  
+  headerHTML += '</div></div>';
 
   // Build table HTML
   let tableHeaderHTML = `<tr style="background: #e5e7eb;">
@@ -7114,10 +6817,6 @@ function openStopTimetable(stopId) {
 // ═══════════════════════════════════════════════════════════════
 // 14. MAIN RENDER & VIEW CONTROL
 // ═══════════════════════════════════════════════════════════════
-    /**
-     * Określa aktualny widok aplikacji na podstawie stanu
-     * @returns {string} Jeden z VIEW.*
-     */
     function getCurrentView() {
       // Early returns in order of precedence - simpler flow with clear hierarchy
       if (state.loading) return VIEW.LOADING;
@@ -7195,13 +6894,10 @@ switch(currentView) {
     break;
     
   case VIEW.STOP_DETAIL:
-    // ========== SZCZEGÓŁOWY WIDOK PRZYSTANKU ==========
     const stop = state.selectedStop;
     
-    // Handle merged stops - get all stop IDs
     const allStopIds = stop.stopIds || [stop.stop_id];
     
-    // Zbierz wszystkie odjazdy dla tego przystanku
     const activeServices = getServicesForDate(state.selectedDate);
     const departures = [];
     const routesAtStop = new Map();
@@ -7424,7 +7120,6 @@ switch(currentView) {
 
   case VIEW.ROUTE_TIMETABLE:
     // ========== WIDOK LINII z rozkładem ==========
-    // directions + displays (A / B)
     const directions = getAvailableDirections();
     const dirA = Array.isArray(directions) && directions.length >= 1 ? directions[0] : null;
     const dirB = Array.isArray(directions) && directions.length >= 2 ? directions[1] : null;
@@ -7576,7 +7271,6 @@ $('back-button')?.addEventListener('click', () => {
     render(); 
   });
 
-// -- Obsługa kliknięć na przyciskach filtrów --
 const filterAllBtn = document.getElementById('filter-all-routes');
 if (filterAllBtn) {
   const oldHandler = filterAllBtn._filterHandler;
@@ -7664,10 +7358,8 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     });
     state.stopDetailMapLayers = {};
     
-    // Recollect routes for new date
     const result = collectRoutesForStop(stopId, state.selectedDate, []);
     
-    // No limit - removed tooMany check
     const routesData = result.routes || [];
     
     // Recreate layers
@@ -7729,7 +7421,6 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     filterStopDetailMapLayers(state.stopViewFilteredRoutes);
   }
   
-  // Update departures and re-render table/buttons (but not the whole view)
   const activeServices = getServicesForDate(state.selectedDate);
   const departures = [];
   const routesAtStop = new Map();
@@ -7778,7 +7469,6 @@ if (state.gtfsData && state.selectedRoute) {
 }
 }
 
-    // Throttled render function to avoid excessive DOM updates during parsing
     function render(force = false) {
       const now = Date.now();
       
