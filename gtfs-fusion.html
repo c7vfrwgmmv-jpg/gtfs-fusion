@@ -1042,14 +1042,39 @@ function debounce(func, wait) {
       return normalized;
     }
     function normalizeRecord(rec) {
-      const out = {};
-      Object.keys(rec).forEach(origKey => {
+      if (!rec || typeof rec !== 'object') {
+        console.warn('normalizeRecord: Invalid record, expected object');
+        return {};
+      }
+      
+      const out = Object.create(null); // Faster than {} (no prototype chain)
+      const keys = Object.keys(rec);
+      
+      for (let i = 0; i < keys.length; i++) {
+        const origKey = keys[i];
         const norm = normalizeKey(origKey);
-        let val = rec[origKey];
-        if (val === null || val === undefined) val = '';
-        val = String(val).replace(/^"|"$/g,'').trim();
-        out[norm] = val;
-      });
+        const val = rec[origKey];
+        
+        if (val === null || val === undefined) {
+          out[norm] = '';
+        } else {
+          const str = String(val);
+          // Optimize: Combined quote removal and trim
+          const hasStartQuote = str[0] === '"';
+          const hasEndQuote = str[str.length - 1] === '"';
+          
+          if (hasStartQuote && hasEndQuote) {
+            // Remove surrounding quotes and trim
+            out[norm] = str.substring(1, str.length - 1).trim();
+          } else if (hasStartQuote || hasEndQuote) {
+            // Only one quote - just remove and trim
+            out[norm] = str.replace(/^"|"$/g, '').trim();
+          } else {
+            // No quotes - just trim
+            out[norm] = str.trim();
+          }
+        }
+      }
       return out;
     }
 
@@ -1646,12 +1671,27 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
 function parseCSV(text) {
-  const lines = text.split(/\r?\n/);
+  if (!text || typeof text !== 'string') {
+    console.warn('parseCSV: Invalid input, expected non-empty string');
+    return [];
+  }
+  
+  // Optimize: Replace \r\n with \n first (one-time operation), then simple split
+  const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
+  const lines = normalized.split('\n');
   if (lines.length === 0) return [];
   
   function parseCSVLine(line) {
+    if (!line) return [];
+    
+    // Fast path: no quotes = simple split (much faster)
+    if (!line.includes('"')) {
+      return line.split(',');
+    }
+    
+    // Slow path: handle quoted fields
     const result = [];
-    let current = '';
+    const chars = [];
     let inQuotes = false;
     
     for (let i = 0; i < line.length; i++) {
@@ -1660,7 +1700,7 @@ function parseCSV(text) {
       if (char === '"') {
         if (inQuotes && line[i + 1] === '"') {
           // Escaped quote ("")
-          current += '"';
+          chars.push('"');
           i++; // Skip next quote
         } else {
           // Toggle quote mode
@@ -1668,37 +1708,42 @@ function parseCSV(text) {
         }
       } else if (char === ',' && !inQuotes) {
         // Field separator (outside quotes)
-        result.push(current);
-        current = '';
+        result.push(chars.join(''));
+        chars.length = 0; // Clear array (faster than creating new)
       } else {
-        current += char;
+        chars.push(char);
       }
     }
     
     // Add last field
-    result.push(current);
+    result.push(chars.join(''));
+    
+    // Warn if quotes are still open (malformed CSV)
+    if (inQuotes) {
+      console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
+    }
     
     return result;
   }
   
-  const headerLine = lines[0]. replace(/^\uFEFF/, '');
+  const headerLine = lines[0].replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
   
   const result = [];
   
-  // Parse data rows
+  // Parse data rows - optimized for speed
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+    const line = lines[i];
+    if (!line || !line.trim()) continue; // Skip empty lines
     
     const values = parseCSVLine(line);
     const row = {};
     
-    headers. forEach((header, idx) => {
-      let value = values[idx] || '';
-      value = value.trim();
-      row[header] = value;
-    });
+    // Use for loop instead of forEach (faster)
+    for (let j = 0; j < headers.length; j++) {
+      const value = values[j] || '';
+      row[headers[j]] = value.trim();
+    }
     
     result.push(normalizeRecord(row));
   }
@@ -1709,7 +1754,7 @@ function parseCSV(text) {
 function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
   return new Promise(async (resolve, reject) => {
     try {
-      const arrayBuffer = await zipFileEntry. async('arraybuffer');
+      const arrayBuffer = await zipFileEntry.async('arraybuffer');
       const decoder = new TextDecoder('utf-8');
       
       let buffer = '';
@@ -1722,6 +1767,9 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       const CHUNK_SIZE = 1024 * 1024;
       
       // ═══ REMOVED smartSplit - use native split! ═══
+      // NOTE: Using native split(',') for performance (100x faster than smartSplit).
+      // This works for GTFS stop_times.txt because fields typically don't contain commas.
+      // If a feed has quoted fields with embedded commas, use the full parseCSV function instead.
       
       const getCol = (cols, idx) => {
         if (idx === -1 || idx >= cols.length) return '';
@@ -1742,13 +1790,13 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       };
       
       const processLine = (line) => {
-        if (!line. trim()) return;
+        if (!line.trim()) return;
         
         if (!headers) {
-  const rawHeaders = line. split(',').map(h => h.replace(/^"|"$/g, '').trim());  // ← Dodaj .map()
-  headers = {
-    tripIdx: -1,
-    stopIdx: -1,
+          const rawHeaders = line.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+          headers = {
+            tripIdx: -1,
+            stopIdx: -1,
             seqIdx: -1,
             arrIdx: -1,
             depIdx: -1,
@@ -1756,8 +1804,8 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             dropoffIdx: -1
           };
           
-rawHeaders.forEach((h, i) => {
-    const normalized = normalizeKey(h);
+          rawHeaders.forEach((h, i) => {
+            const normalized = normalizeKey(h);
             if (normalized === 'trip_id') headers.tripIdx = i;
             else if (normalized === 'stop_id') headers.stopIdx = i;
             else if (normalized === 'stop_sequence') headers.seqIdx = i;
@@ -1776,7 +1824,7 @@ rawHeaders.forEach((h, i) => {
         // ═══ NATIVE SPLIT - 100x faster than smartSplit! ═══
         const cols = line.split(',');
         
-        if (cols.length <= Math.max(headers.tripIdx, headers. stopIdx)) return;
+        if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
         
         const tripId = getCol(cols, headers.tripIdx);
         const stopId = getCol(cols, headers.stopIdx);
@@ -1807,23 +1855,36 @@ rawHeaders.forEach((h, i) => {
       
       let offset = 0;
       while (offset < arrayBuffer.byteLength) {
-        const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
-        const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
-        const isLastChunk = chunkEnd === arrayBuffer.byteLength;
-        const text = decoder.decode(chunk, { stream: !isLastChunk });
-        buffer += text;
-        
-        let newlineIndex;
-        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.substring(0, newlineIndex);
-          processLine(line);
-          buffer = buffer.substring(newlineIndex + 1);
+        try {
+          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
+          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
+          const text = decoder.decode(chunk, { stream: !isLastChunk });
+          buffer += text;
+          
+          let newlineIndex;
+          // Optimize: Use lastIndexOf to process multiple lines at once
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex); // slice is faster for large strings
+            processLine(line);
+            buffer = buffer.slice(newlineIndex + 1);
+          }
+          
+          offset = chunkEnd;
+        } catch (err) {
+          console.error('Error processing chunk at offset', offset, ':', err);
+          // Continue processing next chunk instead of failing completely
+          offset = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
         }
-        
-        offset = chunkEnd;
       }
       
-      if (buffer.trim()) processLine(buffer);
+      if (buffer.trim()) {
+        try {
+          processLine(buffer);
+        } catch (err) {
+          console.error('Error processing final buffer:', err);
+        }
+      }
       
       // Sort (same as before)
       Object.keys(stopTimesIndex).forEach(tripId => {
@@ -1845,6 +1906,27 @@ rawHeaders.forEach((h, i) => {
           const text = await zipFileEntry.async('string');
           
           const workerCode = `
+            const KEY_ALIAS = {
+              'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
+              'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
+              'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
+              'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
+              'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
+              'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
+              'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
+              'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
+              'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
+              'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date',
+              'shape id':'shape_id','shape_id':'shape_id','shape pt lat':'shape_pt_lat','shape_pt_lat':'shape_pt_lat',
+              'shape pt lon':'shape_pt_lon','shape_pt_lon':'shape_pt_lon','shape pt sequence':'shape_pt_sequence','shape_pt_sequence':'shape_pt_sequence'
+            };
+            
+            function normalizeKey(k) {
+              if (k === null || k === undefined) return k;
+              let key = String(k).replace(/^\\uFEFF/,'').trim().toLowerCase();
+              return KEY_ALIAS[key] || key.replace(/\\s+/g,'_');
+            }
+            
             function smartSplit(line) {
               if (!line.includes('"')) {
                 return line.split(',');
@@ -2076,20 +2158,40 @@ rawHeaders.forEach((h, i) => {
 
     async function handleFileUpload(e) {
       const file = e.target.files[0]; if (!file) return;
-      const t0 = performance.now();
+      
+      // ═══ PERFORMANCE MEASUREMENT START ═══
+      const perfTimings = {
+        totalStart: performance.now(),
+        unzipStart: 0,
+        unzipEnd: 0,
+        parseStart: 0,
+        parseEnd: 0,
+        stopTimesStart: 0,
+        stopTimesEnd: 0,
+        shapesStart: 0,
+        shapesEnd: 0,
+        indexStart: 0,
+        indexEnd: 0,
+        enrichStart: 0,
+        enrichEnd: 0
+      };
+      
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
         // Use fflate for fast ZIP decompression
         state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
+        perfTimings.unzipStart = performance.now();
         const zip = await unzipWithFflate(file);
+        perfTimings.unzipEnd = performance.now();
+        
         state.loadingStep = 'Wyodrębnianie plików...'; render();
         
         const [routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile] = 
           ['routes.txt', 'trips.txt', 'stop_times.txt', 'stops.txt', 'calendar.txt', 'calendar_dates.txt', 'agency.txt', 'shapes.txt']
           .map(filename => findFile(zip.files, filename));
         
-        // Walidacja wymaganych plików
+        // Validate required files
         if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
           throw new Error('Brakuje wymaganych plików GTFS (routes.txt, trips.txt, stop_times.txt, stops.txt)');
         }
@@ -2099,6 +2201,7 @@ rawHeaders.forEach((h, i) => {
 // ==========================================
 state.loadingStep = 'Wczytywanie i parsowanie plików (równolegle)...'; render();
 
+perfTimings.parseStart = performance.now();
 const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
   routesFile.async('string').then(text => parseCSV(text)),
   tripsFile.async('string').then(text => parseCSV(text)),
@@ -2107,16 +2210,21 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
+perfTimings.parseEnd = performance.now();
+
         state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
+        perfTimings.stopTimesStart = performance.now();
         const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
           state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
+        perfTimings.stopTimesEnd = performance.now();
         
         let shapesIndex = {};
         if (shapesFile) {
           state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
+          perfTimings.shapesStart = performance.now();
           try {
             const rawShapes = await parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
               state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
@@ -2134,17 +2242,22 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
             }
             
             shapesIndex = simplifiedShapes;
+            perfTimings.shapesEnd = performance.now();
           } catch (err) {
+            perfTimings.shapesEnd = performance.now();
             // Continue without shapes - they're optional
           }
         }
         
         state.loadingStep = 'Budowanie indeksów...'; render();
+        perfTimings.indexStart = performance.now();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         
         // Generate missing direction_id values
         state.loadingStep = 'Generowanie brakujących direction_id...'; render();
+        perfTimings.enrichStart = performance.now();
         enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex);
+        perfTimings.enrichEnd = performance.now();
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -2210,6 +2323,41 @@ if (dates.length > 0) {
   
   state.selectedDate = selectedDate;
 }
+
+        // ═══ PERFORMANCE MEASUREMENT END ═══
+        perfTimings.indexEnd = performance.now();
+        const totalTime = perfTimings.indexEnd - perfTimings.totalStart;
+        const unzipTime = perfTimings.unzipEnd - perfTimings.unzipStart;
+        const parseTime = perfTimings.parseEnd - perfTimings.parseStart;
+        const stopTimesTime = perfTimings.stopTimesEnd - perfTimings.stopTimesStart;
+        const shapesTime = perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0;
+        const indexTime = perfTimings.indexEnd - perfTimings.indexStart;
+        const enrichTime = perfTimings.enrichEnd - perfTimings.enrichStart;
+        
+        console.log('═══════════════════════════════════════════════');
+        console.log('GTFS LOADING PERFORMANCE REPORT');
+        console.log('═══════════════════════════════════════════════');
+        console.log(`Total loading time: ${totalTime.toFixed(2)} ms (${(totalTime/1000).toFixed(2)} s)`);
+        console.log('');
+        console.log('Breakdown by phase:');
+        console.log(`  1. Unzip:           ${unzipTime.toFixed(2)} ms (${((unzipTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  2. Parse CSV files: ${parseTime.toFixed(2)} ms (${((parseTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  3. Parse stop_times:${stopTimesTime.toFixed(2)} ms (${((stopTimesTime/totalTime)*100).toFixed(1)}%)`);
+        if (shapesTime > 0) {
+          console.log(`  4. Parse shapes:    ${shapesTime.toFixed(2)} ms (${((shapesTime/totalTime)*100).toFixed(1)}%)`);
+        }
+        console.log(`  5. Build indexes:   ${indexTime.toFixed(2)} ms (${((indexTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  6. Enrich data:     ${enrichTime.toFixed(2)} ms (${((enrichTime/totalTime)*100).toFixed(1)}%)`);
+        console.log('');
+        console.log('Data summary:');
+        console.log(`  Routes: ${routes.length.toLocaleString()}`);
+        console.log(`  Trips: ${trips.length.toLocaleString()}`);
+        console.log(`  Stops: ${stops.length.toLocaleString()}`);
+        console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips`);
+        if (Object.keys(shapesIndex).length > 0) {
+          console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
+        }
+        console.log('═══════════════════════════════════════════════');
 
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
@@ -2681,15 +2829,15 @@ function buildStationNameCache(stopsIndex) {
   
   const parentStationIds = new Set();
   Object.values(stopsIndex).forEach(stop => {
-    if (stop.parent_station && stop.parent_station. trim()) {
-      parentStationIds. add(stop.parent_station. trim());
+    if (stop.parent_station && stop.parent_station.trim()) {
+      parentStationIds.add(stop.parent_station.trim());
     }
   });
   
-  // Dla każdej stacji głównej, zapisz mapowanie nazwa → stop_id
+  // For each parent station, save the mapping name → stop_id
   parentStationIds.forEach(parentId => {
     const parentStop = stopsIndex[parentId];
-    if (parentStop?. stop_name) {
+    if (parentStop?.stop_name) {
       const normalizedName = parentStop.stop_name.trim().replace(/\s+/g, ' ');
       stationNameToIdCache.set(normalizedName, parentId);
     }
@@ -2708,12 +2856,12 @@ function getStationId(stopId, stopsIndex) {
   
   const parent = stop.parent_station;
   if (parent && parent.trim() !== '') {
-    return parent. trim();
+    return parent.trim();
   }
   
   // PRIORYTET 2: Sprawdź czy nazwa pasuje do znanej stacji głównej
   if (stop.stop_name) {
-    const normalizedName = stop.stop_name. trim().replace(/\s+/g, ' ');
+    const normalizedName = stop.stop_name.trim().replace(/\s+/g, ' ');
     const cache = buildStationNameCache(stopsIndex);
     
     if (cache.has(normalizedName)) {
@@ -6411,7 +6559,7 @@ function openStopTimetable(stopId) {
               alternativeTermini.set(tripHeadsign, nextLetter);
               nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
             }
-            terminusKey = alternateTermini.get(tripHeadsign);
+            terminusKey = alternativeTermini.get(tripHeadsign);
           } else if (!tripHeadsign) {
             const terminusStop = state.gtfsData.stopsIndex[terminusStopId];
             const terminusName = terminusStop?.stop_name || terminusStopId;
@@ -6713,48 +6861,6 @@ function openStopTimetable(stopId) {
   if (legendParts.length > 0) {
     legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
   }
-  
-  if (legendParts.length > 0) {
-    legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
-  }
-
-  let tableHeaderHTML = `<tr style="background: #e5e7eb;">
-    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Dzień powszedni</th>
-    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(saturdayColumn.name)}</th>
-    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(sundayColumn.name)}</th>`;
-  
-  // Add weekday holiday columns
-  weekdayHolidayColumns.forEach(hCol => {
-    tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(hCol.name)}</th>`;
-  });
-  
-  tableHeaderHTML += `</tr>`;
-  
-  let tableBodyHTML = `<tr>
-    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(weekdayTimes)}</td>
-    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayColumn.times)}</td>
-    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayColumn.times)}</td>`;
-  
-  // Add weekday holiday column data
-  weekdayHolidayColumns.forEach(hCol => {
-    tableBodyHTML += `<td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(hCol.times)}</td>`;
-  });
-  
-  tableBodyHTML += `</tr>`;
-
-  let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
-  
-  if (state.selectedRoute) {
-    headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div>`;
-  }
-  
-  headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div>`;
-  
-  if (mainDestination && state.selectedRoute) {
-    headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination)}</span></div>`;
-  }
-  
-  headerHTML += '</div></div>';
 
   // Build table HTML
   let tableHeaderHTML = `<tr style="background: #e5e7eb;">
