@@ -2401,20 +2401,16 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
         Object.keys(stopTimesIndex).forEach(tripId => {
           stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
         });
-        console.log('✅ Posortowano stopTimesIndex po normalizacji');
         
-        // Debug: weryfikacja sortowania
-        const firstTripId = Object.keys(stopTimesIndex)[0];
-        if (firstTripId) {
-          console.log('🔍 Przykład PO sortowaniu:', firstTripId);
-          console.log(stopTimesIndex[firstTripId].map(st => 
-            `${st.stop_id}(seq=${st.stop_sequence})`
-          ).join(' → '));
-          
-          // Sprawdź czy faktycznie posortowane
-          const sequences = stopTimesIndex[firstTripId].map(st => st.stop_sequence);
-          const isSorted = sequences.every((val, i, arr) => !i || arr[i - 1] <= val);
-          console.log(isSorted ? '✅ Kolejność POPRAWNA' : '❌ BŁĄD: Ciągle źle posortowane!');
+        // 🆕 DODAJ LOG WERYFIKACYJNY:
+        console.log('✅ stopTimesIndex posortowany po normalizacji');
+        const sampleTripId = Object.keys(stopTimesIndex)[0];
+        if (sampleTripId) {
+          console.log(`📋 Przykład (trip ${sampleTripId}):`, 
+            stopTimesIndex[sampleTripId].slice(0, 5).map(st => 
+              `${st.stop_id}(seq=${st.stop_sequence})`
+            ).join(' → ')
+          );
         }
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
@@ -3480,6 +3476,14 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
       }
     });
   });
+  
+  // 🆕 DODAJ LOG:
+  console.log(`📊 buildMasterList() - wynik (${masterList.length} przystanków):`,
+    masterList.slice(0, 8).map(m => {
+      const firstStopId = m.stopIds ? m.stopIds[0] : m.id;
+      return m.name || firstStopId;
+    }).join(' → ')
+  );
   
   return masterList;
 }
@@ -5440,25 +5444,20 @@ if (variantsData && variantsData.variantDetails) {
 
 const tripStopMaps = {};
 trips.forEach(trip => {
-  // Stop sequences already normalized and sorted by enrichTripsWithStopSequence()
-  // DO NOT re-sort - trust the preprocessing!
   const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
   tripStopMaps[trip.trip_id] = stopTimes;
 });
 
-// Debug: sprawdź dane przed renderowaniem
+// 🆕 DODAJ LOG:
 const firstTrip = trips[0];
 if (firstTrip) {
-  const stops = tripStopMaps[firstTrip.trip_id] || [];
-  console.log(`🎨 renderTimetable() - pierwszy trip ${firstTrip.trip_id}:`);
-  console.log(stops.map(st => {
-    const stopName = state.gtfsData.stopsIndex[st.stop_id]?.stop_name || st.stop_id;
-    return `${stopName}(seq=${st.stop_sequence})`;
-  }).join(' → '));
-  
-  const sequences = stops.map(st => st.stop_sequence);
-  const isSorted = sequences.every((val, i, arr) => !i || arr[i - 1] <= val);
-  console.log(isSorted ? '✅ Dane do renderowania POPRAWNE' : '❌ BŁĄD: Dane do renderowania w złej kolejności!');
+  const firstStops = tripStopMaps[firstTrip.trip_id] || [];
+  console.log(`🚌 renderTimetable() - pierwszy trip ${firstTrip.trip_id}:`,
+    firstStops.slice(0, 5).map(st => {
+      const stopName = state.gtfsData.stopsIndex[st.stop_id]?.stop_name || st.stop_id;
+      return `${stopName}(seq=${st.stop_sequence})`;
+    }).join(' → ')
+  );
 }
 const profile = getCurrentRouteProfile();
 const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
@@ -5659,8 +5658,15 @@ state.currentTimetableData.stopDepartures = stopDepartures;
       });
       html += '</tr></thead><tbody>';
 
+      // 🆕 DODAJ LOG dla pierwszych 5 przystanków:
+      console.log(`🎨 Renderowanie HTML dla ${masterList.length} przystanków`);
+      
       // Main loop: generate each row for each stop in masterList
       masterList.forEach((mStop, mIdx) => {
+        if (mIdx < 5) {
+          console.log(`  [${mIdx}] ${mStop.name}`);
+        }
+        
         html += '<tr class="hover:bg-gray-50">';
         
         const isOnDemandStop = sortedTrips.some(trip => {
