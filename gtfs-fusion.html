@@ -5108,6 +5108,407 @@ function updateDeparturesTable() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 12.5 COLUMN ORDERING ALGORITHM (Multi-criteria Borda + Local Optimization)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Helper: Extract time in minutes from stop_time object
+ * Prefers departure_time, falls back to arrival_time, returns +Infinity if missing
+ */
+function getMinutesFromStopTime(st) {
+  if (!st) return Infinity;
+  const timeStr = st.departure_time || st.arrival_time;
+  if (!timeStr) return Infinity;
+  return timeToMinutes(timeStr);
+}
+
+/**
+ * Build times matrix T[nTrips][nRows] for passenger rows only
+ * @param {Array} tripMappings - mappings from createTripMappings
+ * @param {Array} passengerRowIndices - indices of passenger rows in masterList
+ * @returns {Array<Array<number>>} - T[colIdx][rowIdx] = time in minutes (or Infinity)
+ */
+function buildTimesMatrix(tripMappings, passengerRowIndices) {
+  const nTrips = tripMappings.length;
+  const nRows = passengerRowIndices.length;
+  const T = [];
+  
+  for (let colIdx = 0; colIdx < nTrips; colIdx++) {
+    const column = [];
+    const mapping = tripMappings[colIdx];
+    
+    for (let i = 0; i < nRows; i++) {
+      const rowIdx = passengerRowIndices[i];
+      const stopTime = mapping[rowIdx];
+      column.push(getMinutesFromStopTime(stopTime));
+    }
+    
+    T.push(column);
+  }
+  
+  return T;
+}
+
+/**
+ * Compute row weights based on coverage and variance
+ * Higher weights for rows with good coverage and low variance
+ * Normalized so sum of weights = number of rows
+ */
+function computeRowWeights(T) {
+  if (!T || T.length === 0) return [];
+  
+  const nTrips = T.length;
+  const nRows = T[0].length;
+  const weights = [];
+  
+  for (let r = 0; r < nRows; r++) {
+    const times = [];
+    let coverage = 0;
+    
+    for (let c = 0; c < nTrips; c++) {
+      const t = T[c][r];
+      if (isFinite(t)) {
+        times.push(t);
+        coverage++;
+      }
+    }
+    
+    if (times.length === 0) {
+      weights.push(0);
+      continue;
+    }
+    
+    // Coverage ratio
+    const coverageRatio = coverage / nTrips;
+    
+    // Variance (lower is better)
+    const mean = times.reduce((a, b) => a + b, 0) / times.length;
+    const variance = times.reduce((sum, t) => sum + Math.pow(t - mean, 2), 0) / times.length;
+    const stdDev = Math.sqrt(variance);
+    
+    // Weight: higher for high coverage, penalize high variance
+    // Use inverse of (1 + normalized stdDev) to penalize variance
+    const maxStdDev = 240; // 4 hours in minutes - reasonable max
+    const normalizedStdDev = Math.min(stdDev / maxStdDev, 1);
+    const varianceFactor = 1 / (1 + normalizedStdDev);
+    
+    weights.push(coverageRatio * varianceFactor);
+  }
+  
+  // Normalize so sum = nRows
+  const sum = weights.reduce((a, b) => a + b, 0);
+  if (sum > 0) {
+    const factor = nRows / sum;
+    return weights.map(w => w * factor);
+  }
+  
+  return weights;
+}
+
+/**
+ * Compute Borda scores for each column
+ * For each row, rank columns by time (ascending), assign points (m-1, m-2, ..., 0)
+ * Aggregate weighted scores across all rows
+ * @returns {Array<number>} - bordaScores[colIdx] = total weighted Borda score
+ */
+function computeBordaScores(T, rowWeights) {
+  if (!T || T.length === 0) return [];
+  
+  const nTrips = T.length;
+  const nRows = T[0].length;
+  const bordaScores = new Array(nTrips).fill(0);
+  
+  for (let r = 0; r < nRows; r++) {
+    const weight = rowWeights[r] || 1;
+    
+    // Collect (colIdx, time) pairs for this row
+    const entries = [];
+    for (let c = 0; c < nTrips; c++) {
+      entries.push({ colIdx: c, time: T[c][r] });
+    }
+    
+    // Sort by time (ascending)
+    entries.sort((a, b) => {
+      if (!isFinite(a.time) && !isFinite(b.time)) return 0;
+      if (!isFinite(a.time)) return 1;
+      if (!isFinite(b.time)) return -1;
+      return a.time - b.time;
+    });
+    
+    // Assign Borda points: first gets (nTrips-1), last gets 0
+    for (let rank = 0; rank < entries.length; rank++) {
+      const colIdx = entries[rank].colIdx;
+      const points = nTrips - 1 - rank;
+      bordaScores[colIdx] += points * weight;
+    }
+  }
+  
+  return bordaScores;
+}
+
+/**
+ * Objective function: sum of weighted adjacent inversions
+ * An inversion occurs when time[i] > time[i+1] for adjacent columns
+ * @param {Array<number>} order - permutation of column indices
+ * @param {Array<Array<number>>} T - times matrix
+ * @param {Array<number>} rowWeights - row weights
+ * @returns {number} - total weighted inversion count
+ */
+function objectiveAdjacentInversions(order, T, rowWeights) {
+  if (!order || order.length < 2) return 0;
+  
+  const nRows = T[0].length;
+  let totalInversions = 0;
+  
+  for (let i = 0; i < order.length - 1; i++) {
+    const col1 = order[i];
+    const col2 = order[i + 1];
+    
+    for (let r = 0; r < nRows; r++) {
+      const t1 = T[col1][r];
+      const t2 = T[col2][r];
+      
+      // Count inversion if both times are valid and t1 > t2
+      if (isFinite(t1) && isFinite(t2) && t1 > t2) {
+        const weight = rowWeights[r] || 1;
+        totalInversions += weight;
+      }
+    }
+  }
+  
+  return totalInversions;
+}
+
+/**
+ * Local optimization: iteratively try swapping adjacent pairs
+ * Accept swap if it reduces the objective (adjacent inversions)
+ * @param {Array<number>} initialOrder - starting permutation
+ * @param {Array<Array<number>>} T - times matrix
+ * @param {Array<number>} rowWeights - row weights
+ * @param {number} maxPasses - maximum optimization passes
+ * @returns {Array<number>} - optimized order
+ */
+function localOptimizeOrder(initialOrder, T, rowWeights, maxPasses = 8) {
+  let order = [...initialOrder];
+  let currentObjective = objectiveAdjacentInversions(order, T, rowWeights);
+  
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let improved = false;
+    
+    for (let i = 0; i < order.length - 1; i++) {
+      // Try swapping positions i and i+1
+      const newOrder = [...order];
+      [newOrder[i], newOrder[i + 1]] = [newOrder[i + 1], newOrder[i]];
+      
+      const newObjective = objectiveAdjacentInversions(newOrder, T, rowWeights);
+      
+      if (newObjective < currentObjective) {
+        order = newOrder;
+        currentObjective = newObjective;
+        improved = true;
+      }
+    }
+    
+    // If no improvement in this pass, stop early
+    if (!improved) break;
+  }
+  
+  return order;
+}
+
+/**
+ * Helper: Get earliest core time for a column (for tie-breaking)
+ * @param {number} colIdx - column index in tripMappings
+ * @param {Array} tripMappings - trip mappings
+ * @param {Array} masterList - master stop list
+ * @param {Set} coreStops - set of core stop IDs (from profile)
+ * @returns {number} - time in minutes, or Infinity
+ */
+function firstCoreTimeMinutesForTripIdx(colIdx, tripMappings, masterList, coreStops) {
+  const mapping = tripMappings[colIdx];
+  
+  for (let rowIdx = 0; rowIdx < masterList.length; rowIdx++) {
+    const mStop = masterList[rowIdx];
+    const stopTime = mapping[rowIdx];
+    
+    if (!stopTime) continue;
+    
+    // Check if this is a core stop
+    const stopIds = mStop.stopIds || [mStop.id];
+    const isCore = stopIds.some(sid => coreStops && coreStops.has(sid));
+    
+    if (isCore) {
+      const t = getMinutesFromStopTime(stopTime);
+      if (isFinite(t)) return t;
+    }
+  }
+  
+  return Infinity;
+}
+
+/**
+ * Main function: Compute chronological order without anchor dependency
+ * Uses Borda ranking + local optimization
+ * @param {Array} trips - sorted trips
+ * @param {Array} tripMappings - trip mappings
+ * @param {Array} passengerRowIndices - indices of passenger rows
+ * @param {Function} tieBreakKeyFn - optional tie-breaker function (colIdx) => comparable value
+ * @returns {Array<number>} - optimal order (permutation of [0..nTrips-1])
+ */
+function computeChronoOrderNoAnchor(trips, tripMappings, passengerRowIndices, tieBreakKeyFn) {
+  const nTrips = trips.length;
+  
+  // Edge case: no trips or no passenger rows
+  if (nTrips === 0 || !passengerRowIndices || passengerRowIndices.length === 0) {
+    return Array.from({ length: nTrips }, (_, i) => i);
+  }
+  
+  // Build times matrix
+  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
+  
+  // Check if matrix is too sparse (>80% missing data)
+  let totalCells = 0;
+  let missingCells = 0;
+  for (let c = 0; c < T.length; c++) {
+    for (let r = 0; r < T[c].length; r++) {
+      totalCells++;
+      if (!isFinite(T[c][r])) missingCells++;
+    }
+  }
+  const sparsity = missingCells / totalCells;
+  
+  if (sparsity > 0.8) {
+    // Fallback to simple chronological ordering
+    const order = Array.from({ length: nTrips }, (_, i) => i);
+    order.sort((a, b) => {
+      const aTime = trips[a].start || "99:99:99";
+      const bTime = trips[b].start || "99:99:99";
+      const diff = timeToMinutes(aTime) - timeToMinutes(bTime);
+      if (diff !== 0) return diff;
+      return (trips[a].trip_id || '').localeCompare(trips[b].trip_id || '');
+    });
+    return order;
+  }
+  
+  // Compute row weights
+  const rowWeights = computeRowWeights(T);
+  
+  // Compute Borda scores
+  const bordaScores = computeBordaScores(T, rowWeights);
+  
+  // Initial order: sort by Borda scores (descending), with tie-breaker
+  const initialOrder = Array.from({ length: nTrips }, (_, i) => i);
+  initialOrder.sort((a, b) => {
+    const scoreDiff = bordaScores[b] - bordaScores[a]; // Higher score first
+    if (Math.abs(scoreDiff) > 0.001) return scoreDiff;
+    
+    // Tie-breaker: use provided function or trip_id
+    if (tieBreakKeyFn) {
+      const keyA = tieBreakKeyFn(a);
+      const keyB = tieBreakKeyFn(b);
+      if (typeof keyA === 'number' && typeof keyB === 'number') {
+        return keyA - keyB;
+      }
+      return String(keyA).localeCompare(String(keyB));
+    }
+    
+    return (trips[a].trip_id || '').localeCompare(trips[b].trip_id || '');
+  });
+  
+  // Local optimization
+  const optimizedOrder = localOptimizeOrder(initialOrder, T, rowWeights);
+  
+  return optimizedOrder;
+}
+
+/**
+ * Debug: Print column order quality metrics
+ * Shows total weighted inversions and top rows with most inversions
+ */
+function debugColumnOrderQuality(order, tripMappings, passengerRowIndices) {
+  if (!order || !tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
+    console.log('[Column Order Quality] No data to analyze');
+    return;
+  }
+  
+  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
+  const rowWeights = computeRowWeights(T);
+  const totalInversions = objectiveAdjacentInversions(order, T, rowWeights);
+  
+  console.log(`[Column Order Quality] Total weighted inversions: ${totalInversions.toFixed(2)}`);
+  
+  // Analyze per-row inversions
+  const rowInversions = [];
+  const nRows = T[0].length;
+  
+  for (let r = 0; r < nRows; r++) {
+    let inversions = 0;
+    for (let i = 0; i < order.length - 1; i++) {
+      const t1 = T[order[i]][r];
+      const t2 = T[order[i + 1]][r];
+      if (isFinite(t1) && isFinite(t2) && t1 > t2) {
+        inversions++;
+      }
+    }
+    rowInversions.push({ rowIdx: passengerRowIndices[r], inversions, weight: rowWeights[r] });
+  }
+  
+  // Sort by inversions (descending) and show top 5
+  rowInversions.sort((a, b) => b.inversions - a.inversions);
+  console.log('[Column Order Quality] Top rows with most inversions:');
+  rowInversions.slice(0, 5).forEach(({ rowIdx, inversions, weight }) => {
+    console.log(`  Row ${rowIdx}: ${inversions} inversions (weight: ${weight.toFixed(2)})`);
+  });
+}
+
+/**
+ * Debug: Show pairwise preference matrix
+ * For each pair of columns, count how many rows prefer one over the other
+ */
+function debugPairwisePreferences(tripMappings, passengerRowIndices) {
+  if (!tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
+    console.log('[Pairwise Preferences] No data to analyze');
+    return;
+  }
+  
+  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
+  const nTrips = T.length;
+  const nRows = T[0].length;
+  
+  // Count wins for each column
+  const wins = new Array(nTrips).fill(0);
+  
+  for (let c1 = 0; c1 < nTrips; c1++) {
+    for (let c2 = c1 + 1; c2 < nTrips; c2++) {
+      let c1Wins = 0;
+      let c2Wins = 0;
+      
+      for (let r = 0; r < nRows; r++) {
+        const t1 = T[c1][r];
+        const t2 = T[c2][r];
+        
+        if (isFinite(t1) && isFinite(t2)) {
+          if (t1 < t2) c1Wins++;
+          else if (t2 < t1) c2Wins++;
+        }
+      }
+      
+      wins[c1] += c1Wins;
+      wins[c2] += c2Wins;
+    }
+  }
+  
+  // Show top 5 dominant columns
+  const ranked = wins.map((w, idx) => ({ colIdx: idx, wins: w }));
+  ranked.sort((a, b) => b.wins - a.wins);
+  
+  console.log('[Pairwise Preferences] Top columns by pairwise wins:');
+  ranked.slice(0, 5).forEach(({ colIdx, wins }) => {
+    console.log(`  Column ${colIdx}: ${wins} wins`);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 13. UI RENDERING - TIMETABLE
 // ═══════════════════════════════════════════════════════════════
 function renderTimetable() {
@@ -5292,6 +5693,70 @@ sortedTrips.forEach(t => {
 const masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
+// === NEW: COMPUTE OPTIMAL COLUMN ORDER ===
+// Identify passenger rows (non-tail rows with at least one departure)
+const passengerRowIndices = [];
+masterList.forEach((mStop, idx) => {
+  // Check if row has nodeType (from profile)
+  const profile = getCurrentRouteProfile();
+  const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
+  
+  // Get all stop IDs for this merged stop
+  const stopIds = mStop.stopIds || [mStop.id];
+  
+  // Check if any of these stops is marked as 'tail' in profile
+  let isTail = false;
+  if (nodeTypes) {
+    isTail = stopIds.some(sid => nodeTypes[sid] === 'tail');
+  }
+  
+  // Include row if it's not a tail and has at least one departure
+  if (!isTail) {
+    // Check if at least one trip has a departure at this stop
+    const hasDeparture = tripMappings.some(mapping => {
+      const st = mapping[idx];
+      return st && (st.departure_time || st.arrival_time);
+    });
+    
+    if (hasDeparture) {
+      passengerRowIndices.push(idx);
+    }
+  }
+});
+
+// Prepare tie-breaker function: first core time + trip_id
+const coreStops = new Set();
+if (profile && profile.coreStops) {
+  profile.coreStops.forEach(sid => coreStops.add(sid));
+}
+
+const tieBreakKeyFn = (colIdx) => {
+  const coreTime = firstCoreTimeMinutesForTripIdx(colIdx, tripMappings, masterList, coreStops);
+  const trip = sortedTrips[colIdx];
+  // Return tuple-like string for stable sorting
+  return `${String(coreTime).padStart(10, '0')}_${trip.trip_id || ''}`;
+};
+
+// Compute optimal order using Borda + local optimization
+const optimalOrder = computeChronoOrderNoAnchor(sortedTrips, tripMappings, passengerRowIndices, tieBreakKeyFn);
+
+// Apply order to trips and tripMappings
+const orderedTrips = optimalOrder.map(i => sortedTrips[i]);
+const orderedMappings = optimalOrder.map(i => tripMappings[i]);
+
+// Replace sortedTrips and tripMappings with ordered versions
+sortedTrips = orderedTrips;
+const finalTripMappings = orderedMappings;
+
+// Debug output (only if developer mode enabled, or always for now)
+try {
+  debugColumnOrderQuality(optimalOrder, tripMappings, passengerRowIndices);
+  debugPairwisePreferences(tripMappings, passengerRowIndices);
+} catch (e) {
+  console.error('Debug output error:', e);
+}
+// === END NEW COLUMN ORDER ===
+
 // === POPULATE CACHED TIMETABLE DATA FOR MODAL ===
 // Store all trips (including those that might be hidden)
 state.currentTimetableData.allTrips = trips; // Store ALL trips before filtering
@@ -5364,7 +5829,7 @@ state.currentTimetableData.stopDepartures = stopDepartures;
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
 
         // Inner loop: generate time cells for each trip
-        tripMappings.forEach((mapping, tripIdx) => {
+        finalTripMappings.forEach((mapping, tripIdx) => {
           const stopMatch = mapping[mIdx];
           const trip = sortedTrips[tripIdx];
           
