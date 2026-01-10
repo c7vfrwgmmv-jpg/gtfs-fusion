@@ -4130,6 +4130,168 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
 }
 
 /**
+ * Configuration for adjacent-swaps column ordering algorithm
+ * 
+ * Parameters:
+ * - voteThreshold: minimum number of row-votes required to swap a pair (default: 4)
+ * - marginMinutes: time difference margin to avoid swapping on jitter (default: 2)
+ * - maxPasses: maximum number of bubble-sort passes to limit runtime (default: 8)
+ */
+const adjacentSwapOrderConfig = {
+  voteThreshold: 4,
+  marginMinutes: 2,
+  maxPasses: 8
+};
+
+/**
+ * Adjacent-swaps column ordering algorithm
+ * 
+ * Performs local corrections on the trips array based on row-wise time comparisons
+ * across visible passenger rows only. Unlike global pairwise ranking, this uses
+ * a bubble-sort approach with voting:
+ * - Compare adjacent pairs across multiple passes
+ * - For each pair, count row votes favoring a swap (left time > right time + margin)
+ * - If votesSwap >= voteThreshold, swap the pair
+ * - Repeat for maxPasses iterations to allow corrections to propagate
+ * 
+ * Benefits:
+ * - Produces locally monotone ordering (minimizes adjacent inversions)
+ * - Deterministic and stable with proper parameter tuning
+ * - Lower complexity than global pairwise: O(n·rows·passes) vs O(n²·rows)
+ * - Works well for routes with mostly consistent trip progression
+ * 
+ * @param {Array} trips - Array of trip objects in current initial order
+ * @param {Array} tripMappings - Array of mapping objects [tripIdx][rowIdx] = stopTime
+ * @param {Array} visiblePassengerRowIndices - Row indices to consider (exclude tail rows)
+ * @param {Object} params - { voteThreshold, marginMinutes, maxPasses }
+ * @returns {Array} Reordered trips array
+ */
+function adjacentSwapOrder(trips, tripMappings, visiblePassengerRowIndices, params) {
+  if (!trips || trips.length <= 1) return trips;
+  
+  const { voteThreshold, marginMinutes, maxPasses } = params;
+  
+  // Work with copies to avoid mutating inputs
+  const orderedTrips = trips.slice();
+  const orderedMappings = tripMappings.slice();
+  
+  // Perform multiple passes of adjacent comparisons
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let swapped = false;
+    
+    // Compare each adjacent pair
+    for (let i = 0; i < orderedTrips.length - 1; i++) {
+      let votesSwap = 0;
+      let votesKeep = 0;
+      
+      // Count votes across visible passenger rows
+      for (const rowIdx of visiblePassengerRowIndices) {
+        const stopL = orderedMappings[i][rowIdx];
+        const stopR = orderedMappings[i + 1][rowIdx];
+        
+        // Skip if either trip doesn't stop at this row
+        if (!stopL || !stopR) continue;
+        
+        const timeL = stopL.departure_time || stopL.arrival_time;
+        const timeR = stopR.departure_time || stopR.arrival_time;
+        
+        // Skip if either time is missing
+        if (!timeL || !timeR) continue;
+        
+        const minutesL = timeToMinutes(timeL);
+        const minutesR = timeToMinutes(timeR);
+        
+        // Vote to swap if left is significantly later than right
+        if (minutesL > minutesR + marginMinutes) {
+          votesSwap++;
+        } else if (minutesR > minutesL + marginMinutes) {
+          votesKeep++;
+        }
+        // Within margin: no vote
+      }
+      
+      // Swap if we have enough votes
+      if (votesSwap >= voteThreshold) {
+        // Swap trips
+        [orderedTrips[i], orderedTrips[i + 1]] = [orderedTrips[i + 1], orderedTrips[i]];
+        // Swap corresponding mappings to stay in sync
+        [orderedMappings[i], orderedMappings[i + 1]] = [orderedMappings[i + 1], orderedMappings[i]];
+        swapped = true;
+      }
+    }
+    
+    // Early exit if no swaps were made in this pass
+    if (!swapped) break;
+  }
+  
+  return orderedTrips;
+}
+
+/**
+ * Debug helper: compute quality of adjacent-swaps ordering
+ * 
+ * Counts remaining adjacent inversions after ordering, where an inversion is
+ * a pair (i, i+1) where left times frequently exceed right times by margin.
+ * 
+ * @param {Array} orderedTrips - Trips array after ordering
+ * @param {Array} tripMappings - Trip mappings aligned to orderedTrips
+ * @param {Array} visiblePassengerRowIndices - Row indices to consider
+ * @returns {Object} { inversions, samplePairs }
+ */
+function debugAdjacentSwapQuality(orderedTrips, tripMappings, visiblePassengerRowIndices) {
+  if (!orderedTrips || orderedTrips.length <= 1) {
+    return { inversions: 0, samplePairs: [] };
+  }
+  
+  const marginMinutes = adjacentSwapOrderConfig.marginMinutes;
+  let inversions = 0;
+  const samplePairs = [];
+  
+  // Check each adjacent pair
+  for (let i = 0; i < orderedTrips.length - 1; i++) {
+    let votesInversion = 0;
+    
+    // Count inversion votes across visible passenger rows
+    for (const rowIdx of visiblePassengerRowIndices) {
+      const stopL = tripMappings[i][rowIdx];
+      const stopR = tripMappings[i + 1][rowIdx];
+      
+      if (!stopL || !stopR) continue;
+      
+      const timeL = stopL.departure_time || stopL.arrival_time;
+      const timeR = stopR.departure_time || stopR.arrival_time;
+      
+      if (!timeL || !timeR) continue;
+      
+      const minutesL = timeToMinutes(timeL);
+      const minutesR = timeToMinutes(timeR);
+      
+      // Count as inversion if left is significantly later than right
+      if (minutesL > minutesR + marginMinutes) {
+        votesInversion++;
+      }
+    }
+    
+    // If pair has inversions, count it
+    if (votesInversion >= adjacentSwapOrderConfig.voteThreshold) {
+      inversions++;
+      if (samplePairs.length < 5) {
+        samplePairs.push({
+          leftTrip: orderedTrips[i].trip_id,
+          rightTrip: orderedTrips[i + 1].trip_id,
+          inversionVotes: votesInversion
+        });
+      }
+    }
+  }
+  
+  return { inversions, samplePairs };
+}
+
+/**
+ * NOTE: This function is DEPRECATED and no longer used in renderTimetable.
+ * It is kept for reference only. The timetable now uses adjacentSwapOrder instead.
+ * 
  * Compute globally chronological column order using pairwise ranking (Copeland-like).
  * 
  * PURPOSE: Achieve globally chronological trip ordering (columns) so times tend to 
@@ -6192,7 +6354,7 @@ const key = getCanonicalKeyForCurrentSelection() || 'fallback';
 const dir = state.selectedDirection || '0';
 const columnOrderCacheKey = `${key}::${dir}::${state.selectedDate}::${state.showAllTrips}`;
 
-// Order service trips using pairwise ranking on passenger rows only
+// Order service trips using adjacent-swaps algorithm on passenger rows only
 let orderedServiceTrips = serviceTrips;
 if (usingCanonical && serviceTrips.length > 0) {
   const serviceTripMappings = serviceTrips.map(trip => {
@@ -6210,23 +6372,21 @@ if (usingCanonical && serviceTrips.length > 0) {
     
     // If cache doesn't match, recompute
     if (orderedServiceTrips.length !== serviceTrips.length) {
-      orderedServiceTrips = computePairwiseColumnOrder(
+      orderedServiceTrips = adjacentSwapOrder(
         serviceTrips,
-        newTripStopMaps,
+        serviceTripMappings,
         visiblePassengerRowIndices, // Use only passenger rows for ranking
-        masterList,
-        serviceTripMappings
+        adjacentSwapOrderConfig
       );
       state.columnOrderCache[columnOrderCacheKey] = orderedServiceTrips.map(t => t.trip_id);
     }
   } else {
     // Compute and cache
-    orderedServiceTrips = computePairwiseColumnOrder(
+    orderedServiceTrips = adjacentSwapOrder(
       serviceTrips,
-      newTripStopMaps,
+      serviceTripMappings,
       visiblePassengerRowIndices, // Use only passenger rows for ranking
-      masterList,
-      serviceTripMappings
+      adjacentSwapOrderConfig
     );
     state.columnOrderCache[columnOrderCacheKey] = orderedServiceTrips.map(t => t.trip_id);
   }
