@@ -922,11 +922,6 @@ let state = {
   currentTimetableData: {
     allTrips: [],           // wszystkie trips (włącznie z ukrytymi)
     stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
-  },
-  
-  // UI settings
-  ui: {
-    sortStrategy: 'robust'  // 'robust' (default) or 'borda' (for comparison, to be removed)
   }
 };
 
@@ -6011,9 +6006,10 @@ const tieBreakKeyFn = (colIdx) => {
   return `${String(coreTime).padStart(10, '0')}_${trip.trip_id || ''}`;
 };
 
-// === STRATEGY TOGGLE ===
-// Default to 'robust', can be overridden by state.ui.sortStrategy
-const SORT_STRATEGY = (state.ui && state.ui.sortStrategy) || 'robust';
+// === STRATEGY SELECTION ===
+// Use 'robust' strategy by default (weighted median + minimal swaps)
+// 'borda' strategy kept for comparison, to be removed after acceptance
+const SORT_STRATEGY = 'robust';
 
 let optimalOrder;
 if (SORT_STRATEGY === 'robust') {
