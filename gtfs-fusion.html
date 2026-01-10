@@ -1582,7 +1582,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     
     if (validPatterns.length === 0) {
       // No valid patterns, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      tripsToProcess.forEach(trip => {
+        trip.direction_id = '0';
+        trip._direction_id_enriched = true;
+      });
       continue;
     }
     
@@ -1590,7 +1593,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
     if (isCircular) {
       // All trips are circular, assign direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      tripsToProcess.forEach(trip => {
+        trip.direction_id = '0';
+        trip._direction_id_enriched = true;
+      });
       continue;
     }
     
@@ -1605,10 +1611,13 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       tripsToProcess.forEach(trip => {
         if (group0Set.has(trip.trip_id)) {
           trip.direction_id = '0';
+          trip._direction_id_enriched = true;
         } else if (group1Set.has(trip.trip_id)) {
           trip.direction_id = '1';
+          trip._direction_id_enriched = true;
         } else {
           trip.direction_id = '0'; // Fallback
+          trip._direction_id_enriched = true;
         }
       });
       continue;
@@ -1643,7 +1652,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     
     if (bearingData.length === 0) {
       // No geographic data, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      tripsToProcess.forEach(trip => {
+        trip.direction_id = '0';
+        trip._direction_id_enriched = true;
+      });
       continue;
     }
     
@@ -1656,10 +1668,13 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     tripsToProcess.forEach(trip => {
       if (bearingGroup0Set.has(trip.trip_id)) {
         trip.direction_id = '0';
+        trip._direction_id_enriched = true;
       } else if (bearingGroup1Set && bearingGroup1Set.has(trip.trip_id)) {
         trip.direction_id = '1';
+        trip._direction_id_enriched = true;
       } else {
         trip.direction_id = '0'; // Fallback
+        trip._direction_id_enriched = true;
       }
     });
   }
@@ -3550,6 +3565,31 @@ function getCanonicalKeyForCurrentSelection() {
 }
 
 /**
+ * Helper: representative station order from the longest trip (station-aware, dedup A,A → A)
+ */
+function computeRepStationOrder(allTrips, stopTimesIndex, stopsIndex, allowedStationSet) {
+  if (!Array.isArray(allTrips) || allTrips.length === 0) return null;
+  // Pick the longest trip by stop_times length
+  let longest = null, maxLen = 0;
+  for (const t of allTrips) {
+    const sts = stopTimesIndex[t.trip_id] || [];
+    if (sts.length > maxLen) { maxLen = sts.length; longest = t; }
+  }
+  if (!longest || maxLen < 2) return null;
+  const seq = (stopTimesIndex[longest.trip_id] || [])
+    .filter(st => st && st.stop_id)
+    .sort((a, b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10))
+    .map(st => getStationIdWithPolicy(st.stop_id, stopsIndex, allowedStationSet));
+
+  // Dedup adjacent repeats: A,A → A
+  const rep = [];
+  for (let i = 0; i < seq.length; i++) {
+    if (i === 0 || seq[i] !== seq[i - 1]) rep.push(seq[i]);
+  }
+  return rep;
+}
+
+/**
  * Build a canonical master list from ALL trips (no date filter, tail included).
  * This list is stable per route/group + direction and never changes.
  * Only visibility is filtered at render time.
@@ -3840,6 +3880,150 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════
+  // DIRECTIONLESS CONFLICT DETECTION AND OVERRIDE
+  // ═══════════════════════════════════════════════════════════════
+  // Gating: treat dataset as directionless if direction_id was synthetically enriched
+  const isDirectionless = allTrips.length > 0 && allTrips.every(trip => trip._direction_id_enriched === true);
+  
+  if (window.DEBUG_MASTERLIST) {
+    const enrichedCount = allTrips.filter(t => t._direction_id_enriched === true).length;
+    console.log('[buildCanonicalMasterList] enrichedCount=', enrichedCount, '/', allTrips.length, 'isDirectionless=', isDirectionless);
+  }
+
+  // Reprezentant (station-aware, with merge policy)
+  const repStationOrder = computeRepStationOrder(allTrips, stopTimesIndex, stopsIndex, allowedSet);
+  const rankFromRep = {};
+  if (repStationOrder && repStationOrder.length > 0) {
+    repStationOrder.forEach((sid, idx) => { rankFromRep[sid] = idx; });
+  }
+  
+  if (window.DEBUG_MASTERLIST) {
+    console.log('[buildCanonicalMasterList] repStationOrder=', repStationOrder);
+  }
+
+  // Simple conflict detection: median ties in windows (±ε)
+  const epsilonMedian = 0.02;
+  let hasConflict = false;
+  if (isDirectionless) {
+    for (const w of windows) {
+      const entries = Array.from(w.branches.values()).map(b => {
+        const sorted = b.positions.slice().sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+      }).sort((a, b) => a - b);
+      for (let i = 1; i < entries.length; i++) {
+        if (Math.abs(entries[i] - entries[i - 1]) <= epsilonMedian) {
+          hasConflict = true;
+          break;
+        }
+      }
+      if (hasConflict) break;
+    }
+  }
+  
+  if (window.DEBUG_MASTERLIST) {
+    console.log('[buildCanonicalMasterList] hasConflict=', hasConflict);
+  }
+
+  // Apply override if directionless + conflict + rep exists
+  if (isDirectionless && hasConflict && repStationOrder && repStationOrder.length > 0) {
+    if (window.DEBUG_MASTERLIST) {
+      console.log('[buildCanonicalMasterList] Applying override with rep order');
+    }
+    
+    // Helper to get station ID from row
+    const getRowStationId = (row) => {
+      const stopId = row.stopIds && row.stopIds.length > 0 ? row.stopIds[0] : row.id;
+      return allowedSet !== undefined
+        ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
+        : getStationId(stopId, stopsIndex);
+    };
+    
+    // Override sort comparator using rep order
+    const overrideComparator = (a, b) => {
+      const stationIdA = getRowStationId(a);
+      const stationIdB = getRowStationId(b);
+      
+      const rankA = rankFromRep[stationIdA];
+      const rankB = rankFromRep[stationIdB];
+      const hasRepA = rankA !== undefined;
+      const hasRepB = rankB !== undefined;
+      
+      // Both in rep order: use rep rank
+      if (hasRepA && hasRepB) {
+        return rankA - rankB;
+      }
+      
+      // Only A in rep order: A comes first
+      if (hasRepA && !hasRepB) {
+        return -1;
+      }
+      
+      // Only B in rep order: B comes first
+      if (!hasRepA && hasRepB) {
+        return 1;
+      }
+      
+      // Neither in rep order: use name, then stop_id
+      if (a.name !== b.name) return a.name.localeCompare(b.name);
+      return a.id.localeCompare(b.id);
+    };
+    
+    // Rebuild finalRows with override sorting applied to branch stations within segments
+    const finalRowsOverridden = [];
+    
+    // Sort and add pre-core branches with override
+    const sortedPreCore = preCoreBranches.map(branch => ({
+      id: branch.primaryStopId,
+      name: branch.name,
+      stopIds: branch.stopIds,
+      nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+    })).sort(overrideComparator);
+    finalRowsOverridden.push(...sortedPreCore);
+    
+    // Add first core station
+    finalRowsOverridden.push({
+      id: coreStationGroups[0].stopIds[0],
+      name: getStationDisplayName(coreStationGroups[0].stationId, coreStationGroups[0].stopIds),
+      stopIds: coreStationGroups[0].stopIds,
+      nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
+    });
+    
+    // For each window, sort branches with override, then add next core
+    windows.forEach((window, winIdx) => {
+      const branchEntries = createSortedBranchEntries(window.branches);
+      const sortedWindowBranches = branchEntries.map(branch => ({
+        id: branch.primaryStopId,
+        name: branch.name,
+        stopIds: branch.stopIds,
+        nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+      })).sort(overrideComparator);
+      finalRowsOverridden.push(...sortedWindowBranches);
+      
+      // Add next core station
+      const nextCore = window.endCore;
+      finalRowsOverridden.push({
+        id: nextCore.stopIds[0],
+        name: getStationDisplayName(nextCore.stationId, nextCore.stopIds),
+        stopIds: nextCore.stopIds,
+        nodeType: nodeTypes[nextCore.stopIds[0]] || 'core'
+      });
+    });
+    
+    // Sort and add post-core branches with override
+    const sortedPostCore = postCoreBranches.map(branch => ({
+      id: branch.primaryStopId,
+      name: branch.name,
+      stopIds: branch.stopIds,
+      nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+    })).sort(overrideComparator);
+    finalRowsOverridden.push(...sortedPostCore);
+    
+    // Return overridden version
+    return finalRowsOverridden;
+  }
 
   return finalRows;
 }
