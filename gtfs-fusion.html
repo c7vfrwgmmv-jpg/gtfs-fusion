@@ -3392,10 +3392,71 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
+  // 🆕 7.7: Log nodeTypes classification results
+  console.log(`\n🔍 Klasyfikacja node types (depot detection):`);
+  
+  const typeCounts = {};
+  Object.values(nodeTypes).forEach(type => {
+    typeCounts[type] = (typeCounts[type] || 0) + 1;
+  });
+  
+  console.log(`  Node types: core=${typeCounts.core || 0}, passenger=${typeCounts.passenger || 0}, tail=${typeCounts.tail || 0}`);
+
+  // 🆕 7.8: Filter trips that start or end at depot (tail) stops
+  console.log(`\n🚏 Filtrowanie zajezdni/depotów (nowa logika):`);
+  console.log(`  Input trips (przed filtrowaniem): ${allTrips.length}`);
+  
+  const tripsBeforeFilter = allTrips.length;
+  
+  const filteredTrips = allTrips.filter(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    if (stops.length === 0) return true;
+    
+    const firstStopId = stops[0].stop_id;
+    const lastStopId = stops[stops.length - 1].stop_id;
+    
+    // Odfiltruj trips które zaczynają LUB kończą w depot (tail)
+    const startsAtDepot = nodeTypes[firstStopId] === 'tail';
+    const endsAtDepot = nodeTypes[lastStopId] === 'tail';
+    
+    if (startsAtDepot || endsAtDepot) {
+      return false;  // Odfiltruj ten trip
+    }
+    
+    return true;  // Przepuść ten trip
+  });
+  
+  console.log(`  Output trips (po filtrowaniu): ${filteredTrips.length}`);
+  console.log(`  ❌ Odfiltrowano: ${tripsBeforeFilter - filteredTrips.length} trips (zajezdnie/depoty)`);
+  
+  // Sprawdź konkretnie problematyczny trip 277334823:
+  const problematicTripIdCheck = '277334823';
+  const problematicTripCheck = allTrips.find(t => t.trip_id === problematicTripIdCheck);
+  
+  if (problematicTripCheck) {
+    const isPassed = filteredTrips.some(t => t.trip_id === problematicTripIdCheck);
+    const stops = tripStopMaps[problematicTripIdCheck] || [];
+    
+    console.log(`  🔍 Trip ${problematicTripIdCheck} (Betriebshof Köpenick):`);
+    console.log(`     Status: ${isPassed ? '✅ PRZEPUSZCZONY (BUG!)' : '❌ ODFILTROWANY (OK)'}`);
+    console.log(`     Stops: ${stops.length}`);
+    
+    if (stops.length > 0) {
+      const firstStop = stopsIndex[stops[0].stop_id];
+      const lastStop = stopsIndex[stops[stops.length - 1].stop_id];
+      const firstType = nodeTypes[stops[0].stop_id];
+      const lastType = nodeTypes[stops[stops.length - 1].stop_id];
+      
+      console.log(`     Pierwszy: "${firstStop?.stop_name || stops[0].stop_id}" (type: ${firstType})`);
+      console.log(`     Ostatni: "${lastStop?.stop_name || stops[stops.length - 1].stop_id}" (type: ${lastType})`);
+    }
+  }
+
   // 8. Collect detailed stop metadata (pickup/drop_off types, positions in routes)
   const stopMetadata = {}; // stop_id → { hasPickup1: bool, hasDropOff1: bool, isOnDemand: bool, isFirstWithNoPickup: bool, isLastWithNoDropOff: bool }
   
-  allTrips.forEach(trip => {
+  filteredTrips.forEach(trip => {
     const stsRaw = stopTimesIndex[trip.trip_id] || [];
     const sts = stsRaw
       .filter(st => st && st.stop_id)
@@ -3441,13 +3502,13 @@ function buildRouteProfileForCurrentSelection() {
 
   // 9. Build and cache masterList for this route profile
   const tripStopMapsForProfile = {};
-  allTrips.forEach(trip => {
+  filteredTrips.forEach(trip => {
     tripStopMapsForProfile[trip.trip_id] = stopTimesIndex[trip.trip_id] || [];
   });
 
   // Sort trips for buildMasterList
   const sortedTripsForProfile = sortTripsByMostFrequentStop(
-    allTrips, 
+    filteredTrips, 
     tripStopMapsForProfile, 
     stopsIndex
   );
@@ -3465,7 +3526,7 @@ function buildRouteProfileForCurrentSelection() {
   const profile = {
     key,
     direction: dir,
-    tripCount,
+    tripCount: filteredTrips.length,  // Use filtered count for accurate trip count in profile
     nodes,
     edges: Object.fromEntries(
       Object.entries(edges).map(([k, e]) => [k, { ...e, trips: Array.from(e.trips), type: edgeTypes[k] }])
@@ -3538,8 +3599,8 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
     const tripStops = tripStopMaps[trip.trip_id] || [];
     
     // 🆕 DODAJ LOG dla pierwszych 3 trips:
-    if (tripIndex < 3) {
-      console.log(`\n  🚌 Processing trip #${tripIndex} (${trip.trip_id}):`);
+    if (tripIdx < 3) {
+      console.log(`\n  🚌 Processing trip #${tripIdx} (${trip.trip_id}):`);
       console.log(`     Trip ma ${tripStops.length} stops: ${
         tripStops.slice(0, 10).map(st => {
           const stop = stopsIndex[st.stop_id];
