@@ -3329,7 +3329,23 @@ function buildRouteProfileForCurrentSelection() {
     });
   });
 
-  // 9. Save profile to state
+  // 9. Build and cache masterList for this route profile
+  const tripStopMapsForProfile = {};
+  allTrips.forEach(trip => {
+    tripStopMapsForProfile[trip.trip_id] = stopTimesIndex[trip.trip_id] || [];
+  });
+
+  // Sort trips for buildMasterList
+  const sortedTripsForProfile = sortTripsByMostFrequentStop(
+    allTrips, 
+    tripStopMapsForProfile, 
+    stopsIndex
+  );
+
+  // Build masterList (this will use the coreStops we just calculated)
+  const masterListForProfile = buildMasterList(sortedTripsForProfile, tripStopMapsForProfile, stopsIndex);
+
+  // 10. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
     key,
@@ -3340,6 +3356,7 @@ function buildRouteProfileForCurrentSelection() {
       Object.entries(edges).map(([k, e]) => [k, { ...e, trips: Array.from(e.trips), type: edgeTypes[k] }])
     ),
     coreStops,
+    masterList: masterListForProfile,
     nodeTypes,
     stopMetadata,
     coreStationsSet: coreStationsSet,
@@ -3485,8 +3502,8 @@ function getAllTripsForRoute() {
       if (trips.length === 0) return null;
       const tripStopMaps = {};
       trips.forEach(trip => {
+        // Stop sequences already normalized by enrichTripsWithStopSequence()
         const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-        stopTimes.sort((a,b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
         tripStopMaps[trip.trip_id] = stopTimes;
       });
       const patternToVariant = {}, tripToVariant = {}; let variantNum = 1;
@@ -5334,13 +5351,30 @@ function renderTimetable() {
   if (!container) return;
   container.innerHTML = `
     <div class="flex gap-4 items-center mb-4">
-      <button id="toggle-depot-trips-main" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
-        ${state.showAllTrips ? 'Ukryj zjazdy i wyjazdy' : 'Pokaż zjazdy i wyjazdy'}
-      </button>
+      ${(() => {
+        // Disable depot filtering for rail and metro using canonical categories
+        const routeTypeInfo = collectRouteType(state.selectedRoute);
+        const canonical = routeTypeInfo?.canonical;
+        const isRailOrMetro = (canonical === 'rail' || canonical === 'metro');
+        const disabled = isRailOrMetro ? 'disabled' : '';
+        const buttonClass = isRailOrMetro 
+          ? 'bg-gray-300 text-gray-500 px-4 py-2 rounded cursor-not-allowed' 
+          : 'bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600';
+        
+        return `<button id="toggle-depot-trips-main" class="${buttonClass}" ${disabled} title="${isRailOrMetro ? 'Filtrowanie niedostępne dla kolei i metra' : ''}">
+          ${state.showAllTrips ? 'Ukryj zjazdy i wyjazdy' : 'Pokaż zjazdy i wyjazdy'}
+        </button>`;
+      })()}
     </div>
     <div id="schedule-table-root"></div>
 `;
-      $('toggle-depot-trips-main').onclick = () => { 
+      $('toggle-depot-trips-main').onclick = () => {
+        // Don't allow toggling for rail/metro routes
+        const routeTypeInfo = collectRouteType(state.selectedRoute);
+        const canonical = routeTypeInfo?.canonical;
+        const isRailOrMetro = (canonical === 'rail' || canonical === 'metro');
+        if (isRailOrMetro) return; // Inactive for rail/metro
+        
         // FIX #4: Save scroll position before toggling
         const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
         const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
@@ -5376,8 +5410,9 @@ if (variantsData && variantsData.variantDetails) {
 
 const tripStopMaps = {};
 trips.forEach(trip => {
+  // Stop sequences already normalized and sorted by enrichTripsWithStopSequence()
+  // DO NOT re-sort - trust the preprocessing!
   const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-  stopTimes.sort((a,b)=>parseInt(a.stop_sequence||'0') - parseInt(b.stop_sequence||'0'));
   tripStopMaps[trip.trip_id] = stopTimes;
 });
 const profile = getCurrentRouteProfile();
@@ -5493,7 +5528,14 @@ const processedTrips = trips.map(trip => {
   }
   const hasPassenger = pStops.some(s => !s.isTech);
   return { ...trip, pStops, hasPassenger };
-}).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
+}).filter(t => {
+  // For rail/metro (using canonical categories), always show all trips (no depot filtering)
+  const routeTypeInfo = collectRouteType(state.selectedRoute);
+  const canonical = routeTypeInfo?.canonical;
+  const isRailOrMetro = (canonical === 'rail' || canonical === 'metro');
+  
+  return t.pStops.length > 0 && (state.showAllTrips || isRailOrMetro || t.hasPassenger);
+});
       if (processedTrips.length === 0) { tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; return; }
 let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps, state.gtfsData.stopsIndex);
 sortedTrips = sortedTrips.map(t => {
@@ -5508,7 +5550,9 @@ sortedTrips.forEach(t => {
   newTripStopMaps[t.trip_id] = t.pStops;
 });
 
-const masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
+// Use preprocessed masterList from route profile instead of rebuilding
+const profile = getCurrentRouteProfile();
+const masterList = profile.masterList || buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
 // === POPULATE CACHED TIMETABLE DATA FOR MODAL ===
