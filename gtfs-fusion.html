@@ -4182,37 +4182,14 @@ function debugAdjacentSwapQuality(orderedTrips, tripMappings, visiblePassengerRo
 window.debugAdjacentSwapQuality = debugAdjacentSwapQuality;
 
 /**
- * NOTE: This function is DEPRECATED and no longer used in renderTimetable.
- * It is kept for reference only. The timetable now uses adjacentSwapOrder instead.
- * 
- * Compute globally chronological column order using pairwise ranking (Copeland-like).
- * 
- * PURPOSE: Achieve globally chronological trip ordering (columns) so times tend to 
- * increase left→right across visible rows, without relying on a single anchor that 
- * can cause local inversions.
- * 
- * ALGORITHM:
- * - For each pair of trips (A, B), count how many visible rows have time[A] < time[B]
- * - Score each trip as (wins - losses) across all pairwise comparisons
- * - Sort trips by descending score (higher score = comes first/left)
- * 
- * TIE-BREAKERS (in order):
- * 1. Time at first core row (ascending - earlier comes first)
- * 2. Time at last core row (ascending - earlier comes first)
- * 3. trip_id (alphabetical - deterministic)
- * 
- * CACHING:
- * - Column order is cached per (route key, direction, date, showAllTrips)
- * - Cache is invalidated when any of these parameters change
- * - Typical complexity: O(n²·m) where n=trips, m=visible rows
- *   With typical values (n≤100, m≤50), this is acceptable
+ * Find the most common trip pattern (sequence of stops) for a given stop.
+ * Used to identify the typical route variant that serves a stop.
  * 
  * @param {Array} trips - List of trip objects
- * @param {Object} tripStopMaps - Map of trip_id -> stopTimes array
- * @param {Array} visibleRowIndices - Indices of visible rows in masterList
- * @param {Array} masterList - The canonical master list
- * @param {Array} tripMappings - Mappings of trips to master list rows
- * @returns {Array} Reordered trips array
+ * @param {Object} stopTimesIndex - Map of trip_id -> stopTimes array
+ * @param {string} stopId - The stop ID to analyze
+ * @param {Array} activeServices - List of active service IDs
+ * @returns {Object|null} Object with tripId, stopIds array, and frequency count
  */
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
   const patternCounts = new Map(); // klucz: "stop1,stop2,stop3...", wartość: count
@@ -7075,16 +7052,8 @@ document.querySelectorAll('.route-filter-btn').forEach(btn => {
 });
 // -- KONIEC BLOKU obsługi kliknięć --		
 
-$('direction-select')?.addEventListener('change', async (e) => {
-    const newDirection = String(e.target.value);
-    if (newDirection === state.selectedDirection) return; // Avoid redundant updates
-    state.selectedDirection = newDirection;
-    // Invalidate canonical cache when direction changes
-    invalidateCanonicalCacheForCurrentSelection();
-    resetMap();
-    render();
-  });		
-
+// WARNING: Do not duplicate these event listeners - they should only be registered once
+// to avoid multiple callbacks firing on each change
 $('direction-select')?.addEventListener('change', async (e) => {
     const newDirection = String(e.target.value);
     if (newDirection === state.selectedDirection) return; // Avoid redundant updates
