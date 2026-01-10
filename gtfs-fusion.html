@@ -6570,11 +6570,20 @@ function openStopTimetable(stopId) {
      * @returns {string} Jeden z VIEW.*
      */
     function getCurrentView() {
+      // Early returns in order of precedence - simpler flow with clear hierarchy
       if (state.loading) return VIEW.LOADING;
       if (state.error) return VIEW.ERROR;
       if (!state.gtfsData) return VIEW.UPLOAD;
-      if (!state.selectedRoute && state.showStopsView && state.selectedStop) return VIEW.STOP_DETAIL;
-      if (!state.selectedRoute && state.showStopsView) return VIEW.STOPS_LIST;
+      
+      // Stop-related views (check selectedStop before showStopsView for specificity)
+      if (!state.selectedRoute && state.showStopsView && state.selectedStop) {
+        return VIEW.STOP_DETAIL;
+      }
+      if (!state.selectedRoute && state.showStopsView) {
+        return VIEW.STOPS_LIST;
+      }
+      
+      // Route views
       if (!state.selectedRoute) return VIEW.ROUTES_LIST;
       return VIEW.ROUTE_TIMETABLE;
     }
