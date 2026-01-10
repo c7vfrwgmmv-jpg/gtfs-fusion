@@ -3496,7 +3496,7 @@ if ((masterList[i].stopIds && masterList[i].stopIds.includes(sId)) ||
 // RENDERING:
 // - Rows are filtered by: (a) tail toggle, (b) date (no departures = hidden)
 // - Row order NEVER changes - only visibility
-// - Columns (trips) are reordered separately using pairwise ranking for chronological order
+// - Columns (trips) are reordered separately using adjacent-swaps algorithm for chronological order
 // 
 // CACHE INVALIDATION:
 // - On GTFS load (new data)
@@ -6333,13 +6333,13 @@ masterList.forEach((mStop, mIdx) => {
   // Row is visible
   visibleRowIndices.push(mIdx);
   
-  // Track passenger rows separately for pairwise ordering
+  // Track passenger rows separately for adjacent-swaps ordering
   if (mStop.nodeType !== 'tail') {
     visiblePassengerRowIndices.push(mIdx);
   }
 });
 
-// === STEP 7: Apply pairwise column ordering (reorder TRIPS, not rows) ===
+// === STEP 7: Apply adjacent-swaps column ordering (reorder TRIPS, not rows) ===
 // Separate trips into service (with passenger inside core) and depot (without)
 const serviceTrips = [];
 const depotTrips = [];
