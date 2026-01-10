@@ -1575,11 +1575,17 @@ function compareBearingVectors(vector1, vector2) {
     else if (diff > 120) {
       oppositeCount++;
     }
-    // 60-120° is ambiguous, don't count
+    // Special case for L/U-shaped routes: 75-105° (perpendicular) suggests opposite directions
+    // This handles routes with 90° turns where reversed trips have perpendicular bearings
+    else if (diff >= 75 && diff <= 105) {
+      oppositeCount += 0.5; // Count as partial evidence of opposite direction
+    }
+    // 60-75° and 105-120° remain ambiguous
   }
   
-  // Require at least 66% of segments to match directionality
-  const threshold = minLength * 0.66;
+  // Require at least 50% of segments to match directionality for robust detection
+  // This handles L/U-shaped routes where perpendicular segments provide partial evidence
+  const threshold = minLength * 0.5;
   
   if (sameCount >= threshold) return 1;
   if (oppositeCount >= threshold) return -1;
