@@ -726,6 +726,11 @@ video {
 <body>
   <div id="root"></div>
   <script>
+// ═══════════════════════════════════════════════════════════════
+// GTFS Fusion - Single Page Application
+// ═══════════════════════════════════════════════════════════════
+// For architectural documentation and refactoring notes, see REFACTORING.md
+// ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
 // 1. CONSTANTS & CONFIGURATION
@@ -936,6 +941,64 @@ let stationNameToIdCache = null;
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
+//
+// DATA PROCESSING PIPELINE OVERVIEW:
+// ══════════════════════════════════
+// 
+// The GTFS data flows through several processing stages:
+//
+// 1. PARSE (CSV → Raw Objects)
+//    - ZIP extraction & CSV parsing
+//    - Worker-based parallel parsing for performance
+//    - Produces raw JavaScript objects
+//
+// 2. NORMALIZE (Raw → Standardized)
+//    - normalizeKey: CSV headers → GTFS standard field names
+//    - normalizeRecord: Clean values (trim, remove quotes, handle nulls)
+//    - Output: Clean GTFS-compliant records
+//
+// 3. INDEX (Records → Lookup Tables)
+//    - Build indexes: stopTimesIndex, stopsIndex, shapesIndex, etc.
+//    - Group related data for fast lookup
+//    - Output: Queryable data structures
+//
+// 4. ENRICH (Add Computed Fields)
+//    - enrichTripsWithDirectionId: Generate missing direction_id
+//    - Shape simplification: Reduce coordinate density
+//    - Route pattern analysis: Build canonical trip patterns
+//    - Output: Enhanced domain model
+//
+// 5. CACHE (Persist Processed Data)
+//    - cacheShapes: Store simplified shapes in localStorage
+//    - Compression: Delta encoding + base36
+//    - TTL: 30 days
+//    - Output: Faster subsequent loads
+//
+// 6. RENDER (Display in UI)
+//    - Map visualization (Leaflet)
+//    - Timetable generation
+//    - escapeHtml: Sanitize for safe HTML rendering
+//    - Output: Interactive web interface
+//
+// FUNCTION PURITY:
+// ────────────────
+// @pure      = No side effects, same input → same output (can be memoized)
+// @impure    = Has side effects (DOM updates, localStorage, mutations)
+// @cached    = Results are memoized internally
+// @presentation = UI-specific logic (not domain logic)
+//
+// MODULARITY:
+// ───────────
+// Functions are organized by concern:
+// - 3.1: Data Normalization (CSV/GTFS cleaning)
+// - 3.2: Time/Date (GTFS temporal logic)
+// - 3.3: Geometry/Geography (WGS84 calculations)
+// - 3.4: Cache/Serialization (localStorage persistence)
+// - 3.5: Data Quality (Heuristics for feed quality)
+// - 3.6: Direction Enrichment (direction_id generation)
+//
+// ═══════════════════════════════════════════════════════════════
+
 // === DOM HELPERS ===
 const $ = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -953,6 +1016,25 @@ function debounce(func, wait) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 3.1. DATA NORMALIZATION MODULE
+// ═══════════════════════════════════════════════════════════════
+// Pipeline: CSV/GTFS → normalized keys/values → domain model
+//
+// Questions addressed:
+// - normalizeKey is deterministic and globally cacheable (keyCache)
+// - normalizeRecord handles CSV-level normalization (quotes, whitespace)
+// - escapeHtml is UI-layer sanitization (separate concern)
+// - KEY_ALIAS provides GTFS field name standardization
+// - Future: Could support per-feed alias injection via config
+// ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Escape HTML special characters for safe rendering
+     * @pure UI sanitization layer - separate from data normalization
+     * @param {string} s - String to escape
+     * @returns {string} HTML-safe string
+     */
     function escapeHtml(s) {
       if (s === null || s === undefined) return '';
       return String(s).replace(/[&<>"']/g, function(m) { return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[m]; });
@@ -961,6 +1043,13 @@ function debounce(func, wait) {
     // Memoization cache for normalizeKey (called millions of times)
     const keyCache = new Map();
 
+    /**
+     * Normalize a CSV header key to standard GTFS field name
+     * @pure Deterministic - same input always produces same output
+     * @cached Results are memoized in keyCache for performance
+     * @param {string} k - Raw CSV header key
+     * @returns {string} Normalized GTFS field name
+     */
     function normalizeKey(k) {
       if (k === null || k === undefined) return k;
       
@@ -974,6 +1063,13 @@ function debounce(func, wait) {
       return normalized;
     }
 
+    /**
+     * Normalize a complete CSV record to standard GTFS format
+     * Handles: BOM removal, whitespace trimming, quote stripping
+     * Pipeline stage: Raw CSV → Normalized GTFS record
+     * @param {Object} rec - Raw CSV record with original keys
+     * @returns {Object} Normalized record with GTFS-standard keys and cleaned values
+     */
     function normalizeRecord(rec) {
       const out = {};
       Object.keys(rec).forEach(origKey => {
@@ -986,6 +1082,26 @@ function debounce(func, wait) {
       return out;
     }
 
+// ═══════════════════════════════════════════════════════════════
+// 3.2. TIME AND DATE MODULE (GTFS-specific)
+// ═══════════════════════════════════════════════════════════════
+// Internal representation: Time is ALWAYS stored as minutes since midnight
+// This allows for GTFS times >24h (e.g., "25:30:00" for late-night service)
+//
+// Questions addressed:
+// - Internal time format: minutes since midnight (0-based, can exceed 1440)
+// - HH:MM:SS >24h is domain logic (GTFS spec allows it for service after midnight)
+// - formatTime handles presentation layer (wraps at 24h for display)
+// - GTFS dates are always in local timezone (YYYYMMDD format, no TZ info)
+// - Date parsing/formatting is bidirectional (GTFS ↔ Date object)
+// ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Convert GTFS time string to minutes since midnight
+     * @pure Domain layer conversion
+     * @param {string} timeStr - GTFS time format "HH:MM:SS" (can be >24h)
+     * @returns {number} Minutes since midnight (can exceed 1440 for late-night service)
+     */
     function timeToMinutes(timeStr) {
       if (!timeStr) return 0;
       const parts = timeStr.split(':');
@@ -994,6 +1110,12 @@ function debounce(func, wait) {
       return h * 60 + m;
     }
 
+    /**
+     * Convert minutes since midnight back to GTFS time format
+     * @pure Inverse of timeToMinutes
+     * @param {number} minutes - Minutes since midnight
+     * @returns {string} GTFS time format "HH:MM:SS" (preserves >24h values)
+     */
     function minutesToTime(minutes) {
       if (!minutes && minutes !== 0) return '';
       const h = Math.floor(minutes / 60);
@@ -1002,6 +1124,13 @@ function debounce(func, wait) {
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
+    /**
+     * Format time for display (presentation layer)
+     * Wraps times ≥24h to 0-23h range for user-friendly display
+     * @presentation Modifies times for UI display only
+     * @param {string} time - GTFS time string
+     * @returns {string} Display time in HH:MM format (wrapped to 24h)
+     */
     function formatTime(time) {
       if (!time) return '<';
       const str = String(time);
@@ -1012,15 +1141,50 @@ function debounce(func, wait) {
       return `${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}`;
     }
 
+    /**
+     * Parse GTFS date string (YYYYMMDD) to Date object
+     * @pure Assumes local timezone (GTFS spec does not include timezone info)
+     * @param {string} dateStr - GTFS date format "YYYYMMDD"
+     * @returns {Date|null} JavaScript Date object in local timezone, or null if invalid
+     */
     function parseGTFSDate(dateStr) {
       if(!dateStr || dateStr.length!==8) return null;
       return new Date(parseInt(dateStr.substring(0,4)), parseInt(dateStr.substring(4,6)) - 1, parseInt(dateStr.substring(6,8)));
     }
 
+    /**
+     * Format Date object to GTFS date string
+     * @pure Inverse of parseGTFSDate
+     * @param {Date} date - JavaScript Date object
+     * @returns {string} GTFS date format "YYYYMMDD"
+     */
     function formatDateToGTFS(date) {
       return date.getFullYear() + String(date.getMonth()+1).padStart(2,'0') + String(date.getDate()).padStart(2,'0');
     }
 
+// ═══════════════════════════════════════════════════════════════
+// 3.3. GEOMETRY AND GEOGRAPHY MODULE
+// ═══════════════════════════════════════════════════════════════
+// Coordinate system: WGS84 (latitude/longitude in decimal degrees)
+// All geographic calculations assume WGS84 datum (implicit assumption)
+//
+// Questions addressed:
+// - Coordinate system: WGS84 everywhere (GTFS standard)
+// - Distance tolerance: 100m hardcoded for stop-shape matching (heuristic)
+// - Shape simplification: Part of parsing/caching, not rendering
+// - Simplification tolerance: 0.0001° (~11m) is configurable via parameter
+// - Coverage calculation: Heuristic for quality assessment, not strict validation
+// - These functions are GTFS-agnostic and could be reused for other geo apps
+// ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Simplify polyline using Douglas-Peucker algorithm
+     * Used during shape parsing/caching to reduce data size
+     * @pure Algorithm operates on coordinate arrays
+     * @param {Array<[number, number]>} points - Array of [lat, lon] coordinates
+     * @param {number} tolerance - Simplification tolerance in degrees (default: 0.0001 ≈ 11m)
+     * @returns {Array<[number, number]>} Simplified coordinate array
+     */
     function simplifyDouglasPeucker(points, tolerance = 0.0001) {
       if (!points || points.length <= 2) return points;
       
@@ -1078,6 +1242,15 @@ function debounce(func, wait) {
       return simplifyRecursive(points, tolerance, 0, points.length - 1);
     }
 
+/**
+ * Calculate great-circle distance between two WGS84 coordinates using Haversine formula
+ * @pure Geographic calculation - no side effects
+ * @param {number} lat1 - Start latitude in decimal degrees
+ * @param {number} lon1 - Start longitude in decimal degrees
+ * @param {number} lat2 - End latitude in decimal degrees
+ * @param {number} lon2 - End longitude in decimal degrees
+ * @returns {number} Distance in meters
+ */
 function haversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000; // Earth radius in meters
   const φ1 = lat1 * Math.PI / 180;
@@ -1094,8 +1267,15 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+/**
+ * Calculate how well a shape covers a sequence of stops
+ * Heuristic for data quality assessment - not a strict validation rule
+ * @param {Array<Object>} stops - Array of stop objects with lat/lon
+ * @param {Array<[number, number]>} shapePoints - Array of [lat, lon] shape coordinates
+ * @returns {Object} Coverage analysis with percentage and nearby stops
+ */
 function calculateShapeCoverage(stops, shapePoints) {
-  const MAX_DISTANCE_METERS = 100; // 100m tolerance
+  const MAX_DISTANCE_METERS = 100; // 100m tolerance (configurable heuristic)
   const nearbyStops = [];
   
   stops.forEach((stop, index) => {
@@ -1134,6 +1314,13 @@ function calculateShapeCoverage(stops, shapePoints) {
   };
 }
 
+/**
+ * Fill gaps in shape data by connecting stops with shape segments or straight lines
+ * @param {Array<Object>} stops - Array of stop objects
+ * @param {Array<[number, number]>} shapePoints - Shape coordinate array  
+ * @param {Array<Object>} nearbyStops - Stops matched to shape points
+ * @returns {Array<[number, number]>} Complete route geometry
+ */
 function fillShapeGaps(stops, shapePoints, nearbyStops) {
   const result = [];
   
@@ -1172,6 +1359,28 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
   return result;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 3.4. CACHE AND SERIALIZATION MODULE
+// ═══════════════════════════════════════════════════════════════
+// Cache backend: localStorage (browser-based persistent storage)
+// Cache strategy: Content-addressable via hash, with TTL and versioning
+//
+// Questions addressed:
+// - Cache backend: localStorage (suitable for client-side caching)
+// - Hash collision resistance: Simple hash (good enough for cache keys, not cryptographic)
+// - TTL: 30 days (arbitrary but reasonable for transit data staleness)
+// - Versioning: Explicit version field (v2 = compressed format)
+// - Cache scope: Currently shapes only, but design is generic (could extend to routeProfiles)
+// - Compression: Delta encoding + base36 (stable, lossy to 6 decimal places ≈ 0.11m precision)
+// - Cleanup: Best-effort on QuotaExceededError (not deterministic)
+// ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Compress coordinate array using delta encoding and base36
+     * Lossy compression: preserves 6 decimal places (≈0.11m precision)
+     * @param {Array<[number, number]>} coords - Array of [lat, lon] coordinates
+     * @returns {string} Compressed string representation
+     */
     function compressCoordinates(coords) {
       if (!coords || coords.length === 0) return '';
       
@@ -1322,6 +1531,25 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       return simplified;
     }
 
+// ═══════════════════════════════════════════════════════════════
+// 3.5. DATA QUALITY HEURISTICS MODULE
+// ═══════════════════════════════════════════════════════════════
+// Quality scoring and validation for GTFS feed data
+//
+// Questions addressed:
+// - These heuristics are GTFS-specific (rely on GTFS naming conventions)
+// - "Garbage label" is domain logic (determines if route name is usable)
+// - short_name vs long_name: implicit scoring via looksLikeGarbageLabel
+// - Heuristics are currently hardcoded but could be made configurable
+// - These rules encode domain knowledge about transit data quality
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Find the most common string in an array (consensus-based data cleaning)
+ * @pure Frequency counting algorithm
+ * @param {Array<string>} arr - Array of strings to analyze
+ * @returns {string|null} Most frequent non-empty string, or null if none found
+ */
 function mostCommonString(arr) {
   const counts = Object.create(null);
   for (const s of arr) {
@@ -1335,6 +1563,14 @@ function mostCommonString(arr) {
   return best;
 }
 
+/**
+ * Heuristic to detect uninformative route labels
+ * Rejects: empty, too short, numeric-only (unless differs from shortName)
+ * Domain knowledge: Many feeds use numeric codes as long_name, which is not useful
+ * @param {string} s - Label to check
+ * @param {string} shortName - Route short_name for comparison
+ * @returns {boolean} True if label appears to be garbage/uninformative
+ */
 function looksLikeGarbageLabel(s, shortName) {
   if (!s) return true;
   const t = String(s).trim();
@@ -1347,11 +1583,26 @@ function looksLikeGarbageLabel(s, shortName) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// DIRECTION_ID GENERATION HELPERS
+// 3.6. DIRECTION_ID ENRICHMENT MODULE
+// ═══════════════════════════════════════════════════════════════
+// Pipeline for generating direction_id when missing from GTFS feed
+// Decision pipeline: Group by route → Find patterns → Score sequences → Assign directions
+//
+// Questions addressed:
+// - direction_id is treated as binary classification (0/1) but handles edge cases
+// - Routes with >2 directions: Uses heuristics (longest trip as reference pattern)
+// - Circular routes: Detected via first==last stop, handled specially
+// - Subsequence matching: Ignores branch-specific stops, focuses on common trunk
+// - Bearing as tiebreaker: Used when sequence scores are identical
+// - Incomplete stopsIndex: Gracefully degrades (trips without stops get direction_id=0)
+// - Determinism: Stable within a feed, but may vary between feeds with different data
+// - This is a decision pipeline, not a single function (multi-stage enrichment)
 // ═══════════════════════════════════════════════════════════════
 
 /**
  * Calculate bearing (azimuth) between two geographic points
+ * Reused from geometry module for direction detection
+ * @pure Geographic calculation
  * @param {number} lat1 - Start latitude
  * @param {number} lon1 - Start longitude
  * @param {number} lat2 - End latitude
@@ -1371,7 +1622,9 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
 }
 
 /**
- * Calculate how many stops from tripSeq appear in correct order in pattern (subsequence matching)
+ * Score how well a trip sequence matches a reference pattern
+ * Uses subsequence matching: ignores branch-specific stops, matches trunk stops
+ * @pure Longest common subsequence scoring
  * @param {Array<string>} tripSeq - Trip stop sequence to score
  * @param {Array<string>} pattern - Reference pattern to match against
  * @returns {number} Score from 0 to 1 representing the ratio of matched stops
@@ -1415,6 +1668,7 @@ function getTripStopSequence(tripId, stopTimesIndex) {
 
 /**
  * Check if a route is circular (starts and ends at same stop)
+ * @pure Simple check on stop sequence
  * @param {Array<string>} stopSequence - Array of stop_ids
  * @returns {boolean} True if circular
  */
@@ -1423,12 +1677,26 @@ function isCircularRoute(stopSequence) {
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
 
-
-
-
-
 /**
- * Main function to enrich trips with direction_id
+ * Enrich trips with direction_id when missing from GTFS feed
+ * 
+ * Decision Pipeline:
+ * 1. Group trips by route_id
+ * 2. Build stop sequences for each trip
+ * 3. Check for circular routes (all get direction_id=0)
+ * 4. Find longest trip as reference pattern
+ * 5. Create forward and reverse patterns
+ * 6. Score each trip against both patterns (subsequence matching)
+ * 7. Use bearing as tiebreaker when scores are close
+ * 
+ * Edge cases handled:
+ * - Missing stop sequences: Assign direction_id=0
+ * - Circular routes: All trips get direction_id=0 (no meaningful direction)
+ * - Routes with branches: Subsequence matching ignores branch-specific stops
+ * - Close scores: Use geographic bearing as tiebreaker
+ * - Missing geo data: Fallback to sequence score only
+ * 
+ * @impure Mutates trip objects to add direction_id field
  * @param {Array<Object>} trips - Array of trip objects
  * @param {Object} stopTimesIndex - Index of stop times by trip_id
  * @param {Object} stopsIndex - Index of stops by stop_id
