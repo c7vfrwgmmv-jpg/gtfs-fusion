@@ -2590,6 +2590,33 @@ function calculateStopEdgeFrequency(trips, tripStopMaps) {
 }
 
 // Helper: Find low-frequency candidates with tier classification
+function computeCoreBoundaryFrequency(edgeFrequency, coreStops) {
+  // For each non-core stop, compute max frequency of edges connecting to any core stop
+  // Returns Map: stop_id -> boundaryFreq
+  const boundaryFreq = new Map();
+  const coreSet = new Set(coreStops);
+  
+  Object.entries(edgeFrequency).forEach(([edge, freq]) => {
+    const [from, to] = edge.split('->');
+    
+    // Check if edge crosses core boundary (one end is core, other is not)
+    const fromIsCore = coreSet.has(from);
+    const toIsCore = coreSet.has(to);
+    
+    if (fromIsCore && !toIsCore) {
+      // core -> non-core
+      const current = boundaryFreq.get(to) || 0;
+      boundaryFreq.set(to, Math.max(current, freq));
+    } else if (!fromIsCore && toIsCore) {
+      // non-core -> core
+      const current = boundaryFreq.get(from) || 0;
+      boundaryFreq.set(from, Math.max(current, freq));
+    }
+  });
+  
+  return boundaryFreq;
+}
+
 function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
   const tier1 = new Set();  // <6%
   const tier2 = new Set();  // 6-10%
@@ -3059,9 +3086,28 @@ function buildRouteProfileForCurrentSelection() {
   // 7.4: Find low-frequency candidates with tier classification (threshold 10%)
   const candidateTiers = findLowFrequencyCandidates(edgeFrequency, Array.from(allStopIds), 0.10);
   
+  // 7.4b: Core-boundary frequency gating
+  const boundaryFreq = computeCoreBoundaryFrequency(edgeFrequency, coreStops);
+  const tier1Boundary = new Set();
+  const tier2Boundary = new Set();
+  
+  boundaryFreq.forEach((freq, stopId) => {
+    if (freq < 0.06) {
+      tier1Boundary.add(stopId);
+    } else if (freq < 0.10) {
+      tier2Boundary.add(stopId);
+    }
+  });
+  
+  // Merge boundary candidates with existing candidates
+  const mergedTiers = {
+    tier1: new Set([...candidateTiers.tier1, ...tier1Boundary]),
+    tier2: new Set([...candidateTiers.tier2, ...tier2Boundary])
+  };
+  
   // 7.5: Classify stops recursively with tier-specific fallbacks
   const nodeTypes = classifyTailStopsRecursive(
-    candidateTiers,
+    mergedTiers,
     allTrips,
     tripStopMaps,
     stopTimesIndex,
@@ -5760,6 +5806,20 @@ const processedTrips = trips.map(trip => {
   const stops = tripStopMaps[trip.trip_id] || [];
   let pStops = [];
   
+  // Find first and last core indices for this trip (if profile exists)
+  let firstCoreIdx = -1;
+  let lastCoreIdx = -1;
+  
+  if (profile && profile.coreStops) {
+    const coreStopsSet = new Set(profile.coreStops);
+    for (let i = 0; i < stops.length; i++) {
+      if (coreStopsSet.has(stops[i].stop_id)) {
+        if (firstCoreIdx === -1) firstCoreIdx = i;
+        lastCoreIdx = i;
+      }
+    }
+  }
+  
   for (let i = 0; i < stops.length; i++) {
     const s = stops[i];
     const sId = s.stop_id;
@@ -5851,8 +5911,22 @@ const processedTrips = trips.map(trip => {
       pStops.push({ ...s, isTech: isStopTech, isOnDemand: isOnDemand });
     }
   }
+  
+  // Determine if trip has passenger stops INSIDE core (between first and last core)
+  let hasPassengerInsideCore = false;
+  if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
+    // Check for passenger stops between first and last core
+    for (let i = firstCoreIdx + 1; i < lastCoreIdx; i++) {
+      const pStop = pStops.find(ps => ps.stop_id === stops[i].stop_id);
+      if (pStop && !pStop.isTech) {
+        hasPassengerInsideCore = true;
+        break;
+      }
+    }
+  }
+  
   const hasPassenger = pStops.some(s => !s.isTech);
-  return { ...trip, pStops, hasPassenger };
+  return { ...trip, pStops, hasPassenger, hasPassengerInsideCore, firstCoreIdx, lastCoreIdx };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
 
 if (processedTrips.length === 0) { 
@@ -5890,6 +5964,8 @@ const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList
 
 // === STEP 6: Compute visible row indices (FILTER rows, never reorder) ===
 const visibleRowIndices = [];
+const visiblePassengerRowIndices = []; // Only passenger rows (excluding tail)
+
 masterList.forEach((mStop, mIdx) => {
   // Rule 1: Hide tail rows when showAllTrips is OFF
   if (!state.showAllTrips && mStop.nodeType === 'tail') {
@@ -5913,43 +5989,111 @@ masterList.forEach((mStop, mIdx) => {
   
   // Row is visible
   visibleRowIndices.push(mIdx);
+  
+  // Track passenger rows separately for pairwise ordering
+  if (mStop.nodeType !== 'tail') {
+    visiblePassengerRowIndices.push(mIdx);
+  }
 });
 
 // === STEP 7: Apply pairwise column ordering (reorder TRIPS, not rows) ===
+// Separate trips into service (with passenger inside core) and depot (without)
+const serviceTrips = [];
+const depotTrips = [];
+
+sortedTrips.forEach(trip => {
+  if (trip.hasPassengerInsideCore) {
+    serviceTrips.push(trip);
+  } else {
+    depotTrips.push(trip);
+  }
+});
+
 // Build cache key for column order
 const key = getCanonicalKeyForCurrentSelection() || 'fallback';
 const dir = state.selectedDirection || '0';
 const columnOrderCacheKey = `${key}::${dir}::${state.selectedDate}::${state.showAllTrips}`;
 
-// Check cache
-let orderedTrips = sortedTrips;
-if (usingCanonical && state.columnOrderCache[columnOrderCacheKey]) {
-  // Use cached order
-  const cachedTripIds = state.columnOrderCache[columnOrderCacheKey];
-  const tripMap = new Map(sortedTrips.map(t => [t.trip_id, t]));
-  orderedTrips = cachedTripIds.map(tid => tripMap.get(tid)).filter(Boolean);
+// Order service trips using pairwise ranking on passenger rows only
+let orderedServiceTrips = serviceTrips;
+if (usingCanonical && serviceTrips.length > 0) {
+  const serviceTripMappings = serviceTrips.map(trip => {
+    const originalIdx = sortedTrips.findIndex(t => t.trip_id === trip.trip_id);
+    return tripMappings[originalIdx];
+  });
   
-  // If cache doesn't match current trips, recompute
-  if (orderedTrips.length !== sortedTrips.length) {
-    orderedTrips = computePairwiseColumnOrder(
-      sortedTrips, 
-      newTripStopMaps, 
-      visibleRowIndices, 
-      masterList, 
-      tripMappings
+  // Check cache
+  if (state.columnOrderCache[columnOrderCacheKey]) {
+    const cachedTripIds = state.columnOrderCache[columnOrderCacheKey];
+    const tripMap = new Map(serviceTrips.map(t => [t.trip_id, t]));
+    orderedServiceTrips = cachedTripIds
+      .map(tid => tripMap.get(tid))
+      .filter(Boolean);
+    
+    // If cache doesn't match, recompute
+    if (orderedServiceTrips.length !== serviceTrips.length) {
+      orderedServiceTrips = computePairwiseColumnOrder(
+        serviceTrips,
+        newTripStopMaps,
+        visiblePassengerRowIndices, // Use only passenger rows for ranking
+        masterList,
+        serviceTripMappings
+      );
+      state.columnOrderCache[columnOrderCacheKey] = orderedServiceTrips.map(t => t.trip_id);
+    }
+  } else {
+    // Compute and cache
+    orderedServiceTrips = computePairwiseColumnOrder(
+      serviceTrips,
+      newTripStopMaps,
+      visiblePassengerRowIndices, // Use only passenger rows for ranking
+      masterList,
+      serviceTripMappings
     );
-    state.columnOrderCache[columnOrderCacheKey] = orderedTrips.map(t => t.trip_id);
+    state.columnOrderCache[columnOrderCacheKey] = orderedServiceTrips.map(t => t.trip_id);
   }
-} else if (usingCanonical) {
-  // Compute and cache
-  orderedTrips = computePairwiseColumnOrder(
-    sortedTrips, 
-    newTripStopMaps, 
-    visibleRowIndices, 
-    masterList, 
-    tripMappings
-  );
-  state.columnOrderCache[columnOrderCacheKey] = orderedTrips.map(t => t.trip_id);
+}
+
+// Order depot trips by firstCoreTime
+const orderedDepotTrips = depotTrips.slice().sort((a, b) => {
+  // Get firstCoreTime for each trip
+  const getFirstCoreTime = (trip) => {
+    if (!profile || !profile.coreStops) return null;
+    const coreStopsSet = new Set(profile.coreStops);
+    const stops = newTripStopMaps[trip.trip_id] || [];
+    
+    for (let i = 0; i < stops.length; i++) {
+      if (coreStopsSet.has(stops[i].stop_id)) {
+        return stops[i].departure_time || stops[i].arrival_time;
+      }
+    }
+    return null;
+  };
+  
+  const timeA = getFirstCoreTime(a);
+  const timeB = getFirstCoreTime(b);
+  
+  // Both have firstCoreTime - compare
+  if (timeA && timeB) {
+    const diff = timeToMinutes(timeA) - timeToMinutes(timeB);
+    if (diff !== 0) return diff;
+  } else if (timeA) {
+    return -1; // a has time, b doesn't - a comes first
+  } else if (timeB) {
+    return 1; // b has time, a doesn't - b comes first
+  }
+  
+  // Tie-breaker: trip_id
+  return a.trip_id.localeCompare(b.trip_id);
+});
+
+// Combine: service trips first (pairwise ordered), then depot trips (by firstCoreTime)
+let orderedTrips;
+if (state.showAllTrips) {
+  orderedTrips = [...orderedServiceTrips, ...orderedDepotTrips];
+} else {
+  // When showAllTrips is false, only show service trips
+  orderedTrips = orderedServiceTrips;
 }
 
 // Rebuild trip mappings in the new order
