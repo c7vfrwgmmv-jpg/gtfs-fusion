@@ -922,7 +922,17 @@ let state = {
   currentTimetableData: {
     allTrips: [],           // wszystkie trips (włącznie z ukrytymi)
     stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
-  }
+  },
+
+  // Canonical master lists: stable row order per route/group + direction
+  // Structure: canonicalMasterLists[key][direction] = { rows: [...], nodeTypeMap: {...} }
+  // Rows are built from ALL trips (no date filter) and never reordered.
+  // Only visibility is filtered at render time.
+  canonicalMasterLists: {},
+
+  // Column order cache: trips order per (key, dir, date, showAllTrips)
+  // Structure: columnOrderCache[cacheKey] = [trip_id, ...]
+  columnOrderCache: {}
 };
 
 let stopsSearchIndex = null;
@@ -2205,6 +2215,9 @@ state.gtfsData = {
   shapesIndex
 };
 state.selectedRouteGroup = null;
+// Invalidate canonical master lists and column order cache on new GTFS load
+state.canonicalMasterLists = {};
+state.columnOrderCache = {};
         if (routes.length === 1) {
           state.selectedRoute = routes[0];
           const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
@@ -3236,6 +3249,288 @@ if ((masterList[i].stopIds && masterList[i].stopIds.includes(sId)) ||
     return mapping;
   });
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 6B. CANONICAL MASTER LIST (STABLE ROW ORDER)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Get the canonical cache key for the current route/group selection
+ * Returns a key like 'group::123' or 'raw::route_id'
+ */
+function getCanonicalKeyForCurrentSelection() {
+  if (!state.selectedRoute) return null;
+  
+  let key;
+  if (state.selectedRouteGroup) {
+    key = getLogicalRouteKeyFromGroup(state.selectedRouteGroup);
+  } else {
+    key = 'raw::' + (state.selectedRoute.route_id || '');
+  }
+  return key;
+}
+
+/**
+ * Build a canonical master list from ALL trips (no date filter, tail included).
+ * This list is stable per route/group + direction and never changes.
+ * Only visibility is filtered at render time.
+ * 
+ * Algorithm:
+ * 1. Get core stops from profile (ordered sequence of main stations)
+ * 2. Define windows between consecutive core stations
+ * 3. For each window, collect all branch stations that appear between those core stations
+ * 4. Rank branch stations by median normalized position within the window
+ * 5. Stable tie-breaking: name, then stop_id
+ * 6. Build final list: core stations in order, with branch stations inserted between them
+ */
+function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex) {
+  if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
+    return null; // Fallback to old behavior
+  }
+
+  const coreStops = profile.coreStops;
+  const nodeTypes = profile.nodeTypes || {};
+  
+  // Helper to get station display name
+  const getStationDisplayName = (stationId, stopIds) => {
+    if (stopsIndex[stationId]?.stop_name) {
+      return stopsIndex[stationId].stop_name;
+    }
+    const firstStop = stopsIndex[stopIds[0]];
+    return firstStop?.stop_name || stationId;
+  };
+
+  // Step 1: Build core stations list (merged by station)
+  const coreStationGroups = [];
+  const seenStations = new Set();
+  
+  coreStops.forEach(stopId => {
+    const stationId = getStationId(stopId, stopsIndex);
+    if (!seenStations.has(stationId)) {
+      seenStations.add(stationId);
+      coreStationGroups.push({
+        stationId,
+        stopIds: [stopId],
+        isCore: true
+      });
+    } else {
+      // Add to existing core station group
+      const group = coreStationGroups.find(g => g.stationId === stationId);
+      if (group && !group.stopIds.includes(stopId)) {
+        group.stopIds.push(stopId);
+      }
+    }
+  });
+
+  // Step 2: Build windows between consecutive core stations
+  // For each window [coreIdx -> coreIdx+1], collect branch stations
+  const windows = [];
+  for (let i = 0; i < coreStationGroups.length - 1; i++) {
+    windows.push({
+      startCore: coreStationGroups[i],
+      endCore: coreStationGroups[i + 1],
+      branches: new Map() // stationId -> { stopIds: [], positions: [] }
+    });
+  }
+
+  // Step 3: Process all trips to collect branch stations and their positions
+  allTrips.forEach(trip => {
+    const stopTimes = stopTimesIndex[trip.trip_id] || [];
+    const sortedStops = stopTimes
+      .filter(st => st && st.stop_id)
+      .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+
+    // Map stop positions in this trip
+    const stopPositions = new Map();
+    sortedStops.forEach((st, idx) => {
+      stopPositions.set(st.stop_id, idx);
+    });
+
+    // Find positions of core stations in this trip
+    const corePositions = coreStationGroups.map(coreGroup => {
+      for (const stopId of coreGroup.stopIds) {
+        if (stopPositions.has(stopId)) {
+          return { coreGroup, position: stopPositions.get(stopId), stopId };
+        }
+      }
+      return null;
+    }).filter(x => x !== null);
+
+    // For each window, collect branches
+    for (let winIdx = 0; winIdx < windows.length; winIdx++) {
+      const window = windows[winIdx];
+      
+      // Find positions of start and end core in this trip
+      const startPos = corePositions.find(cp => cp.coreGroup === window.startCore);
+      const endPos = corePositions.find(cp => cp.coreGroup === window.endCore);
+      
+      if (!startPos || !endPos || startPos.position >= endPos.position) {
+        continue; // Skip if window not traversed in this trip
+      }
+
+      // Collect all stations between start and end (exclusive)
+      const windowLength = endPos.position - startPos.position;
+      
+      for (let pos = startPos.position + 1; pos < endPos.position; pos++) {
+        const stopTime = sortedStops[pos];
+        const stopId = stopTime.stop_id;
+        const stationId = getStationId(stopId, stopsIndex);
+        
+        // Skip if this is a core station
+        if (seenStations.has(stationId)) continue;
+        
+        // Calculate normalized position within window [0, 1]
+        const normalizedPos = (pos - startPos.position) / windowLength;
+        
+        if (!window.branches.has(stationId)) {
+          window.branches.set(stationId, {
+            stopIds: [stopId],
+            positions: [normalizedPos]
+          });
+        } else {
+          const branch = window.branches.get(stationId);
+          if (!branch.stopIds.includes(stopId)) {
+            branch.stopIds.push(stopId);
+          }
+          branch.positions.push(normalizedPos);
+        }
+      }
+    }
+  });
+
+  // Step 4: Rank branch stations by median position and build final list
+  const finalRows = [];
+  
+  // Add first core station
+  finalRows.push({
+    id: coreStationGroups[0].stopIds[0],
+    name: getStationDisplayName(coreStationGroups[0].stationId, coreStationGroups[0].stopIds),
+    stopIds: coreStationGroups[0].stopIds,
+    nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
+  });
+
+  // For each window, add sorted branches, then the next core station
+  windows.forEach((window, winIdx) => {
+    // Sort branches by median position
+    const branchEntries = Array.from(window.branches.entries()).map(([stationId, data]) => {
+      // Calculate median position
+      const sorted = data.positions.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      const median = sorted.length % 2 === 0
+        ? (sorted[mid - 1] + sorted[mid]) / 2
+        : sorted[mid];
+      
+      const stopName = getStationDisplayName(stationId, data.stopIds);
+      
+      return {
+        stationId,
+        stopIds: data.stopIds,
+        median,
+        name: stopName,
+        primaryStopId: data.stopIds[0]
+      };
+    });
+
+    // Sort by median, then by name, then by stop_id (stable)
+    branchEntries.sort((a, b) => {
+      if (a.median !== b.median) return a.median - b.median;
+      if (a.name !== b.name) return a.name.localeCompare(b.name);
+      return a.primaryStopId.localeCompare(b.primaryStopId);
+    });
+
+    // Add branches to final list
+    branchEntries.forEach(branch => {
+      finalRows.push({
+        id: branch.primaryStopId,
+        name: branch.name,
+        stopIds: branch.stopIds,
+        nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+      });
+    });
+
+    // Add next core station
+    const nextCore = window.endCore;
+    finalRows.push({
+      id: nextCore.stopIds[0],
+      name: getStationDisplayName(nextCore.stationId, nextCore.stopIds),
+      stopIds: nextCore.stopIds,
+      nodeType: nodeTypes[nextCore.stopIds[0]] || 'core'
+    });
+  });
+
+  return finalRows;
+}
+
+/**
+ * Ensure canonical master list exists for current selection.
+ * Returns the canonical master list or null if fallback needed.
+ */
+function ensureCanonicalMasterListForCurrentSelection() {
+  const key = getCanonicalKeyForCurrentSelection();
+  if (!key) return null;
+  
+  const dir = state.selectedDirection || '0';
+  
+  // Check cache
+  if (state.canonicalMasterLists[key] && state.canonicalMasterLists[key][dir]) {
+    return state.canonicalMasterLists[key][dir];
+  }
+
+  // Need to build it
+  const profile = getCurrentRouteProfile();
+  if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
+    return null; // Fallback
+  }
+
+  // Get ALL trips for this route/group + direction (no date filter)
+  const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData;
+  if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
+
+  let routeIds = [];
+  if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
+    routeIds = state.selectedRouteGroup.members.map(r => r.route_id).filter(Boolean);
+  } else if (state.selectedRoute) {
+    routeIds = [state.selectedRoute.route_id];
+  }
+
+  if (!routeIds.length) return null;
+
+  let allTrips = [];
+  routeIds.forEach(rid => {
+    const ts = tripsIndex[rid] || [];
+    allTrips = allTrips.concat(ts);
+  });
+
+  allTrips = allTrips.filter(t => (t.direction_id || '0') === dir);
+  if (!allTrips.length) return null;
+
+  // Build canonical list
+  const rows = buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex);
+  
+  if (!rows) return null;
+
+  // Cache it
+  if (!state.canonicalMasterLists[key]) {
+    state.canonicalMasterLists[key] = {};
+  }
+  state.canonicalMasterLists[key][dir] = rows;
+
+  return rows;
+}
+
+/**
+ * Invalidate canonical cache for current route/group.
+ * Called when route, group, or direction changes.
+ */
+function invalidateCanonicalCacheForCurrentSelection() {
+  const key = getCanonicalKeyForCurrentSelection();
+  if (key && state.canonicalMasterLists[key]) {
+    delete state.canonicalMasterLists[key];
+  }
+  // Also clear column order cache
+  state.columnOrderCache = {};
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 7. TRIP & VARIANT PROCESSING
 // ═══════════════════════════════════════════════════════════════
@@ -3479,6 +3774,137 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   });
   
   return result;
+}
+
+/**
+ * Compute globally chronological column order using pairwise ranking (Copeland-like).
+ * 
+ * For each pair of trips (A, B), count how many visible rows have time[A] < time[B].
+ * Score each trip as (wins - losses). Sort by descending score.
+ * 
+ * Tie-breakers: 
+ * 1. Time at first core row
+ * 2. Time at last core row  
+ * 3. trip_id (deterministic)
+ * 
+ * @param {Array} trips - List of trip objects
+ * @param {Object} tripStopMaps - Map of trip_id -> stopTimes array
+ * @param {Array} visibleRowIndices - Indices of visible rows in masterList
+ * @param {Array} masterList - The canonical master list
+ * @param {Array} tripMappings - Mappings of trips to master list rows
+ * @returns {Array} Reordered trips array
+ */
+function computePairwiseColumnOrder(trips, tripStopMaps, visibleRowIndices, masterList, tripMappings) {
+  if (!trips || trips.length <= 1) return trips;
+  
+  const n = trips.length;
+  
+  // Build comparison matrix: for each pair (i, j), count rows where trip[i] < trip[j]
+  const scores = new Array(n).fill(0);
+  
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const tripA = trips[i];
+      const tripB = trips[j];
+      const mappingA = tripMappings[i];
+      const mappingB = tripMappings[j];
+      
+      let aWins = 0;
+      let bWins = 0;
+      
+      // Compare across visible rows
+      visibleRowIndices.forEach(rowIdx => {
+        const stopA = mappingA[rowIdx];
+        const stopB = mappingB[rowIdx];
+        
+        if (!stopA || !stopB) return; // Skip if either trip doesn't stop here
+        
+        const timeA = stopA.departure_time || stopA.arrival_time;
+        const timeB = stopB.departure_time || stopB.arrival_time;
+        
+        if (!timeA || !timeB) return;
+        
+        const minutesA = timeToMinutes(timeA);
+        const minutesB = timeToMinutes(timeB);
+        
+        if (minutesA < minutesB) {
+          aWins++;
+        } else if (minutesB < minutesA) {
+          bWins++;
+        }
+      });
+      
+      // Update scores based on wins
+      if (aWins > bWins) {
+        scores[i]++;
+        scores[j]--;
+      } else if (bWins > aWins) {
+        scores[j]++;
+        scores[i]--;
+      }
+      // If equal, no change (tie)
+    }
+  }
+  
+  // Build sorted indices with tie-breakers
+  const profile = getCurrentRouteProfile();
+  const coreStops = profile?.coreStops || [];
+  
+  // Helper to find time at first/last core stop
+  const getTimeAtCoreStop = (tripMapping, coreIndex) => {
+    if (!coreStops || coreStops.length === 0 || !masterList) return null;
+    
+    // Find the core stop in masterList
+    for (let rowIdx = 0; rowIdx < masterList.length; rowIdx++) {
+      const row = masterList[rowIdx];
+      if (row.stopIds && row.stopIds.some(sid => coreStops[coreIndex] === sid)) {
+        const stopTime = tripMapping[rowIdx];
+        if (stopTime) {
+          return stopTime.departure_time || stopTime.arrival_time;
+        }
+      }
+    }
+    return null;
+  };
+  
+  const tripData = trips.map((trip, idx) => ({
+    trip,
+    score: scores[idx],
+    firstCoreTime: getTimeAtCoreStop(tripMappings[idx], 0),
+    lastCoreTime: getTimeAtCoreStop(tripMappings[idx], coreStops.length - 1),
+    trip_id: trip.trip_id
+  }));
+  
+  // Sort by score (descending), then tie-breakers
+  tripData.sort((a, b) => {
+    // Primary: score (descending - higher score = comes first)
+    if (a.score !== b.score) return b.score - a.score;
+    
+    // Tie-breaker 1: first core time (ascending)
+    if (a.firstCoreTime && b.firstCoreTime) {
+      const diff = timeToMinutes(a.firstCoreTime) - timeToMinutes(b.firstCoreTime);
+      if (diff !== 0) return diff;
+    } else if (a.firstCoreTime) {
+      return -1;
+    } else if (b.firstCoreTime) {
+      return 1;
+    }
+    
+    // Tie-breaker 2: last core time (ascending)
+    if (a.lastCoreTime && b.lastCoreTime) {
+      const diff = timeToMinutes(a.lastCoreTime) - timeToMinutes(b.lastCoreTime);
+      if (diff !== 0) return diff;
+    } else if (a.lastCoreTime) {
+      return -1;
+    } else if (b.lastCoreTime) {
+      return 1;
+    }
+    
+    // Tie-breaker 3: trip_id (deterministic)
+    return a.trip_id.localeCompare(b.trip_id);
+  });
+  
+  return tripData.map(td => td.trip);
 }
 
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
@@ -4371,6 +4797,9 @@ function selectRoute(route) {
     state.selectedDirection = [...new Set(routeTrips.map(t => t.direction_id || '0'))][0];
   }
 
+  // Invalidate canonical cache when route changes
+  invalidateCanonicalCacheForCurrentSelection();
+
   resetMap();
   render();
 }
@@ -5141,6 +5570,8 @@ function renderTimetable() {
       };
 
       const tableRoot = $('schedule-table-root'); if (!tableRoot) return;
+
+// === STEP 1: Get ALL trips for current route/group + direction ===
 const trips = getAllTripsForRoute();
 if (trips.length === 0) {
   tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No schedule available.</div>";
@@ -5155,17 +5586,24 @@ if (variantsData && variantsData.variantDetails) {
   if (available.length>0 && !available.includes(state.selectedVariant)) state.selectedVariant = available[0];
 }
 
+// === STEP 2: Try to get canonical master list (stable rows) ===
+let masterList = ensureCanonicalMasterListForCurrentSelection();
+let usingCanonical = !!masterList;
+
+// Build tripStopMaps for current date's trips (all stops, including tail)
 const tripStopMaps = {};
 trips.forEach(trip => {
   const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
   stopTimes.sort((a,b)=>parseInt(a.stop_sequence||'0') - parseInt(b.stop_sequence||'0'));
   tripStopMaps[trip.trip_id] = stopTimes;
 });
+
 const profile = getCurrentRouteProfile();
 const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
 const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : null;
 
-// Obliczanie rzadkości krawędzi dla bieżących trips (potrzebne tylko jeśli brak profilu)
+// === STEP 3: Process trips (detect tail stops, filter if needed) ===
+// This determines which TRIPS to show, not which ROWS
 const thresh = state.threshold/100;
 const totalTrips = trips.length;
 const edgeCount = {};
@@ -5275,7 +5713,13 @@ const processedTrips = trips.map(trip => {
   const hasPassenger = pStops.some(s => !s.isTech);
   return { ...trip, pStops, hasPassenger };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
-      if (processedTrips.length === 0) { tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; return; }
+
+if (processedTrips.length === 0) { 
+  tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; 
+  return; 
+}
+
+// === STEP 4: Build/sort trips and create mappings ===
 let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps, state.gtfsData.stopsIndex);
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
@@ -5289,8 +5733,93 @@ sortedTrips.forEach(t => {
   newTripStopMaps[t.trip_id] = t.pStops;
 });
 
-const masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
+// === STEP 5: Get master list (canonical or fallback) ===
+if (!usingCanonical) {
+  // Fallback: use old buildMasterList
+  masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
+}
+
+if (!masterList || masterList.length === 0) {
+  tableRoot.innerHTML = "<div class='p-4 text-gray-500'>Unable to build schedule.</div>";
+  return;
+}
+
+// Create trip mappings against canonical/fallback master list
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
+
+// === STEP 6: Compute visible row indices (FILTER rows, never reorder) ===
+const visibleRowIndices = [];
+masterList.forEach((mStop, mIdx) => {
+  // Rule 1: Hide tail rows when showAllTrips is OFF
+  if (!state.showAllTrips && mStop.nodeType === 'tail') {
+    return; // Skip this row
+  }
+  
+  // Rule 2: Hide rows with no departures for current date in any trip
+  // (Check if at least one trip in sortedTrips has a stop time at this row)
+  let hasAnyDeparture = false;
+  for (let tripIdx = 0; tripIdx < sortedTrips.length; tripIdx++) {
+    const mapping = tripMappings[tripIdx];
+    if (mapping[mIdx]) {
+      hasAnyDeparture = true;
+      break;
+    }
+  }
+  
+  if (!hasAnyDeparture) {
+    return; // Skip this row - no trips stop here on this date
+  }
+  
+  // Row is visible
+  visibleRowIndices.push(mIdx);
+});
+
+// === STEP 7: Apply pairwise column ordering (reorder TRIPS, not rows) ===
+// Build cache key for column order
+const key = getCanonicalKeyForCurrentSelection() || 'fallback';
+const dir = state.selectedDirection || '0';
+const columnOrderCacheKey = `${key}::${dir}::${state.selectedDate}::${state.showAllTrips}`;
+
+// Check cache
+let orderedTrips = sortedTrips;
+if (usingCanonical && state.columnOrderCache[columnOrderCacheKey]) {
+  // Use cached order
+  const cachedTripIds = state.columnOrderCache[columnOrderCacheKey];
+  const tripMap = new Map(sortedTrips.map(t => [t.trip_id, t]));
+  orderedTrips = cachedTripIds.map(tid => tripMap.get(tid)).filter(Boolean);
+  
+  // If cache doesn't match current trips, recompute
+  if (orderedTrips.length !== sortedTrips.length) {
+    orderedTrips = computePairwiseColumnOrder(
+      sortedTrips, 
+      newTripStopMaps, 
+      visibleRowIndices, 
+      masterList, 
+      tripMappings
+    );
+    state.columnOrderCache[columnOrderCacheKey] = orderedTrips.map(t => t.trip_id);
+  }
+} else if (usingCanonical) {
+  // Compute and cache
+  orderedTrips = computePairwiseColumnOrder(
+    sortedTrips, 
+    newTripStopMaps, 
+    visibleRowIndices, 
+    masterList, 
+    tripMappings
+  );
+  state.columnOrderCache[columnOrderCacheKey] = orderedTrips.map(t => t.trip_id);
+}
+
+// Rebuild trip mappings in the new order
+const orderedTripMappings = orderedTrips.map(trip => {
+  const originalIdx = sortedTrips.findIndex(t => t.trip_id === trip.trip_id);
+  return tripMappings[originalIdx];
+});
+
+// Use orderedTrips and orderedTripMappings for rendering
+sortedTrips = orderedTrips;
+const finalTripMappings = orderedTripMappings;
 
 // === POPULATE CACHED TIMETABLE DATA FOR MODAL ===
 // Store all trips (including those that might be hidden)
@@ -5347,8 +5876,9 @@ state.currentTimetableData.stopDepartures = stopDepartures;
       });
       html += '</tr></thead><tbody>';
 
-      // Main loop: generate each row for each stop in masterList
-      masterList.forEach((mStop, mIdx) => {
+      // Main loop: generate each row for VISIBLE stops only
+      visibleRowIndices.forEach((mIdx) => {
+        const mStop = masterList[mIdx];
         html += '<tr class="hover:bg-gray-50">';
         
         const isOnDemandStop = sortedTrips.some(trip => {
@@ -5364,7 +5894,7 @@ state.currentTimetableData.stopDepartures = stopDepartures;
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
 
         // Inner loop: generate time cells for each trip
-        tripMappings.forEach((mapping, tripIdx) => {
+        finalTripMappings.forEach((mapping, tripIdx) => {
           const stopMatch = mapping[mIdx];
           const trip = sortedTrips[tripIdx];
           
@@ -6200,6 +6730,8 @@ $('direction-select')?.addEventListener('change', async (e) => {
     const newDirection = String(e.target.value);
     if (newDirection === state.selectedDirection) return; // Avoid redundant updates
     state.selectedDirection = newDirection;
+    // Invalidate canonical cache when direction changes
+    invalidateCanonicalCacheForCurrentSelection();
     resetMap();
     render();
   });		
@@ -6208,6 +6740,8 @@ $('direction-select')?.addEventListener('change', async (e) => {
     const newDirection = String(e.target.value);
     if (newDirection === state.selectedDirection) return; // Avoid redundant updates
     state.selectedDirection = newDirection;
+    // Invalidate canonical cache when direction changes
+    invalidateCanonicalCacheForCurrentSelection();
     resetMap();
     render();
   });
