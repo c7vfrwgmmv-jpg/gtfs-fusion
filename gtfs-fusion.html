@@ -938,7 +938,63 @@ let stationNameToIdCache = null;
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
-// See DOCUMENTATION.md for detailed pipeline overview and module organization
+//
+// DATA PROCESSING PIPELINE OVERVIEW:
+// ══════════════════════════════════
+// 
+// The GTFS data flows through several processing stages:
+//
+// 1. PARSE (CSV → Raw Objects)
+//    - ZIP extraction & CSV parsing
+//    - Worker-based parallel parsing for performance
+//    - Produces raw JavaScript objects
+//
+// 2. NORMALIZE (Raw → Standardized)
+//    - normalizeKey: CSV headers → GTFS standard field names
+//    - normalizeRecord: Clean values (trim, remove quotes, handle nulls)
+//    - Output: Clean GTFS-compliant records
+//
+// 3. INDEX (Records → Lookup Tables)
+//    - Build indexes: stopTimesIndex, stopsIndex, shapesIndex, etc.
+//    - Group related data for fast lookup
+//    - Output: Queryable data structures
+//
+// 4. ENRICH (Add Computed Fields)
+//    - enrichTripsWithDirectionId: Generate missing direction_id
+//    - Shape simplification: Reduce coordinate density
+//    - Route pattern analysis: Build canonical trip patterns
+//    - Output: Enhanced domain model
+//
+// 5. CACHE (Persist Processed Data)
+//    - cacheShapes: Store simplified shapes in localStorage
+//    - Compression: Delta encoding + base36
+//    - TTL: 30 days
+//    - Output: Faster subsequent loads
+//
+// 6. RENDER (Display in UI)
+//    - Map visualization (Leaflet)
+//    - Timetable generation
+//    - escapeHtml: Sanitize for safe HTML rendering
+//    - Output: Interactive web interface
+//
+// FUNCTION PURITY:
+// ────────────────
+// @pure      = No side effects, same input → same output (can be memoized)
+// @impure    = Has side effects (DOM updates, localStorage, mutations)
+// @cached    = Results are memoized internally
+// @presentation = UI-specific logic (not domain logic)
+//
+// MODULARITY:
+// ───────────
+// Functions are organized by concern:
+// - 3.1: Data Normalization (CSV/GTFS cleaning)
+// - 3.2: Time/Date (GTFS temporal logic)
+// - 3.3: Geometry/Geography (WGS84 calculations)
+// - 3.4: Cache/Serialization (localStorage persistence)
+// - 3.5: Data Quality (Heuristics for feed quality)
+// - 3.6: Direction Enrichment (direction_id generation)
+//
+// ═══════════════════════════════════════════════════════════════
 
 const $ = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -957,6 +1013,15 @@ function debounce(func, wait) {
 
 // ═══════════════════════════════════════════════════════════════
 // 3.1. DATA NORMALIZATION MODULE
+// ═══════════════════════════════════════════════════════════════
+// Pipeline: CSV/GTFS → normalized keys/values → domain model
+//
+// Questions addressed:
+// - normalizeKey is deterministic and globally cacheable (keyCache)
+// - normalizeRecord handles CSV-level normalization (quotes, whitespace)
+// - escapeHtml is UI-layer sanitization (separate concern)
+// - KEY_ALIAS provides GTFS field name standardization
+// - Future: Could support per-feed alias injection via config
 // ═══════════════════════════════════════════════════════════════
     function escapeHtml(s) {
       if (s === null || s === undefined) return '';
@@ -991,6 +1056,16 @@ function debounce(func, wait) {
 // ═══════════════════════════════════════════════════════════════
 // 3.2. TIME AND DATE MODULE (GTFS-specific)
 // ═══════════════════════════════════════════════════════════════
+// Internal representation: Time is ALWAYS stored as minutes since midnight
+// This allows for GTFS times >24h (e.g., "25:30:00" for late-night service)
+//
+// Questions addressed:
+// - Internal time format: minutes since midnight (0-based, can exceed 1440)
+// - HH:MM:SS >24h is domain logic (GTFS spec allows it for service after midnight)
+// - formatTime handles presentation layer (wraps at 24h for display)
+// - GTFS dates are always in local timezone (YYYYMMDD format, no TZ info)
+// - Date parsing/formatting is bidirectional (GTFS ↔ Date object)
+// ═══════════════════════════════════════════════════════════════
     function timeToMinutes(timeStr) {
       if (!timeStr) return 0;
       const parts = timeStr.split(':');
@@ -1024,6 +1099,17 @@ function debounce(func, wait) {
 
 // ═══════════════════════════════════════════════════════════════
 // 3.3. GEOMETRY AND GEOGRAPHY MODULE
+// ═══════════════════════════════════════════════════════════════
+// Coordinate system: WGS84 (latitude/longitude in decimal degrees)
+// All geographic calculations assume WGS84 datum (implicit assumption)
+//
+// Questions addressed:
+// - Coordinate system: WGS84 everywhere (GTFS standard)
+// - Distance tolerance: 100m hardcoded for stop-shape matching (heuristic)
+// - Shape simplification: Part of parsing/caching, not rendering
+// - Simplification tolerance: 0.0001° (~11m) is configurable via parameter
+// - Coverage calculation: Heuristic for quality assessment, not strict validation
+// - These functions are GTFS-agnostic and could be reused for other geo apps
 // ═══════════════════════════════════════════════════════════════
     function simplifyDouglasPeucker(points, tolerance = 0.0001) {
       if (!points || points.length <= 2) return points;
@@ -1173,6 +1259,18 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
 // ═══════════════════════════════════════════════════════════════
 // 3.4. CACHE AND SERIALIZATION MODULE
 // ═══════════════════════════════════════════════════════════════
+// Cache backend: localStorage (browser-based persistent storage)
+// Cache strategy: Content-addressable via hash, with TTL and versioning
+//
+// Questions addressed:
+// - Cache backend: localStorage (suitable for client-side caching)
+// - Hash collision resistance: Simple hash (good enough for cache keys, not cryptographic)
+// - TTL: 30 days (arbitrary but reasonable for transit data staleness)
+// - Versioning: Explicit version field (v2 = compressed format)
+// - Cache scope: Currently shapes only, but design is generic (could extend to routeProfiles)
+// - Compression: Delta encoding + base36 (stable, lossy to 6 decimal places ≈ 0.11m precision)
+// - Cleanup: Best-effort on QuotaExceededError (not deterministic)
+// ═══════════════════════════════════════════════════════════════
     function compressCoordinates(coords) {
       if (!coords || coords.length === 0) return '';
       
@@ -1320,6 +1418,15 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
 // ═══════════════════════════════════════════════════════════════
 // 3.5. DATA QUALITY HEURISTICS MODULE
 // ═══════════════════════════════════════════════════════════════
+// Quality scoring and validation for GTFS feed data
+//
+// Questions addressed:
+// - These heuristics are GTFS-specific (rely on GTFS naming conventions)
+// - "Garbage label" is domain logic (determines if route name is usable)
+// - short_name vs long_name: implicit scoring via looksLikeGarbageLabel
+// - Heuristics are currently hardcoded but could be made configurable
+// - These rules encode domain knowledge about transit data quality
+// ═══════════════════════════════════════════════════════════════
 function mostCommonString(arr) {
   const counts = Object.create(null);
   for (const s of arr) {
@@ -1345,6 +1452,19 @@ function looksLikeGarbageLabel(s, shortName) {
 
 // ═══════════════════════════════════════════════════════════════
 // 3.6. DIRECTION_ID ENRICHMENT MODULE
+// ═══════════════════════════════════════════════════════════════
+// Pipeline for generating direction_id when missing from GTFS feed
+// Decision pipeline: Group by route → Find patterns → Score sequences → Assign directions
+//
+// Questions addressed:
+// - direction_id is treated as binary classification (0/1) but handles edge cases
+// - Routes with >2 directions: Uses heuristics (longest trip as reference pattern)
+// - Circular routes: Detected via first==last stop, handled specially
+// - Subsequence matching: Ignores branch-specific stops, focuses on common trunk
+// - Bearing as tiebreaker: Used when sequence scores are identical
+// - Incomplete stopsIndex: Gracefully degrades (trips without stops get direction_id=0)
+// - Determinism: Stable within a feed, but may vary between feeds with different data
+// - This is a decision pipeline, not a single function (multi-stage enrichment)
 // ═══════════════════════════════════════════════════════════════
 const TO_RAD = Math.PI / 180;
 const TO_DEG = 180 / Math.PI;
@@ -2275,23 +2395,149 @@ function generateAvailableDates(calendar, calendarDates) {
     }
     return Array.from(services);
     }
-
     function getWeekdayDate() {
       const today = parseGTFSDate(state.selectedDate);
-      if (!today) return findDateForDayOfWeek(WEDNESDAY);
+      if (!today) return findDateForDayOfWeek(3); // Wednesday as fallback
       const currentDayOfWeek = today.getDay();
+      
+      // If today is a weekday (Mon-Fri), use it
       if (currentDayOfWeek >= 1 && currentDayOfWeek <= 5) return state.selectedDate;
-      return findDateForDayOfWeek(WEDNESDAY);
+      
+      // Otherwise find nearest future or past weekday (prefer Wednesday)
+      return findDateForDayOfWeek(3); // Wednesday
     }
-
     function findDateForDayOfWeek(targetDayOfWeek) {
-      const today = parseGTFSDate(state.selectedDate); if (!today) return null;
+      const today = parseGTFSDate(state.selectedDate);
+      if (!today) return null;
       const currentDayOfWeek = today.getDay();
+      
+      // If today matches, use it
       if (currentDayOfWeek === targetDayOfWeek) return state.selectedDate;
-      for (let i=1;i<=7;i++){ const testDate = new Date(today); testDate.setDate(testDate.getDate()+i); if (testDate.getDay()===targetDayOfWeek) {
-        const year=testDate.getFullYear(), month=String(testDate.getMonth()+1).padStart(2,'0'), day=String(testDate.getDate()).padStart(2,'0'); return `${year}${month}${day}`;
-      }}
+      
+      // Try FUTURE dates first (next 7 days)
+      for (let i = 1; i <= 7; i++) {
+        const testDate = new Date(today);
+        testDate.setDate(testDate.getDate() + i);
+        if (testDate.getDay() === targetDayOfWeek) {
+          const year = testDate.getFullYear();
+          const month = String(testDate.getMonth() + 1).padStart(2, '0');
+          const day = String(testDate.getDate()).padStart(2, '0');
+          return `${year}${month}${day}`;
+        }
+      }
+      
+      // Fallback to PAST dates (previous 7 days)
+      for (let i = 1; i <= 7; i++) {
+        const testDate = new Date(today);
+        testDate.setDate(testDate.getDate() - i);
+        if (testDate.getDay() === targetDayOfWeek) {
+          const year = testDate.getFullYear();
+          const month = String(testDate.getMonth() + 1).padStart(2, '0');
+          const day = String(testDate.getDate()).padStart(2, '0');
+          return `${year}${month}${day}`;
+        }
+      }
+      
       return null;
+    }
+    function calculateEaster(year) {
+      const a = year % 19;
+      const b = Math.floor(year / 100);
+      const c = year % 100;
+      const d = Math.floor(b / 4);
+      const e = b % 4;
+      const f = Math.floor((b + 8) / 25);
+      const g = Math.floor((b - f + 1) / 3);
+      const h = (19 * a + b - d - g + 15) % 30;
+      const i = Math.floor(c / 4);
+      const k = c % 4;
+      const l = (32 + 2 * e + 2 * i - h - k) % 7;
+      const m = Math.floor((a + 11 * h + 22 * l) / 451);
+      const month = Math.floor((h + l - 7 * m + 114) / 31);
+      const day = ((h + l - 7 * m + 114) % 31) + 1;
+      return new Date(year, month - 1, day);
+    }
+    function getPolishHolidays(year) {
+      const holidays = [];
+      
+      // Fixed-date holidays
+      holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
+      holidays.push({ date: `${year}0102`, name: 'Dzień po Nowym Roku' });
+      holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
+      holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie Najświętszej Maryi Panny' });
+      holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
+      holidays.push({ date: `${year}1224`, name: 'Wigilia' });
+      holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
+      holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt Bożego Narodzenia' });
+      holidays.push({ date: `${year}1231`, name: 'Sylwester' });
+      
+      const easter = calculateEaster(year);
+      
+      const maundyThursday = new Date(easter);
+      maundyThursday.setDate(easter.getDate() - 3);
+      holidays.push({
+        date: formatDateToGTFS(maundyThursday),
+        name: 'Wielki Czwartek'
+      });
+      
+      const goodFriday = new Date(easter);
+      goodFriday.setDate(easter.getDate() - 2);
+      holidays.push({
+        date: formatDateToGTFS(goodFriday),
+        name: 'Wielki Piątek'
+      });
+      
+      // Easter Sunday
+      holidays.push({
+        date: formatDateToGTFS(easter),
+        name: 'Wielkanoc'
+      });
+      
+      const easterMonday = new Date(easter);
+      easterMonday.setDate(easter.getDate() + 1);
+      holidays.push({
+        date: formatDateToGTFS(easterMonday),
+        name: 'Poniedziałek Wielkanocny'
+      });
+      
+      const corpusChristi = new Date(easter);
+      corpusChristi.setDate(easter.getDate() + 60);
+      holidays.push({
+        date: formatDateToGTFS(corpusChristi),
+        name: 'Boże Ciało'
+      });
+      
+      return holidays;
+    }
+    function findNearbyHolidays(referenceDateStr) {
+      const refDate = parseGTFSDate(referenceDateStr);
+      if (!refDate) return [];
+      
+      const year = refDate.getFullYear();
+      const holidays = [
+        ...getPolishHolidays(year),
+        ...getPolishHolidays(year + 1)  // Include next year for edge cases
+      ];
+      
+      const nearby = [];
+      holidays.forEach(holiday => {
+        const holidayDate = parseGTFSDate(holiday.date);
+        if (!holidayDate) return;
+        
+        const diffMs = holidayDate - refDate;
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        
+        // Include holidays only in the upcoming week (0 to 7 days in the future)
+        if (diffDays >= 0 && diffDays <= 7) {
+          nearby.push({
+            ...holiday,
+            dateObj: holidayDate,
+            daysFromRef: diffDays
+          });
+        }
+      });
+      
+      return nearby;
     }
 
 function buildStationNameCache(stopsIndex) {
@@ -5821,20 +6067,14 @@ state.currentTimetableData.stopDepartures = stopDepartures;
     }
 
 function openStopTimetable(stopId) {
-  if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return;
+  if (!state.gtfsData || !state.selectedDate) return;
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
-  const useCachedData = state.currentTimetableData && 
-                        state.currentTimetableData.stopDepartures && 
-                        state.currentTimetableData.stopDepartures[stopId];
-
+  // If a route is selected, filter by route and direction
   let allDepartures = [];
   
-  if (useCachedData) {
-    // NEW: Use cached departure data from renderTimetable
-    allDepartures = state.currentTimetableData.stopDepartures[stopId] || [];
-  } else {
+  if (state.selectedRoute && state.selectedDirection !== undefined) {
     const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
     const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
     
@@ -5850,79 +6090,141 @@ function openStopTimetable(stopId) {
             time: departureTime,
             trip: trip,
             service_id: trip.service_id,
-            headsign: trip.trip_headsign || ''
+            headsign: trip.trip_headsign || '',
+            route: state.selectedRoute
           });
         }
       }
+    });
+  } else {
+    // No route/direction filter - show ALL routes
+    state.gtfsData.routes.forEach(route => {
+      const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
+      
+      routeTrips.forEach(trip => {
+        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTime = stopTimes.find(st => st.stop_id === stopId);
+        
+        if (stopTime) {
+          const departureTime = stopTime.departure_time || stopTime.arrival_time;
+          if (departureTime) {
+            allDepartures.push({
+              trip_id: trip.trip_id,
+              time: departureTime,
+              trip: trip,
+              service_id: trip.service_id,
+              headsign: trip.trip_headsign || '',
+              route: route
+            });
+          }
+        }
+      });
     });
   }
 
   let mainDestination = '';
   let mainTerminusStopId = null;
-  const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-  const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
   
-  // Try to get direction name from getAvailableDirections() first
-  try {
-    const directions = getAvailableDirections();
-    const currentDir = directions.find(d => String(d.id) === String(state.selectedDirection));
-    if (currentDir) {
-      mainDestination = currentDir.fullName || currentDir.name || '';
-    }
-  } catch (e) {
-    // Ignore getAvailableDirections errors - fallback logic handles missing direction data
-  }
-  
-  // Fallback: use old headsign counting logic if needed
-  if (!mainDestination) {
-    const headsigns = directionTrips.map(t => t.trip_headsign).filter(h => h);
-    const headsignCounts = {};
-    headsigns.forEach(h => { headsignCounts[h] = (headsignCounts[h] || 0) + 1; });
-    let maxCount = 0;
-    Object.keys(headsignCounts).forEach(h => {
-      if (headsignCounts[h] > maxCount) {
-        maxCount = headsignCounts[h];
-        mainDestination = h;
+  if (state.selectedRoute) {
+    const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
+    const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
+    
+    try {
+      const directions = getAvailableDirections();
+      const currentDir = directions.find(d => String(d.id) === String(state.selectedDirection));
+      if (currentDir) {
+        mainDestination = currentDir.fullName || currentDir.name || '';
       }
-    });
-  }
+    } catch (e) {
+      // Ignore errors
+    }
+    
+    if (!mainDestination) {
+      const headsigns = directionTrips.map(t => t.trip_headsign).filter(h => h);
+      const headsignCounts = {};
+      headsigns.forEach(h => { headsignCounts[h] = (headsignCounts[h] || 0) + 1; });
+      let maxCount = 0;
+      Object.keys(headsignCounts).forEach(h => {
+        if (headsignCounts[h] > maxCount) {
+          maxCount = headsignCounts[h];
+          mainDestination = h;
+        }
+      });
+    }
 
-  if (mainDestination && directionTrips.length > 0) {
-    const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
-    if (trip) {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+    if (mainDestination && directionTrips.length > 0) {
+      const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
+      if (trip) {
+        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        if (stopTimes.length > 0) {
+          const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
+          const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
+          mainTerminusStopId = lastStopTime.stop_id;
+        }
+      }
+    }
+
+    if (!mainDestination && directionTrips.length > 0) {
+      const firstTrip = directionTrips[0];
+      const stopTimes = state.gtfsData.stopTimesIndex[firstTrip.trip_id] || [];
       if (stopTimes.length > 0) {
-        const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
-        const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
+        const lastStopTime = stopTimes[stopTimes.length - 1];
+        const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
+        mainDestination = lastStop?.stop_name || '';
         mainTerminusStopId = lastStopTime.stop_id;
       }
     }
+  } else {
+    // No route selected - use the stop name as destination
+    mainDestination = stop.stop_name || 'Unknown';
   }
 
-  if (!mainDestination && directionTrips.length > 0) {
-    const firstTrip = directionTrips[0];
-    const stopTimes = state.gtfsData.stopTimesIndex[firstTrip.trip_id] || [];
-    if (stopTimes.length > 0) {
-      const lastStopTime = stopTimes[stopTimes.length - 1];
-      const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
-      mainDestination = lastStop?.stop_name || '';
-      mainTerminusStopId = lastStopTime.stop_id;
+  const mondayDate = findDateForDayOfWeek(1); // Monday
+  const saturdayDate = findDateForDayOfWeek(6); // Saturday
+  const sundayDate = findDateForDayOfWeek(0); // Sunday
+  
+  const nearbyHolidays = findNearbyHolidays(state.selectedDate);
+  
+  const holidaysByDayOfWeek = new Map(); // dayOfWeek -> holiday object
+  const weekdayHolidays = []; // Holidays falling on Mon-Fri
+  
+  nearbyHolidays.forEach(holiday => {
+    const holidayDate = parseGTFSDate(holiday.date);
+    if (holidayDate) {
+      const dayOfWeek = holidayDate.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+      holidaysByDayOfWeek.set(dayOfWeek, holiday);
+      
+      // Check if it's a weekday (Mon-Fri)
+      if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+        weekdayHolidays.push(holiday);
+      }
+    }
+  });
+  
+  const weekdayDates = [];
+  const weekdayHolidayDates = new Set(weekdayHolidays.map(h => h.date));
+  
+  if (mondayDate) {
+    const monDate = parseGTFSDate(mondayDate);
+    for (let i = 0; i < 5; i++) { // Mon to Fri
+      const d = new Date(monDate);
+      d.setDate(monDate.getDate() + i);
+      const dateStr = formatDateToGTFS(d);
+      
+      // Exclude weekday holidays from the weekday column
+      if (!weekdayHolidayDates.has(dateStr)) {
+        weekdayDates.push(dateStr);
+      }
     }
   }
-
-  const weekdayDate = getWeekdayDate();
-  const saturdayDate = findDateForDayOfWeek(SATURDAY);
-  const sundayDate = findDateForDayOfWeek(SUNDAY);
-  const weekdayServices = weekdayDate ? getServicesForDate(weekdayDate) : [];
+  
+  const weekdayServicesMap = new Map(); // Map of date -> services
+  weekdayDates.forEach(dateStr => {
+    weekdayServicesMap.set(dateStr, getServicesForDate(dateStr));
+  });
+  
   const saturdayServices = saturdayDate ? getServicesForDate(saturdayDate) : [];
   const sundayServices = sundayDate ? getServicesForDate(sundayDate) : [];
-
-  const weekdayDepartures = allDepartures.filter(d => weekdayServices.includes(d.service_id));
-  const saturdayDepartures = allDepartures.filter(d => saturdayServices.includes(d.service_id));
-  const sundayDepartures = allDepartures.filter(d => sundayServices.includes(d.service_id));
-
-  const alternativeTermini = new Map();
-  let nextLetter = 'a';
 
   const getTripTerminus = (tripId) => {
     const stopTimes = state.gtfsData.stopTimesIndex[tripId] || [];
@@ -5932,17 +6234,24 @@ function openStopTimetable(stopId) {
     return lastStopTime.stop_id;
   };
 
-  const getTimesByHour = (departures) => {
+  const alternativeTermini = new Map();
+  let nextLetter = 'a';
+  const getTimesByHourWithAnnotations = (departures, isWeekdayColumn = false, dateToServicesMap = null) => {
     const hourGroups = {};
+    
+    // For weekday column: track minutes by weekday AND terminus
+    const minuteWeekdayMap = new Map();
+    
     departures.forEach(departure => {
       if (!departure.time) return;
       const [hourStr, minute] = departure.time.split(':');
       let hour = parseInt(hourStr, 10);
       let displayHour = hour % 24;
       
+      // Time window: 04:00 to next day 03:59
       if ((hour >= 4 && hour < 24) || (hour >= 24 && hour < 28)) {
         const terminusStopId = getTripTerminus(departure.trip_id);
-        let annotation = '';
+        let terminusKey = '';
         
         if (terminusStopId && terminusStopId !== mainTerminusStopId) {
           const tripHeadsign = departure.headsign;
@@ -5951,7 +6260,7 @@ function openStopTimetable(stopId) {
               alternativeTermini.set(tripHeadsign, nextLetter);
               nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
             }
-            annotation = alternativeTermini.get(tripHeadsign);
+            terminusKey = alternativeTermini.get(tripHeadsign);
           } else if (!tripHeadsign) {
             const terminusStop = state.gtfsData.stopsIndex[terminusStopId];
             const terminusName = terminusStop?.stop_name || terminusStopId;
@@ -5960,20 +6269,174 @@ function openStopTimetable(stopId) {
                 alternativeTermini.set(terminusName, nextLetter);
                 nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
               }
-              annotation = alternativeTermini.get(terminusName);
+              terminusKey = alternativeTermini.get(terminusName);
             }
           }
         }
         
         if (/^[0-5]\d$/.test(minute)) {
           if (!hourGroups[displayHour]) hourGroups[displayHour] = [];
-          hourGroups[displayHour].push(minute + annotation);
+          
+          // Track weekday presence for Mon-Fri column
+          // Key includes both minute AND terminus to handle different terminus on different days
+          if (isWeekdayColumn && dateToServicesMap) {
+            const mapKey = `${String(displayHour).padStart(2, '0')}:${minute}:${terminusKey}`;
+            if (!minuteWeekdayMap.has(mapKey)) {
+              minuteWeekdayMap.set(mapKey, new Set());
+            }
+            
+            const serviceId = departure.service_id;
+            weekdayDates.forEach((dateStr, dayIdx) => {
+              const servicesForDay = dateToServicesMap.get(dateStr) || [];
+              if (servicesForDay.includes(serviceId)) {
+                minuteWeekdayMap.get(mapKey).add(dayIdx);
+              }
+            });
+          }
+          
+          // Store minute with terminus key for later processing
+          hourGroups[displayHour].push({ minute, terminusKey });
         }
       }
     });
 
+    // Add weekday annotations (superscript numbers) for Mon-Fri column
+    const weekdayAnnotations = new Map(); // Set of day indices -> superscript symbol
+    let nextSuperscript = 1;
+    
+    if (isWeekdayColumn) {
+      const hourPatterns = new Map(); // hour -> Map of minuteKey -> weekday pattern
+      
+      Object.keys(hourGroups).forEach(hour => {
+        hourPatterns.set(hour, new Map());
+        
+        hourGroups[hour].forEach(entry => {
+          const { minute, terminusKey } = entry;
+          const mapKey = `${String(hour).padStart(2, '0')}:${minute}:${terminusKey}`;
+          const weekdaysSet = minuteWeekdayMap.get(mapKey);
+          
+          if (weekdaysSet && weekdaysSet.size > 0) {
+            const pattern = Array.from(weekdaysSet).sort().join(',');
+            hourPatterns.get(hour).set(mapKey, {
+              pattern,
+              dayCount: weekdaysSet.size,
+              minute,
+              terminusKey
+            });
+          }
+        });
+      });
+      
+      // Second pass: determine which patterns need annotation
+      const patternsToAnnotate = new Set();
+      
+      Object.keys(hourGroups).forEach(hour => {
+        const patterns = hourPatterns.get(hour);
+        const patternCounts = new Map(); // pattern -> count of occurrences
+        const patternDayCounts = new Map(); // pattern -> number of days
+        
+        // Count pattern occurrences
+        patterns.forEach((info, mapKey) => {
+          const count = patternCounts.get(info.pattern) || 0;
+          patternCounts.set(info.pattern, count + 1);
+          patternDayCounts.set(info.pattern, info.dayCount);
+        });
+        
+        const uniquePatterns = Array.from(patternCounts.keys()).filter(p => {
+          const dayCount = patternDayCounts.get(p);
+          return dayCount < 5;
+        });
+        
+        if (uniquePatterns.length === 0) {
+          // All patterns run on all 5 days - no annotation needed
+        } else if (uniquePatterns.length === 1) {
+          // Only one partial pattern - annotate it
+          patternsToAnnotate.add(uniquePatterns[0]);
+        } else {
+          // Multiple patterns - check if they're complementary
+          const allDaysInPatterns = new Set();
+          uniquePatterns.forEach(pattern => {
+            pattern.split(',').forEach(d => allDaysInPatterns.add(d));
+          });
+          
+          if (allDaysInPatterns.size === 5 && uniquePatterns.length === 2) {
+            const pattern1 = uniquePatterns[0];
+            const pattern2 = uniquePatterns[1];
+            const count1 = patternDayCounts.get(pattern1);
+            const count2 = patternDayCounts.get(pattern2);
+            
+            if (count1 < count2) {
+              patternsToAnnotate.add(pattern1);
+            } else if (count2 < count1) {
+              patternsToAnnotate.add(pattern2);
+            } else {
+              // Equal counts - annotate both
+              patternsToAnnotate.add(pattern1);
+              patternsToAnnotate.add(pattern2);
+            }
+          } else {
+            // Non-complementary or more than 2 patterns - annotate all partial patterns
+            uniquePatterns.forEach(p => patternsToAnnotate.add(p));
+          }
+        }
+      });
+      
+      // Third pass: apply annotations
+      Object.keys(hourGroups).forEach(hour => {
+        const newMinutes = [];
+        
+        hourGroups[hour].forEach(entry => {
+          const { minute, terminusKey } = entry;
+          const mapKey = `${String(hour).padStart(2, '0')}:${minute}:${terminusKey}`;
+          
+          const weekdaysSet = minuteWeekdayMap.get(mapKey);
+          let weekdayAnnotation = '';
+          
+          if (weekdaysSet && weekdaysSet.size > 0 && weekdaysSet.size < 5) {
+            const weekdaysKey = Array.from(weekdaysSet).sort().join(',');
+            
+            // Only annotate if this pattern should be annotated
+            if (patternsToAnnotate.has(weekdaysKey)) {
+              if (!weekdayAnnotations.has(weekdaysKey)) {
+                const superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+                
+                // Special case: if pattern is a single day, use the weekday number (1-5)
+                if (weekdaysSet.size === 1) {
+                  const dayIndex = Array.from(weekdaysSet)[0];
+                  // dayIndex: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+                  const weekdayNumber = dayIndex + 1;
+                  weekdayAnnotations.set(weekdaysKey, superscripts[weekdayNumber]);
+                } else {
+                  // Multiple days: use sequential superscript
+                  weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
+                  nextSuperscript++;
+                }
+              }
+              
+              weekdayAnnotation = weekdayAnnotations.get(weekdaysKey);
+            }
+          }
+          
+          // Format: MM + terminus (lowercase) + weekday (superscript)
+          newMinutes.push(minute + terminusKey + weekdayAnnotation);
+        });
+        
+        hourGroups[hour] = newMinutes;
+      });
+    } else {
+      // For non-weekday columns, just format the entries
+      Object.keys(hourGroups).forEach(hour => {
+        hourGroups[hour] = hourGroups[hour].map(entry => entry.minute + entry.terminusKey);
+      });
+    }
+
+    // Sort minutes within each hour
     Object.keys(hourGroups).forEach(hour => {
-      hourGroups[hour].sort((a, b) => parseInt(a) - parseInt(b));
+      hourGroups[hour].sort((a, b) => {
+        const minA = parseInt(a.replace(/[^0-9]/g, ''));
+        const minB = parseInt(b.replace(/[^0-9]/g, ''));
+        return minA - minB;
+      });
     });
 
     const hourOrder = [];
@@ -5982,12 +6445,58 @@ function openStopTimetable(stopId) {
     const filteredOrder = hourOrder.filter(h => hourGroups[h]);
     const result = {};
     filteredOrder.forEach(h => { result[h] = hourGroups[h]; });
-    return result;
+    
+    return { timesByHour: result, weekdayAnnotations };
   };
 
-  const weekdayTimes = getTimesByHour(weekdayDepartures);
-  const saturdayTimes = getTimesByHour(saturdayDepartures);
-  const sundayTimes = getTimesByHour(sundayDepartures);
+  const weekdayDepartures = allDepartures.filter(d => {
+    return Array.from(weekdayServicesMap.values()).some(services => services.includes(d.service_id));
+  });
+  
+  const weekdayResult = getTimesByHourWithAnnotations(weekdayDepartures, true, weekdayServicesMap);
+  const weekdayTimes = weekdayResult.timesByHour;
+  const weekdayAnnotationsMap = weekdayResult.weekdayAnnotations;
+  
+  let saturdayColumn = null;
+  let sundayColumn = null;
+  
+  const saturdayHoliday = holidaysByDayOfWeek.get(6); // Saturday
+  const sundayHoliday = holidaysByDayOfWeek.get(0); // Sunday
+  
+  if (saturdayHoliday) {
+    const holidayServices = getServicesForDate(saturdayHoliday.date);
+    const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
+    const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
+    saturdayColumn = { name: saturdayHoliday.name, times: holidayTimes, isHoliday: true };
+  } else {
+    const saturdayDepartures = allDepartures.filter(d => saturdayServices.includes(d.service_id));
+    const saturdayTimes = getTimesByHourWithAnnotations(saturdayDepartures, false).timesByHour;
+    saturdayColumn = { name: 'Sobota', times: saturdayTimes, isHoliday: false };
+  }
+  
+  if (sundayHoliday) {
+    const holidayServices = getServicesForDate(sundayHoliday.date);
+    const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
+    const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
+    sundayColumn = { name: sundayHoliday.name, times: holidayTimes, isHoliday: true };
+  } else {
+    const sundayDepartures = allDepartures.filter(d => sundayServices.includes(d.service_id));
+    const sundayTimes = getTimesByHourWithAnnotations(sundayDepartures, false).timesByHour;
+    sundayColumn = { name: 'Niedziela', times: sundayTimes, isHoliday: false };
+  }
+  
+  const weekdayHolidayColumns = [];
+  weekdayHolidays.forEach(holiday => {
+    const holidayServices = getServicesForDate(holiday.date);
+    const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
+    const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
+    
+    weekdayHolidayColumns.push({
+      name: holiday.name,
+      times: holidayTimes,
+      date: holiday.date
+    });
+  });
 
   const formatTimesByHour = (timesByHour) => {
     if (Object.keys(timesByHour).length === 0) return '<span style="color: #999;">No service</span>';
@@ -6006,15 +6515,76 @@ function openStopTimetable(stopId) {
   };
 
   let legendHTML = '';
-  if (alternativeTermini.size > 0) {
-    const legendItems = [];
-    alternativeTermini.forEach((letter, terminus) => {
-      legendItems.push(`<span style="font-weight: bold;">${letter}</span> - do ${escapeHtml(terminus)}`);
+  const legendParts = [];
+  
+  // Weekday annotations legend
+  if (weekdayAnnotationsMap.size > 0) {
+    const weekdayNames = ['poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek'];
+    const weekdayItems = [];
+    
+    weekdayAnnotationsMap.forEach((symbol, weekdaysKey) => {
+      const dayIndices = weekdaysKey.split(',').map(s => parseInt(s));
+      const dayNames = dayIndices.map(i => weekdayNames[i]).join(', ');
+      weekdayItems.push(`<span style="font-weight: bold;">${symbol}</span> - ${dayNames}`);
     });
-    legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendItems.join(' • ')}</div>`;
+    
+    if (weekdayItems.length > 0) {
+      legendParts.push(weekdayItems.join(' • '));
+    }
+  }
+  
+  // Terminus annotations legend
+  if (alternativeTermini.size > 0) {
+    const terminusItems = [];
+    alternativeTermini.forEach((letter, terminus) => {
+      terminusItems.push(`<span style="font-weight: bold;">${letter}</span> - do ${escapeHtml(terminus)}`);
+    });
+    legendParts.push(terminusItems.join(' • '));
+  }
+  
+  if (legendParts.length > 0) {
+    legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
   }
 
-  const modalHTML = `<div id="stop-timetable-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;"><div style="background: white; padding: 0; border-radius: 8px; max-width: 1100px; max-height: 95vh; overflow-y: auto;"><div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;"><div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div><div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div><div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination || 'DESTINATION')}</span></div></div></div><table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;"><thead><tr style="background: #e5e7eb;"><th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Weekdays</th><th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Saturdays</th><th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Sundays</th></tr></thead><tbody><tr><td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(weekdayTimes)}</td><td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayTimes)}</td><td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayTimes)}</td></tr></tbody></table>${legendHTML}</div></div>`;
+  let tableHeaderHTML = `<tr style="background: #e5e7eb;">
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Dzień powszedni</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(saturdayColumn.name)}</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(sundayColumn.name)}</th>`;
+  
+  // Add weekday holiday columns
+  weekdayHolidayColumns.forEach(hCol => {
+    tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(hCol.name)}</th>`;
+  });
+  
+  tableHeaderHTML += `</tr>`;
+  
+  let tableBodyHTML = `<tr>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(weekdayTimes)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayColumn.times)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayColumn.times)}</td>`;
+  
+  // Add weekday holiday column data
+  weekdayHolidayColumns.forEach(hCol => {
+    tableBodyHTML += `<td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(hCol.times)}</td>`;
+  });
+  
+  tableBodyHTML += `</tr>`;
+
+  let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
+  
+  if (state.selectedRoute) {
+    headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div>`;
+  }
+  
+  headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div>`;
+  
+  if (mainDestination && state.selectedRoute) {
+    headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination)}</span></div>`;
+  }
+  
+  headerHTML += '</div></div>';
+
+  const modalHTML = `<div id="stop-timetable-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;"><div style="background: white; padding: 0; border-radius: 8px; max-width: 1400px; max-height: 95vh; overflow-y: auto;">${headerHTML}<table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;"><thead>${tableHeaderHTML}</thead><tbody>${tableBodyHTML}</tbody></table>${legendHTML}</div></div>`;
   
   const modalContainer = document.createElement('div');
   modalContainer.innerHTML = modalHTML;

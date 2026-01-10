@@ -614,6 +614,36 @@ Edge cases handled:
 @param {Object} stopTimesIndex - Index of stop times by trip_id
 @param {Object} stopsIndex - Index of stops by stop_id
 
+#### `getWeekdayDate()`
+
+Get a representative weekday date (Monday-Friday)
+Prefers FUTURE dates, falls back to PAST if no future weekday exists
+
+#### `findDateForDayOfWeek()`
+
+Find a date for a specific day of week
+Strategy: prefer FUTURE dates, fallback to PAST
+@param {number} targetDayOfWeek - 0=Sunday, 1=Monday, ..., 6=Saturday
+@returns {string|null} - GTFS date string (YYYYMMDD)
+
+#### `calculateEaster()`
+
+Calculate Easter Sunday for a given year using Meeus/Jones/Butcher algorithm
+@param {number} year - The year to calculate Easter for
+@returns {Date} - Easter Sunday as a Date object
+
+#### `getPolishHolidays()`
+
+Get all Polish holidays for a given year
+@param {number} year - The year to get holidays for
+@returns {Array} - Array of {date: 'YYYYMMDD', name: 'Holiday Name'}
+
+#### `findNearbyHolidays()`
+
+Find holidays in the upcoming week from a reference date
+@param {string} referenceDateStr - GTFS date string (YYYYMMDD)
+@returns {Array} - Array of holiday objects that fall within the next 7 days
+
 
 ### 3.1. Data Normalization
 
@@ -694,6 +724,11 @@ Used to identify the typical route variant that serves a stop.
 
 
 ### Other Utilities
+
+#### `getTimesByHourWithAnnotations()`
+
+Process departures for a column with weekday annotations
+For Mon-Fri column only: track which weekdays each minute appears on
 
 #### `getCurrentView()`
 
