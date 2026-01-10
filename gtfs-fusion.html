@@ -5108,7 +5108,7 @@ function updateDeparturesTable() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 12.5 COLUMN ORDERING ALGORITHM (Multi-criteria: Robust + Borda)
+// 12.5 COLUMN ORDERING - Adjacent Swaps (Lightweight Local Smoothing)
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -5120,77 +5120,6 @@ function getMinutesFromStopTime(st) {
   const timeStr = st.departure_time || st.arrival_time;
   if (!timeStr) return Infinity;
   return timeToMinutes(timeStr);
-}
-
-/**
- * Unwrap times in a column to handle next-day transitions
- * If time decreases by more than 12 hours, add 1440 minutes (24 hours)
- * This is used ONLY for sorting keys, not for display
- * @param {Array<number>} times - array of times in minutes for one column
- * @returns {Array<number>} - unwrapped times
- */
-function unwrapColumnTimes(times) {
-  if (!times || times.length === 0) return times;
-  
-  const unwrapped = [times[0]];
-  let dayOffset = 0;
-  
-  for (let i = 1; i < times.length; i++) {
-    const prev = times[i - 1];
-    const curr = times[i];
-    
-    // Skip if either time is invalid
-    if (!isFinite(prev) || !isFinite(curr)) {
-      unwrapped.push(curr);
-      continue;
-    }
-    
-    // If time decreases by more than 12 hours (720 min), assume next day
-    if (curr < prev && (prev - curr) > 720) {
-      dayOffset += 1440; // Add 24 hours
-    }
-    
-    unwrapped.push(curr + dayOffset);
-  }
-  
-  return unwrapped;
-}
-
-/**
- * Compute weighted median of an array
- * @param {Array<number>} values - values to find median of
- * @param {Array<number>} weights - weights for each value
- * @returns {number} - weighted median
- */
-function weightedMedian(values, weights) {
-  if (!values || values.length === 0) return Infinity;
-  
-  // Filter out invalid values
-  const valid = [];
-  for (let i = 0; i < values.length; i++) {
-    if (isFinite(values[i]) && isFinite(weights[i]) && weights[i] > 0) {
-      valid.push({ value: values[i], weight: weights[i] });
-    }
-  }
-  
-  if (valid.length === 0) return Infinity;
-  
-  // Sort by value
-  valid.sort((a, b) => a.value - b.value);
-  
-  // Find weighted median
-  const totalWeight = valid.reduce((sum, v) => sum + v.weight, 0);
-  const halfWeight = totalWeight / 2;
-  
-  let cumWeight = 0;
-  for (let i = 0; i < valid.length; i++) {
-    cumWeight += valid[i].weight;
-    if (cumWeight >= halfWeight) {
-      return valid[i].value;
-    }
-  }
-  
-  return valid[valid.length - 1].value;
 }
 
 /**
@@ -5221,560 +5150,138 @@ function buildTimesMatrix(tripMappings, passengerRowIndices) {
 }
 
 /**
- * Compute row weights based on coverage and variance
- * Higher weights for rows with good coverage and low variance
- * Normalized so sum of weights = number of rows
+ * Select key rows for adjacent swaps voting
+ * Choose top rows by coverage (number of valid times across columns)
+ * @param {Array<Array<number>>} T - times matrix
+ * @param {number} topN - number of key rows to select (default 6)
+ * @returns {Array<number>} - indices of key rows in T
  */
-function computeRowWeights(T) {
+function selectKeyRows(T, topN = 6) {
   if (!T || T.length === 0) return [];
   
   const nTrips = T.length;
   const nRows = T[0].length;
-  const weights = [];
+  const rowCoverage = [];
   
   for (let r = 0; r < nRows; r++) {
-    const times = [];
     let coverage = 0;
-    
     for (let c = 0; c < nTrips; c++) {
-      const t = T[c][r];
-      if (isFinite(t)) {
-        times.push(t);
-        coverage++;
+      if (isFinite(T[c][r])) coverage++;
+    }
+    rowCoverage.push({ rowIdx: r, coverage });
+  }
+  
+  // Sort by coverage (descending) and take top N
+  rowCoverage.sort((a, b) => b.coverage - a.coverage);
+  return rowCoverage.slice(0, topN).map(r => r.rowIdx);
+}
+
+/**
+ * Apply adjacent swaps to smooth column order
+ * For each adjacent pair, count votes from key rows:
+ * - If left > right in enough rows, swap them
+ * - Ignore missing times, ties, and marginal differences
+ * 
+ * @param {Array<number>} initialOrder - starting order (permutation of column indices)
+ * @param {Array<Array<number>>} T - times matrix
+ * @param {Array<number>} keyRowIndices - indices of key rows to use for voting
+ * @param {Object} params - { voteThreshold: 0.6, marginMinutes: 2, maxPasses: 8 }
+ * @returns {Array<number>} - smoothed order
+ */
+function applyAdjacentSwaps(initialOrder, T, keyRowIndices, params = {}) {
+  const {
+    voteThreshold = 0.6,    // Fraction of votes needed to swap
+    marginMinutes = 2,       // Ignore differences < this many minutes
+    maxPasses = 8            // Limit iterations to avoid oscillation
+  } = params;
+  
+  let order = [...initialOrder];
+  const nKeyRows = keyRowIndices.length;
+  
+  if (nKeyRows === 0) return order; // No key rows, return as-is
+  
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let swapped = false;
+    
+    for (let i = 0; i < order.length - 1; i++) {
+      const leftCol = order[i];
+      const rightCol = order[i + 1];
+      
+      // Count votes from key rows
+      let votesForSwap = 0;
+      let validComparisons = 0;
+      
+      for (const keyRow of keyRowIndices) {
+        const leftTime = T[leftCol][keyRow];
+        const rightTime = T[rightCol][keyRow];
+        
+        // Skip if either time is missing
+        if (!isFinite(leftTime) || !isFinite(rightTime)) continue;
+        
+        // Skip if difference is marginal (tie)
+        const diff = Math.abs(leftTime - rightTime);
+        if (diff < marginMinutes) continue;
+        
+        validComparisons++;
+        
+        // Vote for swap if left > right (inversion)
+        if (leftTime > rightTime) {
+          votesForSwap++;
+        }
+      }
+      
+      // Swap if we have enough votes
+      if (validComparisons > 0) {
+        const swapRatio = votesForSwap / validComparisons;
+        if (swapRatio >= voteThreshold) {
+          [order[i], order[i + 1]] = [order[i + 1], order[i]];
+          swapped = true;
+        }
       }
     }
     
-    if (times.length === 0) {
-      weights.push(0);
-      continue;
-    }
-    
-    // Coverage ratio
-    const coverageRatio = coverage / nTrips;
-    
-    // Variance (lower is better)
-    const mean = times.reduce((a, b) => a + b, 0) / times.length;
-    const variance = times.reduce((sum, t) => sum + Math.pow(t - mean, 2), 0) / times.length;
-    const stdDev = Math.sqrt(variance);
-    
-    // Weight: higher for high coverage, penalize high variance
-    // Use inverse of (1 + normalized stdDev) to penalize variance
-    const maxStdDev = 240; // 4 hours in minutes - reasonable max
-    const normalizedStdDev = Math.min(stdDev / maxStdDev, 1);
-    const varianceFactor = 1 / (1 + normalizedStdDev);
-    
-    weights.push(coverageRatio * varianceFactor);
+    // Stop early if no swaps in this pass
+    if (!swapped) break;
   }
   
-  // Normalize so sum = nRows
-  const sum = weights.reduce((a, b) => a + b, 0);
-  if (sum > 0) {
-    const factor = nRows / sum;
-    return weights.map(w => w * factor);
-  }
-  
-  return weights;
+  return order;
 }
 
 /**
- * Compute Borda scores for each column
- * For each row, rank columns by time (ascending), assign points (m-1, m-2, ..., 0)
- * Aggregate weighted scores across all rows
- * @returns {Array<number>} - bordaScores[colIdx] = total weighted Borda score
+ * Debug: Show adjacent swap quality metrics
+ * Reports number of adjacent inversions after smoothing
+ * @param {Array<number>} order - column order after swaps
+ * @param {Array} tripMappings - trip mappings
+ * @param {Array} passengerRowIndices - passenger row indices
+ * @param {Array} keyRowIndices - key rows used for voting
  */
-function computeBordaScores(T, rowWeights) {
-  if (!T || T.length === 0) return [];
-  
-  const nTrips = T.length;
-  const nRows = T[0].length;
-  const bordaScores = new Array(nTrips).fill(0);
-  
-  for (let r = 0; r < nRows; r++) {
-    const weight = rowWeights[r] || 1;
-    
-    // Collect (colIdx, time) pairs for this row
-    const entries = [];
-    for (let c = 0; c < nTrips; c++) {
-      entries.push({ colIdx: c, time: T[c][r] });
-    }
-    
-    // Sort by time (ascending)
-    entries.sort((a, b) => {
-      if (!isFinite(a.time) && !isFinite(b.time)) return 0;
-      if (!isFinite(a.time)) return 1;
-      if (!isFinite(b.time)) return -1;
-      return a.time - b.time;
-    });
-    
-    // Assign Borda points: first gets (nTrips-1), last gets 0
-    for (let rank = 0; rank < entries.length; rank++) {
-      const colIdx = entries[rank].colIdx;
-      const points = nTrips - 1 - rank;
-      bordaScores[colIdx] += points * weight;
-    }
+function debugAdjacentSwapQuality(order, tripMappings, passengerRowIndices, keyRowIndices) {
+  if (!order || !tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
+    console.log('[Adjacent Swaps] No data to analyze');
+    return;
   }
   
-  return bordaScores;
-}
-
-/**
- * Objective function: sum of weighted adjacent inversions
- * An inversion occurs when time[i] > time[i+1] for adjacent columns
- * @param {Array<number>} order - permutation of column indices
- * @param {Array<Array<number>>} T - times matrix
- * @param {Array<number>} rowWeights - row weights
- * @returns {number} - total weighted inversion count
- */
-function objectiveAdjacentInversions(order, T, rowWeights) {
-  if (!order || order.length < 2) return 0;
+  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
   
-  const nRows = T[0].length;
+  // Count adjacent inversions on all passenger rows
   let totalInversions = 0;
-  
   for (let i = 0; i < order.length - 1; i++) {
     const col1 = order[i];
     const col2 = order[i + 1];
     
-    for (let r = 0; r < nRows; r++) {
+    for (let r = 0; r < passengerRowIndices.length; r++) {
       const t1 = T[col1][r];
       const t2 = T[col2][r];
       
-      // Count inversion if both times are valid and t1 > t2
       if (isFinite(t1) && isFinite(t2) && t1 > t2) {
-        const weight = rowWeights[r] || 1;
-        totalInversions += weight;
+        totalInversions++;
       }
     }
   }
   
-  return totalInversions;
-}
-
-/**
- * Local optimization: iteratively try swapping adjacent pairs
- * Accept swap if it reduces the objective (adjacent inversions)
- * @param {Array<number>} initialOrder - starting permutation
- * @param {Array<Array<number>>} T - times matrix
- * @param {Array<number>} rowWeights - row weights
- * @param {number} maxPasses - maximum optimization passes
- * @returns {Array<number>} - optimized order
- */
-function localOptimizeOrder(initialOrder, T, rowWeights, maxPasses = 8) {
-  let order = [...initialOrder];
-  let currentObjective = objectiveAdjacentInversions(order, T, rowWeights);
-  
-  for (let pass = 0; pass < maxPasses; pass++) {
-    let improved = false;
-    
-    for (let i = 0; i < order.length - 1; i++) {
-      // Try swapping positions i and i+1
-      const newOrder = [...order];
-      [newOrder[i], newOrder[i + 1]] = [newOrder[i + 1], newOrder[i]];
-      
-      const newObjective = objectiveAdjacentInversions(newOrder, T, rowWeights);
-      
-      if (newObjective < currentObjective) {
-        order = newOrder;
-        currentObjective = newObjective;
-        improved = true;
-      }
-    }
-    
-    // If no improvement in this pass, stop early
-    if (!improved) break;
-  }
-  
-  return order;
-}
-
-/**
- * Helper: Get earliest core time for a column (for tie-breaking)
- * @param {number} colIdx - column index in tripMappings
- * @param {Array} tripMappings - trip mappings
- * @param {Array} masterList - master stop list
- * @param {Set} coreStops - set of core stop IDs (from profile)
- * @returns {number} - time in minutes, or Infinity
- */
-function firstCoreTimeMinutesForTripIdx(colIdx, tripMappings, masterList, coreStops) {
-  const mapping = tripMappings[colIdx];
-  
-  for (let rowIdx = 0; rowIdx < masterList.length; rowIdx++) {
-    const mStop = masterList[rowIdx];
-    const stopTime = mapping[rowIdx];
-    
-    if (!stopTime) continue;
-    
-    // Check if this is a core stop
-    const stopIds = mStop.stopIds || [mStop.id];
-    const isCore = stopIds.some(sid => coreStops && coreStops.has(sid));
-    
-    if (isCore) {
-      const t = getMinutesFromStopTime(stopTime);
-      if (isFinite(t)) return t;
-    }
-  }
-  
-  return Infinity;
-}
-
-/**
- * Main function: Compute chronological order without anchor dependency
- * Uses Borda ranking + local optimization
- * @param {Array} trips - sorted trips
- * @param {Array} tripMappings - trip mappings
- * @param {Array} passengerRowIndices - indices of passenger rows
- * @param {Function} tieBreakKeyFn - optional tie-breaker function (colIdx) => comparable value
- * @returns {Array<number>} - optimal order (permutation of [0..nTrips-1])
- */
-function computeChronoOrderNoAnchor(trips, tripMappings, passengerRowIndices, tieBreakKeyFn) {
-  const nTrips = trips.length;
-  
-  // Edge case: no trips or no passenger rows
-  if (nTrips === 0 || !passengerRowIndices || passengerRowIndices.length === 0) {
-    return Array.from({ length: nTrips }, (_, i) => i);
-  }
-  
-  // Build times matrix
-  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
-  
-  // Check if matrix is too sparse (>80% missing data)
-  let totalCells = 0;
-  let missingCells = 0;
-  for (let c = 0; c < T.length; c++) {
-    for (let r = 0; r < T[c].length; r++) {
-      totalCells++;
-      if (!isFinite(T[c][r])) missingCells++;
-    }
-  }
-  const sparsity = missingCells / totalCells;
-  
-  if (sparsity > 0.8) {
-    // Fallback to simple chronological ordering
-    const order = Array.from({ length: nTrips }, (_, i) => i);
-    order.sort((a, b) => {
-      const aTime = trips[a].start || "99:99:99";
-      const bTime = trips[b].start || "99:99:99";
-      const diff = timeToMinutes(aTime) - timeToMinutes(bTime);
-      if (diff !== 0) return diff;
-      return (trips[a].trip_id || '').localeCompare(trips[b].trip_id || '');
-    });
-    return order;
-  }
-  
-  // Compute row weights
-  const rowWeights = computeRowWeights(T);
-  
-  // Compute Borda scores
-  const bordaScores = computeBordaScores(T, rowWeights);
-  
-  // Initial order: sort by Borda scores (descending), with tie-breaker
-  const initialOrder = Array.from({ length: nTrips }, (_, i) => i);
-  initialOrder.sort((a, b) => {
-    const scoreDiff = bordaScores[b] - bordaScores[a]; // Higher score first
-    if (Math.abs(scoreDiff) > 0.001) return scoreDiff;
-    
-    // Tie-breaker: use provided function or trip_id
-    if (tieBreakKeyFn) {
-      const keyA = tieBreakKeyFn(a);
-      const keyB = tieBreakKeyFn(b);
-      if (typeof keyA === 'number' && typeof keyB === 'number') {
-        return keyA - keyB;
-      }
-      return String(keyA).localeCompare(String(keyB));
-    }
-    
-    return (trips[a].trip_id || '').localeCompare(trips[b].trip_id || '');
-  });
-  
-  // Local optimization
-  const optimizedOrder = localOptimizeOrder(initialOrder, T, rowWeights);
-  
-  return optimizedOrder;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// ROBUST STRATEGY (Weighted Median + Minimal Swaps)
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Compute robust chronological order using weighted median
- * - For each column, compute weighted median of unwrapped times across passenger rows
- * - Sort columns by this robust key
- * - Apply minimal local swaps to reduce inversions on top-3 weighted rows
- * 
- * @param {Array} trips - sorted trips
- * @param {Array} tripMappings - trip mappings
- * @param {Array} passengerRowIndices - indices of passenger rows
- * @param {Function} tieBreakKeyFn - tie-breaker function (colIdx) => comparable value
- * @returns {Array<number>} - optimal order (permutation of [0..nTrips-1])
- */
-function computeRobustChronoOrder(trips, tripMappings, passengerRowIndices, tieBreakKeyFn) {
-  const nTrips = trips.length;
-  
-  // Edge case: no trips or no passenger rows
-  if (nTrips === 0 || !passengerRowIndices || passengerRowIndices.length === 0) {
-    return Array.from({ length: nTrips }, (_, i) => i);
-  }
-  
-  // Build times matrix
-  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
-  
-  // Check if matrix is too sparse (>80% missing data)
-  let totalCells = 0;
-  let missingCells = 0;
-  for (let c = 0; c < T.length; c++) {
-    for (let r = 0; r < T[c].length; r++) {
-      totalCells++;
-      if (!isFinite(T[c][r])) missingCells++;
-    }
-  }
-  const sparsity = missingCells / totalCells;
-  
-  if (sparsity > 0.8) {
-    // Fallback to simple chronological ordering
-    const order = Array.from({ length: nTrips }, (_, i) => i);
-    order.sort((a, b) => {
-      const aTime = trips[a].start || "99:99:99";
-      const bTime = trips[b].start || "99:99:99";
-      const diff = timeToMinutes(aTime) - timeToMinutes(bTime);
-      if (diff !== 0) return diff;
-      return (trips[a].trip_id || '').localeCompare(trips[b].trip_id || '');
-    });
-    return order;
-  }
-  
-  // Compute row weights
-  const rowWeights = computeRowWeights(T);
-  
-  // For each column, compute robust key = weighted median of unwrapped times
-  const robustKeys = [];
-  
-  for (let colIdx = 0; colIdx < nTrips; colIdx++) {
-    const columnTimes = T[colIdx]; // times for this column across all passenger rows
-    
-    // Unwrap times to handle next-day transitions
-    const unwrapped = unwrapColumnTimes(columnTimes);
-    
-    // Compute weighted median
-    const medianTime = weightedMedian(unwrapped, rowWeights);
-    
-    robustKeys.push({
-      colIdx: colIdx,
-      robustKey: medianTime,
-      tieBreaker: tieBreakKeyFn ? tieBreakKeyFn(colIdx) : trips[colIdx].trip_id || ''
-    });
-  }
-  
-  // Sort by robust key, then tie-breaker
-  robustKeys.sort((a, b) => {
-    // Primary: robust key (weighted median)
-    if (isFinite(a.robustKey) && isFinite(b.robustKey)) {
-      const diff = a.robustKey - b.robustKey;
-      if (Math.abs(diff) > 0.001) return diff;
-    } else if (!isFinite(a.robustKey) && isFinite(b.robustKey)) {
-      return 1; // a goes after b
-    } else if (isFinite(a.robustKey) && !isFinite(b.robustKey)) {
-      return -1; // a goes before b
-    }
-    
-    // Secondary: tie-breaker
-    if (typeof a.tieBreaker === 'number' && typeof b.tieBreaker === 'number') {
-      return a.tieBreaker - b.tieBreaker;
-    }
-    return String(a.tieBreaker).localeCompare(String(b.tieBreaker));
-  });
-  
-  // Initial order from robust keys
-  let order = robustKeys.map(k => k.colIdx);
-  
-  // Minimal local optimization: focus on top-3 weighted rows
-  // Sort rows by weight (descending) and take top 3
-  const rowsByWeight = rowWeights.map((w, idx) => ({ rowIdx: idx, weight: w }));
-  rowsByWeight.sort((a, b) => b.weight - a.weight);
-  const topRowIndices = rowsByWeight.slice(0, 3).map(r => r.rowIdx);
-  
-  // Limited swaps: max 3 passes, only swap if reduces inversions on top rows
-  const maxPasses = 3;
-  
-  for (let pass = 0; pass < maxPasses; pass++) {
-    let improved = false;
-    
-    for (let i = 0; i < order.length - 1; i++) {
-      const col1 = order[i];
-      const col2 = order[i + 1];
-      
-      // Count inversions on top rows for current order
-      let currentInversions = 0;
-      for (const r of topRowIndices) {
-        const t1 = T[col1][r];
-        const t2 = T[col2][r];
-        if (isFinite(t1) && isFinite(t2) && t1 > t2) {
-          currentInversions += rowWeights[r];
-        }
-      }
-      
-      // Count inversions if we swap
-      let swappedInversions = 0;
-      for (const r of topRowIndices) {
-        const t1 = T[col2][r];
-        const t2 = T[col1][r];
-        if (isFinite(t1) && isFinite(t2) && t1 > t2) {
-          swappedInversions += rowWeights[r];
-        }
-      }
-      
-      // Swap if it reduces inversions
-      if (swappedInversions < currentInversions) {
-        [order[i], order[i + 1]] = [order[i + 1], order[i]];
-        improved = true;
-      }
-    }
-    
-    if (!improved) break;
-  }
-  
-  return order;
-}
-
-/**
- * Debug: Show row monotony - which rows have most inversions
- * @param {Array<number>} order - column order
- * @param {Array} tripMappings - trip mappings  
- * @param {Array} masterList - master stop list
- * @param {Array} passengerRowIndices - passenger row indices
- */
-function debugRowMonotony(order, tripMappings, masterList, passengerRowIndices) {
-  if (!order || !tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
-    console.log('[Row Monotony] No data to analyze');
-    return;
-  }
-  
-  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
-  const rowWeights = computeRowWeights(T);
-  
-  // Count inversions per row
-  const rowInversions = [];
-  
-  for (let i = 0; i < passengerRowIndices.length; i++) {
-    const rowIdx = passengerRowIndices[i];
-    let inversions = 0;
-    
-    for (let j = 0; j < order.length - 1; j++) {
-      const t1 = T[order[j]][i];
-      const t2 = T[order[j + 1]][i];
-      
-      if (isFinite(t1) && isFinite(t2) && t1 > t2) {
-        inversions++;
-      }
-    }
-    
-    const mStop = masterList[rowIdx];
-    rowInversions.push({
-      rowIdx: rowIdx,
-      stopName: mStop ? mStop.name : `Row ${rowIdx}`,
-      inversions: inversions,
-      weight: rowWeights[i] || 0
-    });
-  }
-  
-  // Sort by inversions (descending)
-  rowInversions.sort((a, b) => b.inversions - a.inversions);
-  
-  console.log('[Row Monotony] Top rows with most inversions:');
-  rowInversions.slice(0, 5).forEach(({ stopName, inversions, weight }) => {
-    console.log(`  "${stopName}": ${inversions} inversions (weight: ${weight.toFixed(2)})`);
-  });
-  
-  // Also show total
-  const totalInversions = rowInversions.reduce((sum, r) => sum + r.inversions * r.weight, 0);
-  console.log(`[Row Monotony] Total weighted inversions: ${totalInversions.toFixed(2)}`);
-}
-
-/**
- * Debug: Print column order quality metrics
- * Shows total weighted inversions and top rows with most inversions
- */
-function debugColumnOrderQuality(order, tripMappings, passengerRowIndices) {
-  if (!order || !tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
-    console.log('[Column Order Quality] No data to analyze');
-    return;
-  }
-  
-  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
-  const rowWeights = computeRowWeights(T);
-  const totalInversions = objectiveAdjacentInversions(order, T, rowWeights);
-  
-  console.log(`[Column Order Quality] Total weighted inversions: ${totalInversions.toFixed(2)}`);
-  
-  // Analyze per-row inversions
-  const rowInversions = [];
-  const nRows = T[0].length;
-  
-  for (let r = 0; r < nRows; r++) {
-    let inversions = 0;
-    for (let i = 0; i < order.length - 1; i++) {
-      const t1 = T[order[i]][r];
-      const t2 = T[order[i + 1]][r];
-      if (isFinite(t1) && isFinite(t2) && t1 > t2) {
-        inversions++;
-      }
-    }
-    rowInversions.push({ rowIdx: passengerRowIndices[r], inversions, weight: rowWeights[r] });
-  }
-  
-  // Sort by inversions (descending) and show top 5
-  rowInversions.sort((a, b) => b.inversions - a.inversions);
-  console.log('[Column Order Quality] Top rows with most inversions:');
-  rowInversions.slice(0, 5).forEach(({ rowIdx, inversions, weight }) => {
-    console.log(`  Row ${rowIdx}: ${inversions} inversions (weight: ${weight.toFixed(2)})`);
-  });
-}
-
-/**
- * Debug: Show pairwise preference matrix
- * For each pair of columns, count how many rows prefer one over the other
- */
-function debugPairwisePreferences(tripMappings, passengerRowIndices) {
-  if (!tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
-    console.log('[Pairwise Preferences] No data to analyze');
-    return;
-  }
-  
-  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
-  const nTrips = T.length;
-  const nRows = T[0].length;
-  
-  // Count wins for each column
-  const wins = new Array(nTrips).fill(0);
-  
-  for (let c1 = 0; c1 < nTrips; c1++) {
-    for (let c2 = c1 + 1; c2 < nTrips; c2++) {
-      let c1Wins = 0;
-      let c2Wins = 0;
-      
-      for (let r = 0; r < nRows; r++) {
-        const t1 = T[c1][r];
-        const t2 = T[c2][r];
-        
-        if (isFinite(t1) && isFinite(t2)) {
-          if (t1 < t2) c1Wins++;
-          else if (t2 < t1) c2Wins++;
-        }
-      }
-      
-      wins[c1] += c1Wins;
-      wins[c2] += c2Wins;
-    }
-  }
-  
-  // Show top 5 dominant columns
-  const ranked = wins.map((w, idx) => ({ colIdx: idx, wins: w }));
-  ranked.sort((a, b) => b.wins - a.wins);
-  
-  console.log('[Pairwise Preferences] Top columns by pairwise wins:');
-  ranked.slice(0, 5).forEach(({ colIdx, wins }) => {
-    console.log(`  Column ${colIdx}: ${wins} wins`);
-  });
+  console.log(`[Adjacent Swaps] Total adjacent inversions: ${totalInversions}`);
+  console.log(`[Adjacent Swaps] Used ${keyRowIndices.length} key rows for voting`);
+  console.log(`[Adjacent Swaps] Key row indices: ${keyRowIndices.join(', ')}`);
 }
 
 // ═══════════════════════════════════════════════════════════════
