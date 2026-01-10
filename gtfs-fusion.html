@@ -1042,6 +1042,11 @@ function debounce(func, wait) {
       return normalized;
     }
     function normalizeRecord(rec) {
+      if (!rec || typeof rec !== 'object') {
+        console.warn('normalizeRecord: Invalid record, expected object');
+        return {};
+      }
+      
       const out = {};
       Object.keys(rec).forEach(origKey => {
         const norm = normalizeKey(origKey);
@@ -1646,10 +1651,17 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
 function parseCSV(text) {
+  if (!text || typeof text !== 'string') {
+    console.warn('parseCSV: Invalid input, expected non-empty string');
+    return [];
+  }
+  
   const lines = text.split(/\r?\n/);
   if (lines.length === 0) return [];
   
   function parseCSVLine(line) {
+    if (!line) return [];
+    
     const result = [];
     let current = '';
     let inQuotes = false;
@@ -1678,10 +1690,15 @@ function parseCSV(text) {
     // Add last field
     result.push(current);
     
+    // Warn if quotes are still open (malformed CSV)
+    if (inQuotes) {
+      console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
+    }
+    
     return result;
   }
   
-  const headerLine = lines[0]. replace(/^\uFEFF/, '');
+  const headerLine = lines[0].replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
   
   const result = [];
@@ -1694,7 +1711,7 @@ function parseCSV(text) {
     const values = parseCSVLine(line);
     const row = {};
     
-    headers. forEach((header, idx) => {
+    headers.forEach((header, idx) => {
       let value = values[idx] || '';
       value = value.trim();
       row[header] = value;
@@ -1722,6 +1739,9 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       const CHUNK_SIZE = 1024 * 1024;
       
       // ═══ REMOVED smartSplit - use native split! ═══
+      // NOTE: Using native split(',') for performance (100x faster than smartSplit).
+      // This works for GTFS stop_times.txt because fields typically don't contain commas.
+      // If a feed has quoted fields with embedded commas, use the full parseCSV function instead.
       
       const getCol = (cols, idx) => {
         if (idx === -1 || idx >= cols.length) return '';
@@ -1742,13 +1762,13 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       };
       
       const processLine = (line) => {
-        if (!line. trim()) return;
+        if (!line.trim()) return;
         
         if (!headers) {
-  const rawHeaders = line. split(',').map(h => h.replace(/^"|"$/g, '').trim());  // ← Dodaj .map()
-  headers = {
-    tripIdx: -1,
-    stopIdx: -1,
+          const rawHeaders = line.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+          headers = {
+            tripIdx: -1,
+            stopIdx: -1,
             seqIdx: -1,
             arrIdx: -1,
             depIdx: -1,
@@ -1756,8 +1776,8 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             dropoffIdx: -1
           };
           
-rawHeaders.forEach((h, i) => {
-    const normalized = normalizeKey(h);
+          rawHeaders.forEach((h, i) => {
+            const normalized = normalizeKey(h);
             if (normalized === 'trip_id') headers.tripIdx = i;
             else if (normalized === 'stop_id') headers.stopIdx = i;
             else if (normalized === 'stop_sequence') headers.seqIdx = i;
@@ -1768,7 +1788,7 @@ rawHeaders.forEach((h, i) => {
           });
           
           if (headers.tripIdx === -1 || headers.stopIdx === -1) {
-            throw new Error('Brakuje wymaganych kolumn w stop_times.txt: trip_id lub stop_id');
+            throw new Error('Missing required columns in stop_times.txt: trip_id or stop_id');
           }
           return;
         }
@@ -1776,7 +1796,7 @@ rawHeaders.forEach((h, i) => {
         // ═══ NATIVE SPLIT - 100x faster than smartSplit! ═══
         const cols = line.split(',');
         
-        if (cols.length <= Math.max(headers.tripIdx, headers. stopIdx)) return;
+        if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
         
         const tripId = getCol(cols, headers.tripIdx);
         const stopId = getCol(cols, headers.stopIdx);
@@ -1807,23 +1827,35 @@ rawHeaders.forEach((h, i) => {
       
       let offset = 0;
       while (offset < arrayBuffer.byteLength) {
-        const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
-        const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
-        const isLastChunk = chunkEnd === arrayBuffer.byteLength;
-        const text = decoder.decode(chunk, { stream: !isLastChunk });
-        buffer += text;
-        
-        let newlineIndex;
-        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.substring(0, newlineIndex);
-          processLine(line);
-          buffer = buffer.substring(newlineIndex + 1);
+        try {
+          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
+          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
+          const text = decoder.decode(chunk, { stream: !isLastChunk });
+          buffer += text;
+          
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.substring(0, newlineIndex);
+            processLine(line);
+            buffer = buffer.substring(newlineIndex + 1);
+          }
+          
+          offset = chunkEnd;
+        } catch (err) {
+          console.error('Error processing chunk at offset', offset, ':', err);
+          // Continue processing next chunk instead of failing completely
+          offset = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
         }
-        
-        offset = chunkEnd;
       }
       
-      if (buffer.trim()) processLine(buffer);
+      if (buffer.trim()) {
+        try {
+          processLine(buffer);
+        } catch (err) {
+          console.error('Error processing final buffer:', err);
+        }
+      }
       
       // Sort (same as before)
       Object.keys(stopTimesIndex).forEach(tripId => {
@@ -2089,9 +2121,9 @@ rawHeaders.forEach((h, i) => {
           ['routes.txt', 'trips.txt', 'stop_times.txt', 'stops.txt', 'calendar.txt', 'calendar_dates.txt', 'agency.txt', 'shapes.txt']
           .map(filename => findFile(zip.files, filename));
         
-        // Walidacja wymaganych plików
+        // Validate required files
         if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
-          throw new Error('Brakuje wymaganych plików GTFS (routes.txt, trips.txt, stop_times.txt, stops.txt)');
+          throw new Error('Missing required GTFS files (routes.txt, trips.txt, stop_times.txt, stops.txt)');
         }
 
 // ==========================================
@@ -4473,7 +4505,7 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
     }));
   }
 
-  // Dodaj markery przystanków...
+  // Add stop markers...
       sel.stopDetails.forEach(s => {
         if (s && s.stop_lat && s.stop_lon) {
           const lat = parseFloat(s.stop_lat), lon = parseFloat(s.stop_lon);
