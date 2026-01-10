@@ -2395,6 +2395,11 @@ function generateAvailableDates(calendar, calendarDates) {
     }
     return Array.from(services);
     }
+
+    /**
+     * Get a representative weekday date (Monday-Friday)
+     * Prefers FUTURE dates, falls back to PAST if no future weekday exists
+     */
     function getWeekdayDate() {
       const today = parseGTFSDate(state.selectedDate);
       if (!today) return findDateForDayOfWeek(3); // Wednesday as fallback
@@ -2406,6 +2411,13 @@ function generateAvailableDates(calendar, calendarDates) {
       // Otherwise find nearest future or past weekday (prefer Wednesday)
       return findDateForDayOfWeek(3); // Wednesday
     }
+
+    /**
+     * Find a date for a specific day of week
+     * Strategy: prefer FUTURE dates, fallback to PAST
+     * @param {number} targetDayOfWeek - 0=Sunday, 1=Monday, ..., 6=Saturday
+     * @returns {string|null} - GTFS date string (YYYYMMDD)
+     */
     function findDateForDayOfWeek(targetDayOfWeek) {
       const today = parseGTFSDate(state.selectedDate);
       if (!today) return null;
@@ -2509,6 +2521,128 @@ function generateAvailableDates(calendar, calendarDates) {
       
       return holidays;
     }
+    function findNearbyHolidays(referenceDateStr) {
+      const refDate = parseGTFSDate(referenceDateStr);
+      if (!refDate) return [];
+      
+      const year = refDate.getFullYear();
+      const holidays = [
+        ...getPolishHolidays(year),
+        ...getPolishHolidays(year + 1)  // Include next year for edge cases
+      ];
+      
+      const nearby = [];
+      holidays.forEach(holiday => {
+        const holidayDate = parseGTFSDate(holiday.date);
+        if (!holidayDate) return;
+        
+        const diffMs = holidayDate - refDate;
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        
+        // Include holidays only in the upcoming week (0 to 7 days in the future)
+        if (diffDays >= 0 && diffDays <= 7) {
+          nearby.push({
+            ...holiday,
+            dateObj: holidayDate,
+            daysFromRef: diffDays
+          });
+        }
+      });
+      
+      return nearby;
+    }
+
+    /**
+     * Calculate Easter Sunday for a given year using Meeus/Jones/Butcher algorithm
+     * @param {number} year - The year to calculate Easter for
+     * @returns {Date} - Easter Sunday as a Date object
+     */
+    function calculateEaster(year) {
+      const a = year % 19;
+      const b = Math.floor(year / 100);
+      const c = year % 100;
+      const d = Math.floor(b / 4);
+      const e = b % 4;
+      const f = Math.floor((b + 8) / 25);
+      const g = Math.floor((b - f + 1) / 3);
+      const h = (19 * a + b - d - g + 15) % 30;
+      const i = Math.floor(c / 4);
+      const k = c % 4;
+      const l = (32 + 2 * e + 2 * i - h - k) % 7;
+      const m = Math.floor((a + 11 * h + 22 * l) / 451);
+      const month = Math.floor((h + l - 7 * m + 114) / 31);
+      const day = ((h + l - 7 * m + 114) % 31) + 1;
+      return new Date(year, month - 1, day);
+    }
+
+    /**
+     * Get all Polish holidays for a given year
+     * @param {number} year - The year to get holidays for
+     * @returns {Array} - Array of {date: 'YYYYMMDD', name: 'Holiday Name'}
+     */
+    function getPolishHolidays(year) {
+      const holidays = [];
+      
+      // Fixed-date holidays
+      holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
+      holidays.push({ date: `${year}0102`, name: 'Dzień po Nowym Roku' });
+      holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
+      holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie Najświętszej Maryi Panny' });
+      holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
+      holidays.push({ date: `${year}1224`, name: 'Wigilia' });
+      holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
+      holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt Bożego Narodzenia' });
+      holidays.push({ date: `${year}1231`, name: 'Sylwester' });
+      
+      // Movable holidays based on Easter
+      const easter = calculateEaster(year);
+      
+      // Maundy Thursday (3 days before Easter)
+      const maundyThursday = new Date(easter);
+      maundyThursday.setDate(easter.getDate() - 3);
+      holidays.push({
+        date: formatDateToGTFS(maundyThursday),
+        name: 'Wielki Czwartek'
+      });
+      
+      // Good Friday (2 days before Easter)
+      const goodFriday = new Date(easter);
+      goodFriday.setDate(easter.getDate() - 2);
+      holidays.push({
+        date: formatDateToGTFS(goodFriday),
+        name: 'Wielki Piątek'
+      });
+      
+      // Easter Sunday
+      holidays.push({
+        date: formatDateToGTFS(easter),
+        name: 'Wielkanoc'
+      });
+      
+      // Easter Monday
+      const easterMonday = new Date(easter);
+      easterMonday.setDate(easter.getDate() + 1);
+      holidays.push({
+        date: formatDateToGTFS(easterMonday),
+        name: 'Poniedziałek Wielkanocny'
+      });
+      
+      // Corpus Christi (60 days after Easter, always Thursday)
+      const corpusChristi = new Date(easter);
+      corpusChristi.setDate(easter.getDate() + 60);
+      holidays.push({
+        date: formatDateToGTFS(corpusChristi),
+        name: 'Boże Ciało'
+      });
+      
+      return holidays;
+    }
+
+    /**
+     * Find holidays in the upcoming week from a reference date
+     * @param {string} referenceDateStr - GTFS date string (YYYYMMDD)
+     * @returns {Array} - Array of holiday objects that fall within the next 7 days
+     */
     function findNearbyHolidays(referenceDateStr) {
       const refDate = parseGTFSDate(referenceDateStr);
       if (!refDate) return [];
@@ -6071,10 +6205,13 @@ function openStopTimetable(stopId) {
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
+  // Collect departures at this stop
   // If a route is selected, filter by route and direction
+  // Otherwise, show ALL routes
   let allDepartures = [];
   
   if (state.selectedRoute && state.selectedDirection !== undefined) {
+    // Filter by selected route and direction
     const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
     const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
     
@@ -6122,6 +6259,7 @@ function openStopTimetable(stopId) {
     });
   }
 
+  // Determine main destination based on the currently selected route (if any)
   let mainDestination = '';
   let mainTerminusStopId = null;
   
@@ -6179,12 +6317,15 @@ function openStopTimetable(stopId) {
     mainDestination = stop.stop_name || 'Unknown';
   }
 
+  // Resolve dates for each column with future-oriented preference
   const mondayDate = findDateForDayOfWeek(1); // Monday
   const saturdayDate = findDateForDayOfWeek(6); // Saturday
   const sundayDate = findDateForDayOfWeek(0); // Sunday
   
+  // Find holidays in upcoming week
   const nearbyHolidays = findNearbyHolidays(state.selectedDate);
   
+  // Classify holidays by day of week
   const holidaysByDayOfWeek = new Map(); // dayOfWeek -> holiday object
   const weekdayHolidays = []; // Holidays falling on Mon-Fri
   
@@ -6201,6 +6342,7 @@ function openStopTimetable(stopId) {
     }
   });
   
+  // Collect all weekday dates (Mon-Fri) for aggregation, excluding holidays
   const weekdayDates = [];
   const weekdayHolidayDates = new Set(weekdayHolidays.map(h => h.date));
   
@@ -6218,6 +6360,7 @@ function openStopTimetable(stopId) {
     }
   }
   
+  // Get services for each date
   const weekdayServicesMap = new Map(); // Map of date -> services
   weekdayDates.forEach(dateStr => {
     weekdayServicesMap.set(dateStr, getServicesForDate(dateStr));
@@ -6226,6 +6369,7 @@ function openStopTimetable(stopId) {
   const saturdayServices = saturdayDate ? getServicesForDate(saturdayDate) : [];
   const sundayServices = sundayDate ? getServicesForDate(sundayDate) : [];
 
+  // Helper: get trip terminus
   const getTripTerminus = (tripId) => {
     const stopTimes = state.gtfsData.stopTimesIndex[tripId] || [];
     if (stopTimes.length === 0) return null;
@@ -6236,10 +6380,16 @@ function openStopTimetable(stopId) {
 
   const alternativeTermini = new Map();
   let nextLetter = 'a';
+
+  /**
+   * Process departures for a column with weekday annotations
+   * For Mon-Fri column only: track which weekdays each minute appears on
+   */
   const getTimesByHourWithAnnotations = (departures, isWeekdayColumn = false, dateToServicesMap = null) => {
     const hourGroups = {};
     
     // For weekday column: track minutes by weekday AND terminus
+    // Key: "HH:MM:terminus" -> Set of day indices (0=Mon, 4=Fri)
     const minuteWeekdayMap = new Map();
     
     departures.forEach(departure => {
@@ -6253,6 +6403,7 @@ function openStopTimetable(stopId) {
         const terminusStopId = getTripTerminus(departure.trip_id);
         let terminusKey = '';
         
+        // Determine terminus annotation (lowercase letters)
         if (terminusStopId && terminusStopId !== mainTerminusStopId) {
           const tripHeadsign = departure.headsign;
           if (tripHeadsign && tripHeadsign !== mainDestination) {
@@ -6260,7 +6411,7 @@ function openStopTimetable(stopId) {
               alternativeTermini.set(tripHeadsign, nextLetter);
               nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
             }
-            terminusKey = alternativeTermini.get(tripHeadsign);
+            terminusKey = alternateTermini.get(tripHeadsign);
           } else if (!tripHeadsign) {
             const terminusStop = state.gtfsData.stopsIndex[terminusStopId];
             const terminusName = terminusStop?.stop_name || terminusStopId;
@@ -6285,6 +6436,7 @@ function openStopTimetable(stopId) {
               minuteWeekdayMap.set(mapKey, new Set());
             }
             
+            // Determine which weekday this departure runs on
             const serviceId = departure.service_id;
             weekdayDates.forEach((dateStr, dayIdx) => {
               const servicesForDay = dateToServicesMap.get(dateStr) || [];
@@ -6301,10 +6453,12 @@ function openStopTimetable(stopId) {
     });
 
     // Add weekday annotations (superscript numbers) for Mon-Fri column
+    // Smart algorithm: only annotate the minority pattern when there are complementary patterns
     const weekdayAnnotations = new Map(); // Set of day indices -> superscript symbol
     let nextSuperscript = 1;
     
     if (isWeekdayColumn) {
+      // First pass: collect all unique weekday patterns in this hour group
       const hourPatterns = new Map(); // hour -> Map of minuteKey -> weekday pattern
       
       Object.keys(hourGroups).forEach(hour => {
@@ -6328,6 +6482,7 @@ function openStopTimetable(stopId) {
       });
       
       // Second pass: determine which patterns need annotation
+      // Strategy: find complementary patterns and only annotate the minority
       const patternsToAnnotate = new Set();
       
       Object.keys(hourGroups).forEach(hour => {
@@ -6342,6 +6497,7 @@ function openStopTimetable(stopId) {
           patternDayCounts.set(info.pattern, info.dayCount);
         });
         
+        // Find unique patterns (not all 5 days)
         const uniquePatterns = Array.from(patternCounts.keys()).filter(p => {
           const dayCount = patternDayCounts.get(p);
           return dayCount < 5;
@@ -6354,12 +6510,14 @@ function openStopTimetable(stopId) {
           patternsToAnnotate.add(uniquePatterns[0]);
         } else {
           // Multiple patterns - check if they're complementary
+          // Complementary means their union = all 5 weekdays
           const allDaysInPatterns = new Set();
           uniquePatterns.forEach(pattern => {
             pattern.split(',').forEach(d => allDaysInPatterns.add(d));
           });
           
           if (allDaysInPatterns.size === 5 && uniquePatterns.length === 2) {
+            // Two complementary patterns - annotate only the minority (fewer days)
             const pattern1 = uniquePatterns[0];
             const pattern2 = uniquePatterns[1];
             const count1 = patternDayCounts.get(pattern1);
@@ -6404,6 +6562,7 @@ function openStopTimetable(stopId) {
                 if (weekdaysSet.size === 1) {
                   const dayIndex = Array.from(weekdaysSet)[0];
                   // dayIndex: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+                  // Display as: 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri
                   const weekdayNumber = dayIndex + 1;
                   weekdayAnnotations.set(weekdaysKey, superscripts[weekdayNumber]);
                 } else {
@@ -6433,6 +6592,7 @@ function openStopTimetable(stopId) {
     // Sort minutes within each hour
     Object.keys(hourGroups).forEach(hour => {
       hourGroups[hour].sort((a, b) => {
+        // Extract numeric minute for sorting (remove all annotations)
         const minA = parseInt(a.replace(/[^0-9]/g, ''));
         const minB = parseInt(b.replace(/[^0-9]/g, ''));
         return minA - minB;
@@ -6449,6 +6609,7 @@ function openStopTimetable(stopId) {
     return { timesByHour: result, weekdayAnnotations };
   };
 
+  // Process weekday column with annotations (excluding weekday holidays)
   const weekdayDepartures = allDepartures.filter(d => {
     return Array.from(weekdayServicesMap.values()).some(services => services.includes(d.service_id));
   });
@@ -6457,6 +6618,7 @@ function openStopTimetable(stopId) {
   const weekdayTimes = weekdayResult.timesByHour;
   const weekdayAnnotationsMap = weekdayResult.weekdayAnnotations;
   
+  // Process weekend columns - check if replaced by holiday
   let saturdayColumn = null;
   let sundayColumn = null;
   
@@ -6464,27 +6626,32 @@ function openStopTimetable(stopId) {
   const sundayHoliday = holidaysByDayOfWeek.get(0); // Sunday
   
   if (saturdayHoliday) {
+    // Saturday is a holiday - use holiday data for this column
     const holidayServices = getServicesForDate(saturdayHoliday.date);
     const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
     const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
     saturdayColumn = { name: saturdayHoliday.name, times: holidayTimes, isHoliday: true };
   } else {
+    // Normal Saturday
     const saturdayDepartures = allDepartures.filter(d => saturdayServices.includes(d.service_id));
     const saturdayTimes = getTimesByHourWithAnnotations(saturdayDepartures, false).timesByHour;
     saturdayColumn = { name: 'Sobota', times: saturdayTimes, isHoliday: false };
   }
   
   if (sundayHoliday) {
+    // Sunday is a holiday - use holiday data for this column
     const holidayServices = getServicesForDate(sundayHoliday.date);
     const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
     const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
     sundayColumn = { name: sundayHoliday.name, times: holidayTimes, isHoliday: true };
   } else {
+    // Normal Sunday
     const sundayDepartures = allDepartures.filter(d => sundayServices.includes(d.service_id));
     const sundayTimes = getTimesByHourWithAnnotations(sundayDepartures, false).timesByHour;
     sundayColumn = { name: 'Niedziela', times: sundayTimes, isHoliday: false };
   }
   
+  // Process weekday holiday columns (Mon-Fri holidays as separate columns)
   const weekdayHolidayColumns = [];
   weekdayHolidays.forEach(holiday => {
     const holidayServices = getServicesForDate(holiday.date);
@@ -6514,6 +6681,7 @@ function openStopTimetable(stopId) {
     return rows.join('');
   };
 
+  // Build legends
   let legendHTML = '';
   const legendParts = [];
   
@@ -6545,6 +6713,10 @@ function openStopTimetable(stopId) {
   if (legendParts.length > 0) {
     legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
   }
+  
+  if (legendParts.length > 0) {
+    legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
+  }
 
   let tableHeaderHTML = `<tr style="background: #e5e7eb;">
     <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Dzień powszedni</th>
@@ -6570,6 +6742,46 @@ function openStopTimetable(stopId) {
   
   tableBodyHTML += `</tr>`;
 
+  let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
+  
+  if (state.selectedRoute) {
+    headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div>`;
+  }
+  
+  headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div>`;
+  
+  if (mainDestination && state.selectedRoute) {
+    headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination)}</span></div>`;
+  }
+  
+  headerHTML += '</div></div>';
+
+  // Build table HTML
+  let tableHeaderHTML = `<tr style="background: #e5e7eb;">
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Dzień powszedni</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(saturdayColumn.name)}</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(sundayColumn.name)}</th>`;
+  
+  // Add weekday holiday columns
+  weekdayHolidayColumns.forEach(hCol => {
+    tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(hCol.name)}</th>`;
+  });
+  
+  tableHeaderHTML += `</tr>`;
+  
+  let tableBodyHTML = `<tr>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(weekdayTimes)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayColumn.times)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayColumn.times)}</td>`;
+  
+  // Add weekday holiday column data
+  weekdayHolidayColumns.forEach(hCol => {
+    tableBodyHTML += `<td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(hCol.times)}</td>`;
+  });
+  
+  tableBodyHTML += `</tr>`;
+
+  // Build modal header - show route badge only if a route is selected
   let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
   
   if (state.selectedRoute) {
