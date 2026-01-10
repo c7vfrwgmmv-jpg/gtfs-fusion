@@ -6559,7 +6559,7 @@ function openStopTimetable(stopId) {
               alternativeTermini.set(tripHeadsign, nextLetter);
               nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
             }
-            terminusKey = alternateTermini.get(tripHeadsign);
+            terminusKey = alternativeTermini.get(tripHeadsign);
           } else if (!tripHeadsign) {
             const terminusStop = state.gtfsData.stopsIndex[terminusStopId];
             const terminusName = terminusStop?.stop_name || terminusStopId;
