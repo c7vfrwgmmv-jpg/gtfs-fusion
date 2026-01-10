@@ -945,7 +945,10 @@ let state = {
 
   // Column order cache: trips order per (key, dir, date, showAllTrips)
   // Structure: columnOrderCache[cacheKey] = [trip_id, ...]
-  columnOrderCache: {}
+  columnOrderCache: {},
+  
+  // Performance metrics from last load
+  lastLoadMetrics: null
 };
 
 let stopsSearchIndex = null;
@@ -1552,6 +1555,152 @@ function isCircularRoute(stopSequence) {
   if (!stopSequence || stopSequence.length < 2) return false;
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
+// Helper function to process a single route's direction enrichment
+function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
+  const tripsToProcess = routeTrips.filter(t => 
+    !t.direction_id || t.direction_id === ''
+  );
+  
+  if (tripsToProcess.length === 0) return;
+  
+  const tripPatterns = tripsToProcess.map(trip => ({
+    tripId: trip.trip_id,
+    trip: trip,
+    sequence: getTripStopSequence(trip.trip_id, stopTimesIndex)
+  }));
+  
+  const validPatterns = tripPatterns.filter(p => p.sequence.length > 0);
+  
+  if (validPatterns.length === 0) {
+    tripsToProcess.forEach(trip => trip.direction_id = '0');
+    return;
+  }
+  
+  const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
+  if (isCircular) {
+    tripsToProcess.forEach(trip => trip.direction_id = '0');
+    return;
+  }
+  
+  let refPattern = null;
+  let maxLen = 0;
+  
+  for (const pattern of validPatterns) {
+    if (pattern.sequence.length > maxLen) {
+      maxLen = pattern.sequence.length;
+      refPattern = pattern;
+    }
+  }
+  
+  if (!refPattern || refPattern.sequence.length === 0) {
+    tripsToProcess.forEach(trip => trip.direction_id = '0');
+    return;
+  }
+  
+  const patternFwd = refPattern.sequence;
+  const patternRev = [...patternFwd].reverse();
+  
+  let refBearing = null;
+  if (stopsIndex && patternFwd.length >= 2) {
+    const firstStop = stopsIndex[patternFwd[0]];
+    const lastStop = stopsIndex[patternFwd[patternFwd.length - 1]];
+    
+    if (firstStop && lastStop) {
+      const lat1 = parseFloat(firstStop.stop_lat);
+      const lon1 = parseFloat(firstStop.stop_lon);
+      const lat2 = parseFloat(lastStop.stop_lat);
+      const lon2 = parseFloat(lastStop.stop_lon);
+      
+      if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+        refBearing = calculateBearing(lat1, lon1, lat2, lon2);
+      }
+    }
+  }
+  
+  tripsToProcess.forEach(trip => {
+    const seq = getTripStopSequence(trip.trip_id, stopTimesIndex);
+    
+    if (!seq || seq.length === 0) {
+      trip.direction_id = '0';
+      return;
+    }
+    
+    const scoreFwd = tripSequenceScore(seq, patternFwd);
+    const scoreRev = tripSequenceScore(seq, patternRev);
+    
+    if (scoreFwd > scoreRev + 0.1) {
+      trip.direction_id = '0';
+    } else if (scoreRev > scoreFwd + 0.1) {
+      trip.direction_id = '1';
+    } else {
+      if (refBearing !== null && stopsIndex && seq.length >= 2) {
+        const firstStop = stopsIndex[seq[0]];
+        const lastStop = stopsIndex[seq[seq.length - 1]];
+        
+        if (firstStop && lastStop) {
+          const lat1 = parseFloat(firstStop.stop_lat);
+          const lon1 = parseFloat(firstStop.stop_lon);
+          const lat2 = parseFloat(lastStop.stop_lat);
+          const lon2 = parseFloat(lastStop.stop_lon);
+          
+          if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+            const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
+            
+            let diff = Math.abs(tripBearing - refBearing);
+            if (diff > 180) diff = 360 - diff;
+            
+            trip.direction_id = diff < 90 ? '0' : '1';
+          } else {
+            trip.direction_id = '0';
+          }
+        } else {
+          trip.direction_id = '0';
+        }
+      } else {
+        trip.direction_id = '0';
+      }
+    }
+  });
+}
+
+// Async version with chunked processing to prevent UI freezes
+async function enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress) {
+  const tripsByRoute = {};
+  
+  for (const trip of trips) {
+    if (!trip || !trip.trip_id) continue;
+    
+    const routeId = trip.route_id || 'unknown';
+    if (!tripsByRoute[routeId]) {
+      tripsByRoute[routeId] = [];
+    }
+    tripsByRoute[routeId].push(trip);
+  }
+  
+  const routeIds = Object.keys(tripsByRoute);
+  const CHUNK_SIZE = 10; // Process 10 routes at a time
+  
+  for (let i = 0; i < routeIds.length; i += CHUNK_SIZE) {
+    const chunk = routeIds.slice(i, i + CHUNK_SIZE);
+    
+    chunk.forEach(routeId => {
+      enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
+    });
+    
+    // Update progress
+    if (onProgress) {
+      const percent = Math.round(((i + chunk.length) / routeIds.length) * 100);
+      onProgress(i + chunk.length, routeIds.length, percent);
+    }
+    
+    // Yield to browser to keep UI responsive
+    if (i + CHUNK_SIZE < routeIds.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+}
+
+// Synchronous version for backward compatibility
 function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
   const tripsByRoute = {};
   
@@ -1565,123 +1714,8 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     tripsByRoute[routeId].push(trip);
   }
   
-  // Process each route
   for (const routeId in tripsByRoute) {
-    const routeTrips = tripsByRoute[routeId];
-    
-    const tripsToProcess = routeTrips.filter(t => 
-      !t.direction_id || t.direction_id === ''
-    );
-    
-    if (tripsToProcess.length === 0) continue;
-    
-    const tripPatterns = tripsToProcess.map(trip => ({
-      tripId: trip.trip_id,
-      trip: trip,
-      sequence: getTripStopSequence(trip.trip_id, stopTimesIndex)
-    }));
-    
-    const validPatterns = tripPatterns.filter(p => p.sequence.length > 0);
-    
-    if (validPatterns.length === 0) {
-      // No valid patterns, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
-    if (isCircular) {
-      // All trips are circular, assign direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    // STEP 3: Reward-only subsequence matching with bearing tiebreaker
-    let refPattern = null;
-    let maxLen = 0;
-    
-    for (const pattern of validPatterns) {
-      if (pattern.sequence.length > maxLen) {
-        maxLen = pattern.sequence.length;
-        refPattern = pattern;
-      }
-    }
-    
-    if (!refPattern || refPattern.sequence.length === 0) {
-      // No valid reference pattern, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    const patternFwd = refPattern.sequence;
-    const patternRev = [...patternFwd].reverse();
-    
-    let refBearing = null;
-    if (stopsIndex && patternFwd.length >= 2) {
-      const firstStop = stopsIndex[patternFwd[0]];
-      const lastStop = stopsIndex[patternFwd[patternFwd.length - 1]];
-      
-      if (firstStop && lastStop) {
-        const lat1 = parseFloat(firstStop.stop_lat);
-        const lon1 = parseFloat(firstStop.stop_lon);
-        const lat2 = parseFloat(lastStop.stop_lat);
-        const lon2 = parseFloat(lastStop.stop_lon);
-        
-        if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
-          refBearing = calculateBearing(lat1, lon1, lat2, lon2);
-        }
-      }
-    }
-    
-    // Score each trip against both patterns
-    tripsToProcess.forEach(trip => {
-      const seq = getTripStopSequence(trip.trip_id, stopTimesIndex);
-      
-      if (!seq || seq.length === 0) {
-        trip.direction_id = '0';
-        return;
-      }
-      
-      const scoreFwd = tripSequenceScore(seq, patternFwd);
-      const scoreRev = tripSequenceScore(seq, patternRev);
-      
-      // If scores are clearly different, use the higher score
-      if (scoreFwd > scoreRev + 0.1) {
-        trip.direction_id = '0';
-      } else if (scoreRev > scoreFwd + 0.1) {
-        trip.direction_id = '1';
-      } else {
-        // Scores are equal or very close - use bearing as tiebreaker
-        if (refBearing !== null && stopsIndex && seq.length >= 2) {
-          const firstStop = stopsIndex[seq[0]];
-          const lastStop = stopsIndex[seq[seq.length - 1]];
-          
-          if (firstStop && lastStop) {
-            const lat1 = parseFloat(firstStop.stop_lat);
-            const lon1 = parseFloat(firstStop.stop_lon);
-            const lat2 = parseFloat(lastStop.stop_lat);
-            const lon2 = parseFloat(lastStop.stop_lon);
-            
-            if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
-              const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
-              
-              let diff = Math.abs(tripBearing - refBearing);
-              if (diff > 180) diff = 360 - diff;
-              
-              // If bearings are similar (within 90°), same direction
-              // If bearings are opposite (>90°), reverse direction
-              trip.direction_id = diff < 90 ? '0' : '1';
-            } else {
-              trip.direction_id = '0'; // Fallback
-            }
-          } else {
-            trip.direction_id = '0'; // Fallback
-          }
-        } else {
-          trip.direction_id = '0'; // Fallback for equal scores without bearing data
-        }
-      }
-    });
+    enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
   }
 }
 
@@ -2271,10 +2305,14 @@ perfTimings.parseEnd = performance.now();
         perfTimings.indexStart = performance.now();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         
-        // Generate missing direction_id values
+        // Generate missing direction_id values with chunked processing
         state.loadingStep = 'Generowanie brakujących direction_id...'; render();
         perfTimings.enrichStart = performance.now();
-        enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex);
+        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
+          state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
+          state.loadingProgressPercent = percent;
+          render();
+        });
         perfTimings.enrichEnd = performance.now();
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
@@ -2290,6 +2328,7 @@ const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
 // FAZA 1.4 & 2.6: Clear caches when loading new data
 clearStationCache();
 clearStopsSearchIndex();
+clearStopToRoutesCache();
 cachedGroupsArray = null;
 lastStopsDataHash = null;
 
@@ -2347,35 +2386,26 @@ if (dates.length > 0) {
         const totalTime = perfTimings.indexEnd - perfTimings.totalStart;
         const unzipTime = perfTimings.unzipEnd - perfTimings.unzipStart;
         const parseTime = perfTimings.parseEnd - perfTimings.parseStart;
-        const stopTimesTime = perfTimings.stopTimesEnd - perfTimings.stopTimesStart;
-        const shapesTime = perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0;
-        const indexTime = perfTimings.indexEnd - perfTimings.indexStart;
-        const enrichTime = perfTimings.enrichEnd - perfTimings.enrichStart;
+        // Performance metrics available for debugging if needed
+        const perfMetrics = {
+          totalTime: performance.now() - perfTimings.totalStart,
+          unzipTime: perfTimings.unzipEnd - perfTimings.unzipStart,
+          parseTime: perfTimings.parseEnd - perfTimings.parseStart,
+          stopTimesTime: perfTimings.stopTimesEnd - perfTimings.stopTimesStart,
+          shapesTime: perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0,
+          indexTime: perfTimings.indexEnd - perfTimings.indexStart,
+          enrichTime: perfTimings.enrichEnd - perfTimings.enrichStart,
+          dataSummary: {
+            routes: routes.length,
+            trips: trips.length,
+            stops: stops.length,
+            stopTimes: Object.keys(stopTimesIndex).length,
+            shapes: Object.keys(shapesIndex).length
+          }
+        };
         
-        console.log('═══════════════════════════════════════════════');
-        console.log('GTFS LOADING PERFORMANCE REPORT');
-        console.log('═══════════════════════════════════════════════');
-        console.log(`Total loading time: ${totalTime.toFixed(2)} ms (${(totalTime/1000).toFixed(2)} s)`);
-        console.log('');
-        console.log('Breakdown by phase:');
-        console.log(`  1. Unzip:           ${unzipTime.toFixed(2)} ms (${((unzipTime/totalTime)*100).toFixed(1)}%)`);
-        console.log(`  2. Parse CSV files: ${parseTime.toFixed(2)} ms (${((parseTime/totalTime)*100).toFixed(1)}%)`);
-        console.log(`  3. Parse stop_times:${stopTimesTime.toFixed(2)} ms (${((stopTimesTime/totalTime)*100).toFixed(1)}%)`);
-        if (shapesTime > 0) {
-          console.log(`  4. Parse shapes:    ${shapesTime.toFixed(2)} ms (${((shapesTime/totalTime)*100).toFixed(1)}%)`);
-        }
-        console.log(`  5. Build indexes:   ${indexTime.toFixed(2)} ms (${((indexTime/totalTime)*100).toFixed(1)}%)`);
-        console.log(`  6. Enrich data:     ${enrichTime.toFixed(2)} ms (${((enrichTime/totalTime)*100).toFixed(1)}%)`);
-        console.log('');
-        console.log('Data summary:');
-        console.log(`  Routes: ${routes.length.toLocaleString()}`);
-        console.log(`  Trips: ${trips.length.toLocaleString()}`);
-        console.log(`  Stops: ${stops.length.toLocaleString()}`);
-        console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips`);
-        if (Object.keys(shapesIndex).length > 0) {
-          console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
-        }
-        console.log('═══════════════════════════════════════════════');
+        // Store metrics in state for optional display
+        state.lastLoadMetrics = perfMetrics;
 
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
@@ -5182,6 +5212,46 @@ function searchStopsInIndex(query, groupsArray) {
     }));
 }
 
+// Async search with chunked processing to prevent UI freeze on large datasets
+async function searchStopsInIndexAsync(query, groupsArray, onProgress) {
+  if (!query || query.trim() === '') return groupsArray;
+  
+  const index = buildStopsSearchIndex(groupsArray);
+  const lowerQuery = query.toLowerCase().trim();
+  const results = [];
+  
+  const CHUNK_SIZE = 200; // Process 200 items at a time
+  
+  for (let i = 0; i < index.length; i += CHUNK_SIZE) {
+    const chunk = index.slice(i, i + CHUNK_SIZE);
+    
+    chunk.forEach(item => {
+      if (item.searchText.includes(lowerQuery)) {
+        results.push({
+          id: item.id,
+          name: item.name,
+          routeCount: item.routeCount,
+          stops: item.stops,
+          routeSet: item.routeSet
+        });
+      }
+    });
+    
+    // Report progress for very large datasets
+    if (onProgress && index.length > 1000) {
+      const percent = Math.round(((i + chunk.length) / index.length) * 100);
+      onProgress(percent);
+    }
+    
+    // Yield to browser every 200 items to keep UI responsive
+    if (i + CHUNK_SIZE < index.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+  
+  return results;
+}
+
 function getOrBuildGroupsArray(stopsData) {
   const currentHash = stopsData.length + '_' + (stopsData[0]?.stop_id || '');
   
@@ -5298,30 +5368,92 @@ function renderVirtualStopsList(groupsToRender) {
   }
 }
 
-function renderStopsView() {
+// Cached stop-to-routes mapping to avoid rebuilding
+let cachedStopToRoutesMap = null;
+let cachedStopToRoutesHash = null;
+
+// Build stop-to-routes mapping with chunked processing to prevent UI freeze
+async function buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress) {
+  const stopToRoutes = new Map();
+  const CHUNK_SIZE = 20; // Process 20 routes at a time
+  
+  for (let i = 0; i < routes.length; i += CHUNK_SIZE) {
+    const routeChunk = routes.slice(i, i + CHUNK_SIZE);
+    
+    routeChunk.forEach(route => {
+      const trips = tripsIndex[route.route_id] || [];
+      const stopIds = new Set();
+      
+      trips.forEach(trip => {
+        const stopTimes = stopTimesIndex[trip.trip_id] || [];
+        stopTimes.forEach(st => stopIds.add(st.stop_id));
+      });
+      
+      stopIds.forEach(stopId => {
+        if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
+        stopToRoutes.get(stopId).push(route);
+      });
+    });
+    
+    // Report progress
+    if (onProgress) {
+      const percent = Math.round(((i + routeChunk.length) / routes.length) * 100);
+      onProgress(i + routeChunk.length, routes.length, percent);
+    }
+    
+    // Yield to browser to keep UI responsive
+    if (i + CHUNK_SIZE < routes.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+  
+  return stopToRoutes;
+}
+
+// Get or build stop-to-routes mapping with caching
+async function getStopToRoutesMap(routes, tripsIndex, stopTimesIndex, onProgress) {
+  const currentHash = routes.length + '_' + Object.keys(tripsIndex).length;
+  
+  if (cachedStopToRoutesMap && cachedStopToRoutesHash === currentHash) {
+    return cachedStopToRoutesMap;
+  }
+  
+  const stopToRoutes = await buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress);
+  
+  cachedStopToRoutesMap = stopToRoutes;
+  cachedStopToRoutesHash = currentHash;
+  
+  return stopToRoutes;
+}
+
+function clearStopToRoutesCache() {
+  cachedStopToRoutesMap = null;
+  cachedStopToRoutesHash = null;
+}
+
+async function renderStopsView() {
   if (!state.gtfsData || !state.showStopsView) return;
   
   const stopsList = $('stops-list');
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
   
+  // Show loading indicator for initial data preparation
+  const isInitialLoad = !cachedStopToRoutesMap;
+  if (isInitialLoad) {
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
+  }
+  
+  const stopToRoutes = await getStopToRoutesMap(
+    state.gtfsData.routes,
+    state.gtfsData.tripsIndex,
+    state.gtfsData.stopTimesIndex,
+    isInitialLoad ? (processed, total, percent) => {
+      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
+    } : null
+  );
+  
   const stopsData = [];
-  const stopToRoutes = new Map();
-  
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    const stopIds = new Set();
-    trips.forEach(trip => {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-      stopTimes.forEach(st => stopIds.add(st.stop_id));
-    });
-    
-    stopIds.forEach(stopId => {
-      if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
-      stopToRoutes.get(stopId).push(route);
-    });
-  });
-  
   Object.values(state.gtfsData.stopsIndex).forEach(stop => {
     const routes = stopToRoutes.get(stop.stop_id) || [];
     if (routes.length > 0) {
@@ -5339,7 +5471,19 @@ function renderStopsView() {
   const groupsArray = getOrBuildGroupsArray(stopsData);
   
   const searchQuery = state.stopsListSearchQuery;
-  const filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
+  
+  // Use async search for large datasets to prevent UI freeze
+  let filteredGroups;
+  if (groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '') {
+    // Show searching indicator
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Wyszukiwanie...</div>';
+    filteredGroups = await searchStopsInIndexAsync(searchQuery, groupsArray, (percent) => {
+      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Wyszukiwanie... ${percent}%</div>`;
+    });
+  } else {
+    // For smaller datasets, use synchronous search
+    filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
+  }
   
   const useVirtualList = filteredGroups.length > 100; // Threshold
 
