@@ -3128,16 +3128,15 @@ function buildRouteProfileForCurrentSelection() {
   });
   
   // 🎯 Pokaż kryteria filtrowania (jeśli jakieś istnieją)
-  console.log(`  🎯 Kryteria filtrowania:`);
+  console.log(`  🎯 Kryteria filtrowania (przed nodeTypes classification):`);
   console.log(`     - Filtrowanie po direction_id: TAK (${dir})`);
-  console.log(`     - Filtrowanie zajezdni/depotów: BRAK ❌`);
+  console.log(`     - Filtrowanie zajezdni/depotów: JESZCZE NIE (classification w toku...)`);
   console.log(`     - Filtrowanie krótkich trips: BRAK ❌`);
   console.log(`     - Min liczba stops: BRAK (brak limitu)`);
-  console.log(`  ⚠️ UWAGA: Wszystkie trips przechodzą dalej bez filtrowania depotów!`);
+  console.log(`  ⏳ Czekam na classification nodeTypes, potem filtrowanie depotów...`);
   
   // Output po "filtrowaniu" (brak zmian)
-  console.log(`  Output trips: ${allTrips.length} (bez zmian - brak filtrowania!)`);
-  console.log(`  ❌ Odfiltrowano: 0 trips (żadne filtrowanie nie działa!)\n`);
+  console.log(`  Output trips (przed nodeTypes): ${allTrips.length} (klasyfikacja depotów w toku...)\n`);
 
   // === NOWA LOGIKA: Budowanie wzorcowej trasy ===
   const CORE_THRESHOLD = 0.10; // 10%
