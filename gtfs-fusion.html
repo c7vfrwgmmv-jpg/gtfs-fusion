@@ -1386,6 +1386,37 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
 }
 
 /**
+ * Calculate how many stops from tripSeq appear in correct order in pattern (subsequence matching)
+ * @param {Array<string>} tripSeq - Trip stop sequence to score
+ * @param {Array<string>} pattern - Reference pattern to match against
+ * @returns {number} Score from 0 to 1 representing the ratio of matched stops
+ */
+function tripSequenceScore(tripSeq, pattern) {
+  // Count how many stops from tripSeq appear in correct order in pattern
+  // Only consider stops that exist in the pattern (ignore branch-specific stops)
+  const patternSet = new Set(pattern);
+  const relevantStops = tripSeq.filter(stop => patternSet.has(stop));
+  
+  if (relevantStops.length === 0) return 0;
+  
+  let matchCount = 0;
+  let idx = 0;
+  
+  for (let i = 0; i < relevantStops.length; i++) {
+    const val = relevantStops[i];
+    while (idx < pattern.length && pattern[idx] !== val) {
+      idx++;
+    }
+    if (idx < pattern.length) {
+      matchCount++;
+      idx++;
+    }
+  }
+  
+  return matchCount / relevantStops.length;
+}
+
+/**
  * Get stop sequence for a trip
  * @param {string} tripId - Trip ID
  * @param {Object} stopTimesIndex - Index of stop times by trip_id
@@ -1594,72 +1625,94 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       continue;
     }
     
-    // STEP 3A: Try to find reversed sequences
-    const reversedGroups = findReversedPair(validPatterns);
-    
-    if (reversedGroups && reversedGroups.group1 && reversedGroups.group1.length > 0) {
-      // Found reversed pairs, assign direction_id
-      const group0Set = new Set(reversedGroups.group0);
-      const group1Set = new Set(reversedGroups.group1);
-      
-      tripsToProcess.forEach(trip => {
-        if (group0Set.has(trip.trip_id)) {
-          trip.direction_id = '0';
-        } else if (group1Set.has(trip.trip_id)) {
-          trip.direction_id = '1';
-        } else {
-          trip.direction_id = '0'; // Fallback
-        }
-      });
-      continue;
-    }
-    
-    // STEP 3B: Geographic analysis (bearing-based)
-    const bearingData = [];
+    // STEP 3: Reward-only subsequence matching with bearing tiebreaker
+    // Find the longest trip to use as the reference pattern
+    let refPattern = null;
+    let maxLen = 0;
     
     for (const pattern of validPatterns) {
-      const seq = pattern.sequence;
-      if (seq.length < 2) continue;
-      
-      // Get first and last stop coordinates
-      const firstStop = stopsIndex[seq[0]];
-      const lastStop = stopsIndex[seq[seq.length - 1]];
-      
-      if (!firstStop || !lastStop) continue;
-      
-      const lat1 = parseFloat(firstStop.stop_lat);
-      const lon1 = parseFloat(firstStop.stop_lon);
-      const lat2 = parseFloat(lastStop.stop_lat);
-      const lon2 = parseFloat(lastStop.stop_lon);
-      
-      if (isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) continue;
-      
-      const bearing = calculateBearing(lat1, lon1, lat2, lon2);
-      bearingData.push({
-        tripId: pattern.tripId,
-        bearing: bearing
-      });
+      if (pattern.sequence.length > maxLen) {
+        maxLen = pattern.sequence.length;
+        refPattern = pattern;
+      }
     }
     
-    if (bearingData.length === 0) {
-      // No geographic data, assign all to direction 0
+    if (!refPattern || refPattern.sequence.length === 0) {
+      // No valid reference pattern, assign all to direction 0
       tripsToProcess.forEach(trip => trip.direction_id = '0');
       continue;
     }
     
-    // Cluster by bearing
-    const bearingGroups = clusterByBearing(bearingData);
+    // Create forward and reverse patterns
+    const patternFwd = refPattern.sequence;
+    const patternRev = [...patternFwd].reverse();
     
-    const bearingGroup0Set = new Set(bearingGroups.group0);
-    const bearingGroup1Set = bearingGroups.group1 ? new Set(bearingGroups.group1) : null;
+    // Calculate reference bearing (from first to last stop of pattern)
+    let refBearing = null;
+    if (stopsIndex && patternFwd.length >= 2) {
+      const firstStop = stopsIndex[patternFwd[0]];
+      const lastStop = stopsIndex[patternFwd[patternFwd.length - 1]];
+      
+      if (firstStop && lastStop) {
+        const lat1 = parseFloat(firstStop.stop_lat);
+        const lon1 = parseFloat(firstStop.stop_lon);
+        const lat2 = parseFloat(lastStop.stop_lat);
+        const lon2 = parseFloat(lastStop.stop_lon);
+        
+        if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+          refBearing = calculateBearing(lat1, lon1, lat2, lon2);
+        }
+      }
+    }
     
+    // Score each trip against both patterns
     tripsToProcess.forEach(trip => {
-      if (bearingGroup0Set.has(trip.trip_id)) {
+      const seq = getTripStopSequence(trip.trip_id, stopTimesIndex);
+      
+      if (!seq || seq.length === 0) {
         trip.direction_id = '0';
-      } else if (bearingGroup1Set && bearingGroup1Set.has(trip.trip_id)) {
+        return;
+      }
+      
+      const scoreFwd = tripSequenceScore(seq, patternFwd);
+      const scoreRev = tripSequenceScore(seq, patternRev);
+      
+      // If scores are clearly different, use the higher score
+      if (scoreFwd > scoreRev + 0.1) {
+        trip.direction_id = '0';
+      } else if (scoreRev > scoreFwd + 0.1) {
         trip.direction_id = '1';
       } else {
-        trip.direction_id = '0'; // Fallback
+        // Scores are equal or very close - use bearing as tiebreaker
+        if (refBearing !== null && stopsIndex && seq.length >= 2) {
+          const firstStop = stopsIndex[seq[0]];
+          const lastStop = stopsIndex[seq[seq.length - 1]];
+          
+          if (firstStop && lastStop) {
+            const lat1 = parseFloat(firstStop.stop_lat);
+            const lon1 = parseFloat(firstStop.stop_lon);
+            const lat2 = parseFloat(lastStop.stop_lat);
+            const lon2 = parseFloat(lastStop.stop_lon);
+            
+            if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+              const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
+              
+              // Calculate bearing difference (accounting for wrap-around)
+              let diff = Math.abs(tripBearing - refBearing);
+              if (diff > 180) diff = 360 - diff;
+              
+              // If bearings are similar (within 90°), same direction
+              // If bearings are opposite (>90°), reverse direction
+              trip.direction_id = diff < 90 ? '0' : '1';
+            } else {
+              trip.direction_id = '0'; // Fallback
+            }
+          } else {
+            trip.direction_id = '0'; // Fallback
+          }
+        } else {
+          trip.direction_id = '0'; // Fallback for equal scores without bearing data
+        }
       }
     });
   }
