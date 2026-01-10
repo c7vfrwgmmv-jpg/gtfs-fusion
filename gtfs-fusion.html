@@ -2685,176 +2685,6 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
   return nodeTypes;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// DEBUG UTILITIES
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Debug function to analyze and display stop classifications.
- * Call from browser console: debugStopCategories()
- * 
- * Displays a table showing:
- * - Stop ID and name
- * - nodeType classification (core/passenger/tail)
- * - Boundary frequency (connection to core)
- * - Max edge frequency
- * - Whether stop appears between core start/end
- * - Pickup/dropoff flags
- */
-window.debugStopCategories = function debugStopCategories() {
-  try {
-    const profile = getCurrentRouteProfile();
-    if (!profile) {
-      console.warn('[debugStopCategories] Brak profilu trasy dla bieżącej selekcji.');
-      return;
-    }
-    const { coreStops, nodeTypes } = profile;
-    const coreSet = new Set(coreStops || []);
-
-    // Zbierz ALL trips dla bieżącej linii + kierunku (bez filtra daty), jak w profilu
-    const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData || {};
-    if (!stopTimesIndex || !tripsIndex || !stopsIndex) {
-      console.warn('[debugStopCategories] Brak gtfsData (stopTimesIndex/tripsIndex/stopsIndex).');
-      return;
-    }
-
-    let routeIds = [];
-    if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
-      routeIds = state.selectedRouteGroup.members.map(r => r.route_id).filter(Boolean);
-    } else if (state.selectedRoute) {
-      routeIds = [state.selectedRoute.route_id].filter(Boolean);
-    }
-    const dir = state.selectedDirection || '0';
-
-    let allTrips = [];
-    routeIds.forEach(rid => {
-      const ts = (tripsIndex[rid] || []).filter(t => (t.direction_id || '0') === dir);
-      allTrips = allTrips.concat(ts);
-    });
-    if (!allTrips.length) {
-      console.warn('[debugStopCategories] Brak trips dla bieżącej linii + kierunku.');
-      return;
-    }
-
-    // Zbuduj tripStopMaps
-    const tripStopMaps = {};
-    allTrips.forEach(trip => {
-      const sts = (stopTimesIndex[trip.trip_id] || [])
-        .filter(st => st && st.stop_id)
-        .sort((a,b) => parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10));
-      tripStopMaps[trip.trip_id] = sts;
-    });
-
-    // Policz częstości krawędzi
-    const edgeFrequency = calculateStopEdgeFrequency(allTrips, tripStopMaps);
-
-    // Częstość styku rdzeń<->stop
-    const boundaryFreqMap = computeCoreBoundaryFrequency(edgeFrequency, coreStops);
-    const boundaryFreq = {};
-    boundaryFreqMap.forEach((freq, stopId) => {
-      boundaryFreq[stopId] = freq;
-    });
-
-    // Helper: czy stop pojawia się między coreStart/coreEnd w jakimkolwiek tripie
-    const coreStart = coreStops?.[0];
-    const coreEnd = coreStops?.[coreStops.length - 1];
-    function appearsBetweenCore(stopId) {
-      if (!coreStart || !coreEnd) return false;
-      for (const trip of allTrips) {
-        const stops = tripStopMaps[trip.trip_id] || [];
-        let stopIdx = -1, coreStartIdx = -1, coreEndIdx = -1;
-        for (let i = 0; i < stops.length; i++) {
-          if (stops[i].stop_id === stopId) stopIdx = i;
-          if (stops[i].stop_id === coreStart) coreStartIdx = i;
-          if (stops[i].stop_id === coreEnd) coreEndIdx = i;
-        }
-        if (stopIdx !== -1 && coreStartIdx !== -1 && coreEndIdx !== -1) {
-          const minCoreIdx = Math.min(coreStartIdx, coreEndIdx);
-          const maxCoreIdx = Math.max(coreStartIdx, coreEndIdx);
-          if (stopIdx > minCoreIdx && stopIdx < maxCoreIdx) return true;
-        }
-      }
-      return false;
-    }
-
-    // Zbierz wszystkie stop_id z allTrips
-    const allStopIds = new Set();
-    allTrips.forEach(trip => {
-      (tripStopMaps[trip.trip_id] || []).forEach(st => allStopIds.add(st.stop_id));
-    });
-
-    // Zbuduj dane do tabeli
-    const rows = [];
-    allStopIds.forEach(stopId => {
-      const nt = nodeTypes?.[stopId] || '(unclassified)';
-      const name = stopsIndex[stopId]?.stop_name || stopId;
-      const bFreq = boundaryFreq[stopId] ?? null;
-      // maxEdgeFreq stopu (max po krawędziach z/na stop)
-      const edges = Object.keys(edgeFrequency).filter(e => e.startsWith(stopId + '->') || e.endsWith('->' + stopId));
-      const maxEdge = edges.length ? Math.max(...edges.map(e => edgeFrequency[e] || 0)) : null;
-      // pickup/dropoff flags (zagregowane przybliżenie)
-      let hasPickup1 = false, hasDropoff1 = false;
-      if (profile.stopMetadata && profile.stopMetadata[stopId]) {
-        const m = profile.stopMetadata[stopId];
-        hasPickup1 = !!m.hasPickup1;
-        hasDropoff1 = !!m.hasDropOff1;
-      } else {
-        // fallback: sprawdź surowo
-        allTrips.forEach(trip => {
-          const st = (tripStopMaps[trip.trip_id] || []).find(s => s.stop_id === stopId);
-          if (st) {
-            const p = String(st.pickup_type || '0').trim();
-            const d = String(st.drop_off_type || '0').trim();
-            if (p === '1') hasPickup1 = true;
-            if (d === '1') hasDropoff1 = true;
-          }
-        });
-      }
-
-      rows.push({
-        stop_id: stopId,
-        name,
-        nodeType: nt,
-        boundaryFreq: bFreq,
-        maxEdgeFreq: maxEdge,
-        betweenCore: appearsBetweenCore(stopId),
-        hasPickup1,
-        hasDropoff1,
-        isCore: coreSet.has(stopId)
-      });
-    });
-
-    // Wypisz do konsoli
-    console.group('%c[GTFS-Fusion] Klasyfikacja przystanków', 'color:#2563eb;font-weight:700;');
-    const coreRows = rows.filter(r => r.nodeType === 'core' || r.isCore);
-    const passengerRows = rows.filter(r => r.nodeType === 'passenger');
-    const tailRows = rows.filter(r => r.nodeType === 'tail');
-    const unclassifiedRows = rows.filter(r => r.nodeType === '(unclassified)');
-
-    console.groupCollapsed('Core');
-    console.table(coreRows);
-    console.groupEnd();
-
-    console.groupCollapsed('Passenger');
-    console.table(passengerRows);
-    console.groupEnd();
-
-    console.groupCollapsed('Tail');
-    console.table(tailRows);
-    console.groupEnd();
-
-    if (unclassifiedRows.length) {
-      console.groupCollapsed('Unclassified');
-      console.table(unclassifiedRows);
-      console.groupEnd();
-    }
-
-    console.groupEnd();
-  } catch (err) {
-    console.error('[debugStopCategories] Błąd debugowania:', err);
-  }
-};
-
 function getCurrentRouteProfile() {
   if (!state.selectedRoute || !state.gtfsData) return null;
 
@@ -4118,101 +3948,14 @@ function adjacentSwapOrder(trips, tripMappings, visiblePassengerRowIndices, para
 }
 
 /**
- * Debug helper: compute quality of adjacent-swaps ordering
- * 
- * Counts remaining adjacent inversions after ordering, where an inversion is
- * a pair (i, i+1) where left times frequently exceed right times by margin.
- * 
- * @param {Array} orderedTrips - Trips array after ordering
- * @param {Array} tripMappings - Trip mappings aligned to orderedTrips
- * @param {Array} visiblePassengerRowIndices - Row indices to consider
- * @returns {Object} { inversions, samplePairs }
- */
-function debugAdjacentSwapQuality(orderedTrips, tripMappings, visiblePassengerRowIndices) {
-  if (!orderedTrips || orderedTrips.length <= 1) {
-    return { inversions: 0, samplePairs: [] };
-  }
-  
-  const marginMinutes = adjacentSwapOrderConfig.marginMinutes;
-  let inversions = 0;
-  const samplePairs = [];
-  
-  // Check each adjacent pair
-  for (let i = 0; i < orderedTrips.length - 1; i++) {
-    let votesInversion = 0;
-    
-    // Count inversion votes across visible passenger rows
-    for (const rowIdx of visiblePassengerRowIndices) {
-      const stopL = tripMappings[i][rowIdx];
-      const stopR = tripMappings[i + 1][rowIdx];
-      
-      if (!stopL || !stopR) continue;
-      
-      const timeL = stopL.departure_time || stopL.arrival_time;
-      const timeR = stopR.departure_time || stopR.arrival_time;
-      
-      if (!timeL || !timeR) continue;
-      
-      const minutesL = timeToMinutes(timeL);
-      const minutesR = timeToMinutes(timeR);
-      
-      // Count as inversion if left is significantly later than right
-      if (minutesL > minutesR + marginMinutes) {
-        votesInversion++;
-      }
-    }
-    
-    // If pair has inversions, count it
-    if (votesInversion >= adjacentSwapOrderConfig.voteThreshold) {
-      inversions++;
-      if (samplePairs.length < 5) {
-        samplePairs.push({
-          leftTrip: orderedTrips[i].trip_id,
-          rightTrip: orderedTrips[i + 1].trip_id,
-          inversionVotes: votesInversion
-        });
-      }
-    }
-  }
-  
-  return { inversions, samplePairs };
-}
-
-// Expose debug function to window scope for console access
-window.debugAdjacentSwapQuality = debugAdjacentSwapQuality;
-
-/**
- * NOTE: This function is DEPRECATED and no longer used in renderTimetable.
- * It is kept for reference only. The timetable now uses adjacentSwapOrder instead.
- * 
- * Compute globally chronological column order using pairwise ranking (Copeland-like).
- * 
- * PURPOSE: Achieve globally chronological trip ordering (columns) so times tend to 
- * increase left→right across visible rows, without relying on a single anchor that 
- * can cause local inversions.
- * 
- * ALGORITHM:
- * - For each pair of trips (A, B), count how many visible rows have time[A] < time[B]
- * - Score each trip as (wins - losses) across all pairwise comparisons
- * - Sort trips by descending score (higher score = comes first/left)
- * 
- * TIE-BREAKERS (in order):
- * 1. Time at first core row (ascending - earlier comes first)
- * 2. Time at last core row (ascending - earlier comes first)
- * 3. trip_id (alphabetical - deterministic)
- * 
- * CACHING:
- * - Column order is cached per (route key, direction, date, showAllTrips)
- * - Cache is invalidated when any of these parameters change
- * - Typical complexity: O(n²·m) where n=trips, m=visible rows
- *   With typical values (n≤100, m≤50), this is acceptable
+ * Find the most common trip pattern (sequence of stops) for a given stop.
+ * Used to identify the typical route variant that serves a stop.
  * 
  * @param {Array} trips - List of trip objects
- * @param {Object} tripStopMaps - Map of trip_id -> stopTimes array
- * @param {Array} visibleRowIndices - Indices of visible rows in masterList
- * @param {Array} masterList - The canonical master list
- * @param {Array} tripMappings - Mappings of trips to master list rows
- * @returns {Array} Reordered trips array
+ * @param {Object} stopTimesIndex - Map of trip_id -> stopTimes array
+ * @param {string} stopId - The stop ID to analyze
+ * @param {Array} activeServices - List of active service IDs
+ * @returns {Object|null} Object with tripId, stopIds array, and frequency count
  */
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
   const patternCounts = new Map(); // klucz: "stop1,stop2,stop3...", wartość: count
@@ -6593,11 +6336,20 @@ function openStopTimetable(stopId) {
      * @returns {string} Jeden z VIEW.*
      */
     function getCurrentView() {
+      // Early returns in order of precedence - simpler flow with clear hierarchy
       if (state.loading) return VIEW.LOADING;
       if (state.error) return VIEW.ERROR;
       if (!state.gtfsData) return VIEW.UPLOAD;
-      if (!state.selectedRoute && state.showStopsView && state.selectedStop) return VIEW.STOP_DETAIL;
-      if (!state.selectedRoute && state.showStopsView) return VIEW.STOPS_LIST;
+      
+      // Stop-related views (check selectedStop before showStopsView for specificity)
+      if (!state.selectedRoute && state.showStopsView && state.selectedStop) {
+        return VIEW.STOP_DETAIL;
+      }
+      if (!state.selectedRoute && state.showStopsView) {
+        return VIEW.STOPS_LIST;
+      }
+      
+      // Route views
       if (!state.selectedRoute) return VIEW.ROUTES_LIST;
       return VIEW.ROUTE_TIMETABLE;
     }
@@ -7075,16 +6827,8 @@ document.querySelectorAll('.route-filter-btn').forEach(btn => {
 });
 // -- KONIEC BLOKU obsługi kliknięć --		
 
-$('direction-select')?.addEventListener('change', async (e) => {
-    const newDirection = String(e.target.value);
-    if (newDirection === state.selectedDirection) return; // Avoid redundant updates
-    state.selectedDirection = newDirection;
-    // Invalidate canonical cache when direction changes
-    invalidateCanonicalCacheForCurrentSelection();
-    resetMap();
-    render();
-  });		
-
+// WARNING: Do not duplicate these event listeners - they should only be registered once
+// to avoid multiple callbacks firing on each change
 $('direction-select')?.addEventListener('change', async (e) => {
     const newDirection = String(e.target.value);
     if (newDirection === state.selectedDirection) return; // Avoid redundant updates
