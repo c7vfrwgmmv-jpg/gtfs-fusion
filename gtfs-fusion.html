@@ -3259,11 +3259,14 @@ if ((masterList[i].stopIds && masterList[i].stopIds.includes(sId)) ||
 // At render time, only row VISIBILITY is filtered - rows are never reordered.
 // 
 // ALGORITHM:
-// 1. Use route profile's coreStops to define windows between consecutive core stations
-// 2. For each window, collect all branch stations that appear between those core stations
-// 3. Rank branch stations by median normalized position within the window
+// 1. Use route profile's coreStops to define segments:
+//    - Pre-core: stops before first core (variant starting points)
+//    - Windows: stops between consecutive core stations (branches)
+//    - Post-core: stops after last core (variant ending points)
+// 2. For each segment, collect all stations that appear in that segment
+// 3. Rank stations by median normalized position within the segment
 // 4. Stable tie-breaking: name (alphabetical), then stop_id
-// 5. Build canonical rows: core stations in order, with branch stations inserted between
+// 5. Build canonical rows: pre-core, first core, [windows with branches], last core, post-core
 // 6. Preserve nodeType (tail/passenger/core) from profile for each row
 // 
 // RENDERING:
@@ -3300,11 +3303,14 @@ function getCanonicalKeyForCurrentSelection() {
  * 
  * Algorithm:
  * 1. Get core stops from profile (ordered sequence of main stations)
- * 2. Define windows between consecutive core stations
- * 3. For each window, collect all branch stations that appear between those core stations
- * 4. Rank branch stations by median normalized position within the window
+ * 2. Define segments: pre-core, windows between consecutive cores, post-core
+ * 3. For each segment, collect all branch stations that appear in that segment
+ * 4. Rank branch stations by median normalized position within the segment
  * 5. Stable tie-breaking: name, then stop_id
- * 6. Build final list: core stations in order, with branch stations inserted between them
+ * 6. Build final list: pre-core, first core, [windows with branches], last core, post-core
+ * 
+ * Pre-core: Stops before the first core station (e.g., variant starting points)
+ * Post-core: Stops after the last core station (e.g., variant ending points)
  */
 function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex) {
   if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
@@ -3356,12 +3362,18 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     });
   }
 
+  // Step 2b: Pre-core and post-core segments
+  const preCore = new Map(); // stationId -> { stopIds: [], positions: [] }
+  const postCore = new Map(); // stationId -> { stopIds: [], positions: [] }
+
   // Step 3: Process all trips to collect branch stations and their positions
   allTrips.forEach(trip => {
     const stopTimes = stopTimesIndex[trip.trip_id] || [];
     const sortedStops = stopTimes
       .filter(st => st && st.stop_id)
       .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+
+    if (sortedStops.length === 0) return;
 
     // Map stop positions in this trip
     const stopPositions = new Map();
@@ -3378,6 +3390,71 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       }
       return null;
     }).filter(x => x !== null);
+
+    // Find first and last core positions in this trip
+    const firstCorePos = corePositions.length > 0 
+      ? Math.min(...corePositions.map(cp => cp.position))
+      : -1;
+    const lastCorePos = corePositions.length > 0
+      ? Math.max(...corePositions.map(cp => cp.position))
+      : -1;
+
+    // Collect pre-core stops (before first core)
+    if (firstCorePos > 0) {
+      for (let pos = 0; pos < firstCorePos; pos++) {
+        const stopTime = sortedStops[pos];
+        const stopId = stopTime.stop_id;
+        const stationId = getStationId(stopId, stopsIndex);
+        
+        // Skip if this is a core station
+        if (seenStations.has(stationId)) continue;
+        
+        // Normalize position relative to firstCorePos [0, 1)
+        const normalizedPos = pos / firstCorePos;
+        
+        if (!preCore.has(stationId)) {
+          preCore.set(stationId, {
+            stopIds: [stopId],
+            positions: [normalizedPos]
+          });
+        } else {
+          const branch = preCore.get(stationId);
+          if (!branch.stopIds.includes(stopId)) {
+            branch.stopIds.push(stopId);
+          }
+          branch.positions.push(normalizedPos);
+        }
+      }
+    }
+
+    // Collect post-core stops (after last core)
+    if (lastCorePos >= 0 && lastCorePos < sortedStops.length - 1) {
+      const tripLength = sortedStops.length;
+      for (let pos = lastCorePos + 1; pos < tripLength; pos++) {
+        const stopTime = sortedStops[pos];
+        const stopId = stopTime.stop_id;
+        const stationId = getStationId(stopId, stopsIndex);
+        
+        // Skip if this is a core station
+        if (seenStations.has(stationId)) continue;
+        
+        // Normalize position relative to trip length [0, 1)
+        const normalizedPos = (pos - lastCorePos) / (tripLength - lastCorePos);
+        
+        if (!postCore.has(stationId)) {
+          postCore.set(stationId, {
+            stopIds: [stopId],
+            positions: [normalizedPos]
+          });
+        } else {
+          const branch = postCore.get(stationId);
+          if (!branch.stopIds.includes(stopId)) {
+            branch.stopIds.push(stopId);
+          }
+          branch.positions.push(normalizedPos);
+        }
+      }
+    }
 
     // For each window, collect branches
     for (let winIdx = 0; winIdx < windows.length; winIdx++) {
@@ -3424,18 +3501,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   // Step 4: Rank branch stations by median position and build final list
   const finalRows = [];
   
-  // Add first core station
-  finalRows.push({
-    id: coreStationGroups[0].stopIds[0],
-    name: getStationDisplayName(coreStationGroups[0].stationId, coreStationGroups[0].stopIds),
-    stopIds: coreStationGroups[0].stopIds,
-    nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
-  });
-
-  // For each window, add sorted branches, then the next core station
-  windows.forEach((window, winIdx) => {
-    // Sort branches by median position
-    const branchEntries = Array.from(window.branches.entries()).map(([stationId, data]) => {
+  // Helper function to create sorted branch entries from a Map
+  const createSortedBranchEntries = (branchMap) => {
+    const branchEntries = Array.from(branchMap.entries()).map(([stationId, data]) => {
       // Calculate median position
       const sorted = data.positions.slice().sort((a, b) => a - b);
       const mid = Math.floor(sorted.length / 2);
@@ -3461,6 +3529,33 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       return a.primaryStopId.localeCompare(b.primaryStopId);
     });
 
+    return branchEntries;
+  };
+
+  // Add pre-core stops (before first core station)
+  const preCoreBranches = createSortedBranchEntries(preCore);
+  preCoreBranches.forEach(branch => {
+    finalRows.push({
+      id: branch.primaryStopId,
+      name: branch.name,
+      stopIds: branch.stopIds,
+      nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+    });
+  });
+  
+  // Add first core station
+  finalRows.push({
+    id: coreStationGroups[0].stopIds[0],
+    name: getStationDisplayName(coreStationGroups[0].stationId, coreStationGroups[0].stopIds),
+    stopIds: coreStationGroups[0].stopIds,
+    nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
+  });
+
+  // For each window, add sorted branches, then the next core station
+  windows.forEach((window, winIdx) => {
+    // Sort branches by median position
+    const branchEntries = createSortedBranchEntries(window.branches);
+
     // Add branches to final list
     branchEntries.forEach(branch => {
       finalRows.push({
@@ -3478,6 +3573,17 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       name: getStationDisplayName(nextCore.stationId, nextCore.stopIds),
       stopIds: nextCore.stopIds,
       nodeType: nodeTypes[nextCore.stopIds[0]] || 'core'
+    });
+  });
+
+  // Add post-core stops (after last core station)
+  const postCoreBranches = createSortedBranchEntries(postCore);
+  postCoreBranches.forEach(branch => {
+    finalRows.push({
+      id: branch.primaryStopId,
+      name: branch.name,
+      stopIds: branch.stopIds,
+      nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
     });
   });
 
