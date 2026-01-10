@@ -3427,6 +3427,11 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
     return [];
   }
   
+  // 🆕 LOG 1: Początkowy stan
+  console.log('🏗️ buildMasterList() START:');
+  console.log(`  coreStops (${coreStops.length}):`, coreStops.slice(0, 8).join(' → '));
+  console.log(`  sortedTrips: ${sortedTrips.length} trips`);
+  
   // Step 2: Group core stops by station (merged stops)
   const stopsByStation = new Map();
   
@@ -3454,6 +3459,11 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
     stopIds: stopIds
   }));
   
+  // 🆕 LOG 2: Baza po dodaniu coreStops
+  console.log(`  📋 Baza masterList (${masterList.length}):`, 
+    masterList.slice(0, 8).map(m => m.name || m.id).join(' → ')
+  );
+  
   // Step 4: Add branch stops (stops outside core)
   // Cache stationId for each masterList entry for performance
   const masterListStationIds = masterList.map(entry => {
@@ -3461,7 +3471,7 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
   });
   
   // Process all trips to add stops not in core
-  sortedTrips.forEach((trip, tripIndex) => {
+  sortedTrips.forEach((trip, tripIdx) => {
     const tripStops = tripStopMaps[trip.trip_id] || [];
     
     // 🆕 DODAJ LOG dla pierwszych 3 trips:
@@ -3476,6 +3486,19 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
     }
     
     let lastMasterIdx = -1;
+    
+    // 🆕 LOG 3: Tylko dla pierwszego tripu - pokaż WSZYSTKIE operacje
+    const isFirstTrip = (tripIdx === 0);
+    
+    if (isFirstTrip) {
+      console.log(`\n  🚌 Processing trip #${tripIdx} (${trip.trip_id}):`);
+      console.log(`     Trip ma ${tripStops.length} stops:`, 
+        tripStops.slice(0, 10).map(st => {
+          const stop = stopsIndex[st.stop_id];
+          return stop?.stop_name || st.stop_id;
+        }).join(' → ')
+      );
+    }
     
     tripStops.forEach((stopTime, stopIdx) => {
       const stopId = stopTime.stop_id;
@@ -3497,11 +3520,12 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
         }
         lastMasterIdx = existingIdx;
         
-        // 🆕 DODAJ LOG dla pierwszych 3 trips:
-        if (tripIndex < 3) {
-          const stopName = stopsIndex[stopTime.stop_id]?.stop_name || stopTime.stop_id;
+        // 🆕 LOG 4: Znaleziono istniejący przystanek
+        if (isFirstTrip && stopIdx < 10) {
+          const stopName = stopsIndex[stopId]?.stop_name || stopId;
           console.log(`     [${stopIdx}] "${stopName}" → już jest na pozycji [${existingIdx}]`);
         }
+        
       } else {
         // NEW station - insert RIGHT AFTER the last common stop
         const newEntry = {
@@ -3516,9 +3540,9 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
         masterListStationIds.splice(insertPos, 0, stationId);
         lastMasterIdx = insertPos;
         
-        // 🆕 DODAJ LOG dla pierwszych 3 trips:
-        if (tripIndex < 3) {
-          const stopName = stopsIndex[stopTime.stop_id]?.stop_name || stopTime.stop_id;
+        // 🆕 LOG 5: Wstawiono nowy przystanek
+        if (isFirstTrip && stopIdx < 10) {
+          const stopName = stopsIndex[stopId]?.stop_name || stopId;
           console.log(`     [${stopIdx}] "${stopName}" → WSTAWIAM na pozycję [${insertPos}]`);
           console.log(`          (lastMasterIdx był: ${insertPos - 1})`);
           console.log(`          masterList teraz: ${masterList.length} stops`);
@@ -3526,20 +3550,16 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
       }
     });
     
-    // 🆕 Po zakończeniu przetwarzania tripu:
-    if (tripIndex < 3) {
-      console.log(`\n  ✅ masterList po trip #${tripIndex} (${masterList.length} stops):`);
-      console.log(`     ${masterList.slice(0, 12).map(m => m.name).join(' → ')}`);
+    // 🆕 LOG 6: Stan po pierwszym tripie
+    if (isFirstTrip) {
+      console.log(`\n  ✅ masterList po trip #0 (${masterList.length} stops):`);
+      console.log(`     ${masterList.slice(0, 12).map(m => m.name || m.id).join(' → ')}`);
     }
   });
   
-  // 🆕 DODAJ LOG:
-  console.log(`📊 buildMasterList() - wynik (${masterList.length} przystanków):`,
-    masterList.slice(0, 8).map(m => {
-      const firstStopId = m.stopIds ? m.stopIds[0] : m.id;
-      return m.name || firstStopId;
-    }).join(' → ')
-  );
+  // 🆕 LOG 7: Finalny wynik
+  console.log(`\n  🎯 buildMasterList() KONIEC (${masterList.length} stops):`);
+  console.log(`     ${masterList.slice(0, 12).map(m => m.name || m.id).join(' → ')}`);
   
   return masterList;
 }
