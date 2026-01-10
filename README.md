@@ -121,4 +121,4 @@ When contributing, please:
 
 - Built for transit enthusiasts and developers
 - Uses the GTFS specification from Google
-- Inspired by the need for better GTFS visualization tools
+- Inspired by the need of one guy to have his ouwn viewer
