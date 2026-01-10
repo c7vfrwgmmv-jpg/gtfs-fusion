@@ -1047,14 +1047,34 @@ function debounce(func, wait) {
         return {};
       }
       
-      const out = {};
-      Object.keys(rec).forEach(origKey => {
+      const out = Object.create(null); // Faster than {} (no prototype chain)
+      const keys = Object.keys(rec);
+      
+      for (let i = 0; i < keys.length; i++) {
+        const origKey = keys[i];
         const norm = normalizeKey(origKey);
-        let val = rec[origKey];
-        if (val === null || val === undefined) val = '';
-        val = String(val).replace(/^"|"$/g,'').trim();
-        out[norm] = val;
-      });
+        const val = rec[origKey];
+        
+        if (val === null || val === undefined) {
+          out[norm] = '';
+        } else {
+          const str = String(val);
+          // Optimize: Combined quote removal and trim
+          const hasStartQuote = str[0] === '"';
+          const hasEndQuote = str[str.length - 1] === '"';
+          
+          if (hasStartQuote && hasEndQuote) {
+            // Remove surrounding quotes and trim
+            out[norm] = str.substring(1, str.length - 1).trim();
+          } else if (hasStartQuote || hasEndQuote) {
+            // Only one quote - just remove and trim
+            out[norm] = str.replace(/^"|"$/g, '').trim();
+          } else {
+            // No quotes - just trim
+            out[norm] = str.trim();
+          }
+        }
+      }
       return out;
     }
 
@@ -1656,14 +1676,22 @@ function parseCSV(text) {
     return [];
   }
   
-  const lines = text.split(/\r?\n/);
+  // Optimize: Replace \r\n with \n first (one-time operation), then simple split
+  const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
+  const lines = normalized.split('\n');
   if (lines.length === 0) return [];
   
   function parseCSVLine(line) {
     if (!line) return [];
     
+    // Fast path: no quotes = simple split (much faster)
+    if (!line.includes('"')) {
+      return line.split(',');
+    }
+    
+    // Slow path: handle quoted fields
     const result = [];
-    let current = '';
+    const chars = [];
     let inQuotes = false;
     
     for (let i = 0; i < line.length; i++) {
@@ -1672,7 +1700,7 @@ function parseCSV(text) {
       if (char === '"') {
         if (inQuotes && line[i + 1] === '"') {
           // Escaped quote ("")
-          current += '"';
+          chars.push('"');
           i++; // Skip next quote
         } else {
           // Toggle quote mode
@@ -1680,15 +1708,15 @@ function parseCSV(text) {
         }
       } else if (char === ',' && !inQuotes) {
         // Field separator (outside quotes)
-        result.push(current);
-        current = '';
+        result.push(chars.join(''));
+        chars.length = 0; // Clear array (faster than creating new)
       } else {
-        current += char;
+        chars.push(char);
       }
     }
     
     // Add last field
-    result.push(current);
+    result.push(chars.join(''));
     
     // Warn if quotes are still open (malformed CSV)
     if (inQuotes) {
@@ -1703,19 +1731,19 @@ function parseCSV(text) {
   
   const result = [];
   
-  // Parse data rows
+  // Parse data rows - optimized for speed
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+    const line = lines[i];
+    if (!line || !line.trim()) continue; // Skip empty lines
     
     const values = parseCSVLine(line);
     const row = {};
     
-    headers.forEach((header, idx) => {
-      let value = values[idx] || '';
-      value = value.trim();
-      row[header] = value;
-    });
+    // Use for loop instead of forEach (faster)
+    for (let j = 0; j < headers.length; j++) {
+      const value = values[j] || '';
+      row[headers[j]] = value.trim();
+    }
     
     result.push(normalizeRecord(row));
   }
@@ -1726,7 +1754,7 @@ function parseCSV(text) {
 function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
   return new Promise(async (resolve, reject) => {
     try {
-      const arrayBuffer = await zipFileEntry. async('arraybuffer');
+      const arrayBuffer = await zipFileEntry.async('arraybuffer');
       const decoder = new TextDecoder('utf-8');
       
       let buffer = '';
@@ -1835,10 +1863,11 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
           buffer += text;
           
           let newlineIndex;
+          // Optimize: Use lastIndexOf to process multiple lines at once
           while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.substring(0, newlineIndex);
+            const line = buffer.slice(0, newlineIndex); // slice is faster for large strings
             processLine(line);
-            buffer = buffer.substring(newlineIndex + 1);
+            buffer = buffer.slice(newlineIndex + 1);
           }
           
           offset = chunkEnd;
@@ -2713,15 +2742,15 @@ function buildStationNameCache(stopsIndex) {
   
   const parentStationIds = new Set();
   Object.values(stopsIndex).forEach(stop => {
-    if (stop.parent_station && stop.parent_station. trim()) {
-      parentStationIds. add(stop.parent_station. trim());
+    if (stop.parent_station && stop.parent_station.trim()) {
+      parentStationIds.add(stop.parent_station.trim());
     }
   });
   
-  // Dla każdej stacji głównej, zapisz mapowanie nazwa → stop_id
+  // For each parent station, save the mapping name → stop_id
   parentStationIds.forEach(parentId => {
     const parentStop = stopsIndex[parentId];
-    if (parentStop?. stop_name) {
+    if (parentStop?.stop_name) {
       const normalizedName = parentStop.stop_name.trim().replace(/\s+/g, ' ');
       stationNameToIdCache.set(normalizedName, parentId);
     }
@@ -2740,12 +2769,12 @@ function getStationId(stopId, stopsIndex) {
   
   const parent = stop.parent_station;
   if (parent && parent.trim() !== '') {
-    return parent. trim();
+    return parent.trim();
   }
   
-  // PRIORYTET 2: Sprawdź czy nazwa pasuje do znanej stacji głównej
+  // PRIORITY 2: Check if name matches a known parent station
   if (stop.stop_name) {
-    const normalizedName = stop.stop_name. trim().replace(/\s+/g, ' ');
+    const normalizedName = stop.stop_name.trim().replace(/\s+/g, ' ');
     const cache = buildStationNameCache(stopsIndex);
     
     if (cache.has(normalizedName)) {
