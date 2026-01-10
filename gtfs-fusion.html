@@ -1393,11 +1393,17 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
  */
 function tripSequenceScore(tripSeq, pattern) {
   // Count how many stops from tripSeq appear in correct order in pattern
+  // Only consider stops that exist in the pattern (ignore branch-specific stops)
+  const patternSet = new Set(pattern);
+  const relevantStops = tripSeq.filter(stop => patternSet.has(stop));
+  
+  if (relevantStops.length === 0) return 0;
+  
   let matchCount = 0;
   let idx = 0;
   
-  for (let i = 0; i < tripSeq.length; i++) {
-    const val = tripSeq[i];
+  for (let i = 0; i < relevantStops.length; i++) {
+    const val = relevantStops[i];
     while (idx < pattern.length && pattern[idx] !== val) {
       idx++;
     }
@@ -1407,7 +1413,7 @@ function tripSequenceScore(tripSeq, pattern) {
     }
   }
   
-  return matchCount / tripSeq.length;
+  return matchCount / relevantStops.length;
 }
 
 /**
@@ -1619,7 +1625,7 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       continue;
     }
     
-    // STEP 3: Reward-only subsequence matching
+    // STEP 3: Reward-only subsequence matching with bearing tiebreaker
     // Find the longest trip to use as the reference pattern
     let refPattern = null;
     let maxLen = 0;
@@ -1641,6 +1647,24 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     const patternFwd = refPattern.sequence;
     const patternRev = [...patternFwd].reverse();
     
+    // Calculate reference bearing (from first to last stop of pattern)
+    let refBearing = null;
+    if (stopsIndex && patternFwd.length >= 2) {
+      const firstStop = stopsIndex[patternFwd[0]];
+      const lastStop = stopsIndex[patternFwd[patternFwd.length - 1]];
+      
+      if (firstStop && lastStop) {
+        const lat1 = parseFloat(firstStop.stop_lat);
+        const lon1 = parseFloat(firstStop.stop_lon);
+        const lat2 = parseFloat(lastStop.stop_lat);
+        const lon2 = parseFloat(lastStop.stop_lon);
+        
+        if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+          refBearing = calculateBearing(lat1, lon1, lat2, lon2);
+        }
+      }
+    }
+    
     // Score each trip against both patterns
     tripsToProcess.forEach(trip => {
       const seq = getTripStopSequence(trip.trip_id, stopTimesIndex);
@@ -1653,12 +1677,42 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       const scoreFwd = tripSequenceScore(seq, patternFwd);
       const scoreRev = tripSequenceScore(seq, patternRev);
       
-      if (scoreFwd > scoreRev) {
+      // If scores are clearly different, use the higher score
+      if (scoreFwd > scoreRev + 0.1) {
         trip.direction_id = '0';
-      } else if (scoreRev > scoreFwd) {
+      } else if (scoreRev > scoreFwd + 0.1) {
         trip.direction_id = '1';
       } else {
-        trip.direction_id = '0'; // Fallback for equal scores
+        // Scores are equal or very close - use bearing as tiebreaker
+        if (refBearing !== null && stopsIndex && seq.length >= 2) {
+          const firstStop = stopsIndex[seq[0]];
+          const lastStop = stopsIndex[seq[seq.length - 1]];
+          
+          if (firstStop && lastStop) {
+            const lat1 = parseFloat(firstStop.stop_lat);
+            const lon1 = parseFloat(firstStop.stop_lon);
+            const lat2 = parseFloat(lastStop.stop_lat);
+            const lon2 = parseFloat(lastStop.stop_lon);
+            
+            if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+              const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
+              
+              // Calculate bearing difference (accounting for wrap-around)
+              let diff = Math.abs(tripBearing - refBearing);
+              if (diff > 180) diff = 360 - diff;
+              
+              // If bearings are similar (within 90°), same direction
+              // If bearings are opposite (>90°), reverse direction
+              trip.direction_id = diff < 90 ? '0' : '1';
+            } else {
+              trip.direction_id = '0'; // Fallback
+            }
+          } else {
+            trip.direction_id = '0'; // Fallback
+          }
+        } else {
+          trip.direction_id = '0'; // Fallback for equal scores without bearing data
+        }
       }
     });
   }
