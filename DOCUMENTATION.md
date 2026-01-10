@@ -407,3 +407,296 @@ The application has 6 distinct views, controlled by state inspection:
 - **Leaflet** (1.9.4) - Map rendering
 - **Leaflet.markercluster** (1.5.3) - Stop clustering on map
 - **Tailwind CSS** (3.4.17) - Styling via CDN
+
+---
+
+## Function Reference
+
+This section provides detailed documentation for all functions in the codebase.
+
+
+### 3.1. Data Normalization
+
+#### `escapeHtml()`
+
+Escape HTML special characters for safe rendering
+@pure UI sanitization layer - separate from data normalization
+@param {string} s - String to escape
+@returns {string} HTML-safe string
+
+#### `normalizeKey()`
+
+Normalize a CSV header key to standard GTFS field name
+@pure Deterministic - same input always produces same output
+@cached Results are memoized in keyCache for performance
+@param {string} k - Raw CSV header key
+@returns {string} Normalized GTFS field name
+
+#### `normalizeRecord()`
+
+Normalize a complete CSV record to standard GTFS format
+Handles: BOM removal, whitespace trimming, quote stripping
+Pipeline stage: Raw CSV → Normalized GTFS record
+@param {Object} rec - Raw CSV record with original keys
+@returns {Object} Normalized record with GTFS-standard keys and cleaned values
+
+
+### 3.2. Time and Date
+
+#### `timeToMinutes()`
+
+Convert GTFS time string to minutes since midnight
+@pure Domain layer conversion
+@param {string} timeStr - GTFS time format "HH:MM:SS" (can be >24h)
+@returns {number} Minutes since midnight (can exceed 1440 for late-night service)
+
+#### `minutesToTime()`
+
+Convert minutes since midnight back to GTFS time format
+@pure Inverse of timeToMinutes
+@param {number} minutes - Minutes since midnight
+@returns {string} GTFS time format "HH:MM:SS" (preserves >24h values)
+
+#### `formatTime()`
+
+Format time for display (presentation layer)
+Wraps times ≥24h to 0-23h range for user-friendly display
+@presentation Modifies times for UI display only
+@param {string} time - GTFS time string
+@returns {string} Display time in HH:MM format (wrapped to 24h)
+
+#### `parseGTFSDate()`
+
+Parse GTFS date string (YYYYMMDD) to Date object
+@pure Assumes local timezone (GTFS spec does not include timezone info)
+@param {string} dateStr - GTFS date format "YYYYMMDD"
+@returns {Date|null} JavaScript Date object in local timezone, or null if invalid
+
+#### `formatDateToGTFS()`
+
+Format Date object to GTFS date string
+@pure Inverse of parseGTFSDate
+@param {Date} date - JavaScript Date object
+@returns {string} GTFS date format "YYYYMMDD"
+
+
+### 3.3. Geometry and Geography
+
+#### `simplifyDouglasPeucker()`
+
+Simplify polyline using Douglas-Peucker algorithm
+Used during shape parsing/caching to reduce data size
+@pure Algorithm operates on coordinate arrays
+@param {Array<[number, number]>} points - Array of [lat, lon] coordinates
+@param {number} tolerance - Simplification tolerance in degrees (default: 0.0001 ≈ 11m)
+@returns {Array<[number, number]>} Simplified coordinate array
+
+#### `haversineDistance()`
+
+Calculate great-circle distance between two WGS84 coordinates using Haversine formula
+@pure Geographic calculation - no side effects
+@param {number} lat1 - Start latitude in decimal degrees
+@param {number} lon1 - Start longitude in decimal degrees
+@param {number} lat2 - End latitude in decimal degrees
+@param {number} lon2 - End longitude in decimal degrees
+@returns {number} Distance in meters
+
+#### `calculateShapeCoverage()`
+
+Calculate how well a shape covers a sequence of stops
+Heuristic for data quality assessment - not a strict validation rule
+@param {Array<Object>} stops - Array of stop objects with lat/lon
+@param {Array<[number, number]>} shapePoints - Array of [lat, lon] shape coordinates
+@returns {Object} Coverage analysis with percentage and nearby stops
+
+#### `fillShapeGaps()`
+
+Fill gaps in shape data by connecting stops with shape segments or straight lines
+@param {Array<Object>} stops - Array of stop objects
+@param {Array<[number, number]>} shapePoints - Shape coordinate array
+@param {Array<Object>} nearbyStops - Stops matched to shape points
+@returns {Array<[number, number]>} Complete route geometry
+
+#### `compressCoordinates()`
+
+Compress coordinate array using delta encoding and base36
+Lossy compression: preserves 6 decimal places (≈0.11m precision)
+@param {Array<[number, number]>} coords - Array of [lat, lon] coordinates
+@returns {string} Compressed string representation
+
+
+### 3.5. Data Quality
+
+#### `mostCommonString()`
+
+Find the most common string in an array (consensus-based data cleaning)
+@pure Frequency counting algorithm
+@param {Array<string>} arr - Array of strings to analyze
+@returns {string|null} Most frequent non-empty string, or null if none found
+
+#### `looksLikeGarbageLabel()`
+
+Heuristic to detect uninformative route labels
+Rejects: empty, too short, numeric-only (unless differs from shortName)
+Domain knowledge: Many feeds use numeric codes as long_name, which is not useful
+@param {string} s - Label to check
+@param {string} shortName - Route short_name for comparison
+@returns {boolean} True if label appears to be garbage/uninformative
+
+
+### 3.3. Geometry and Geography
+
+#### `TO_RAD()`
+
+Calculate bearing (azimuth) between two geographic points
+Reused from geometry module for direction detection
+@pure Geographic calculation
+@param {number} lat1 - Start latitude
+@param {number} lon1 - Start longitude
+@param {number} lat2 - End latitude
+@param {number} lon2 - End longitude
+@returns {number} Bearing in degrees (0-360)
+
+
+### 3.5. Data Quality
+
+#### `tripSequenceScore()`
+
+Score how well a trip sequence matches a reference pattern
+Uses subsequence matching: ignores branch-specific stops, matches trunk stops
+@pure Longest common subsequence scoring
+@param {Array<string>} tripSeq - Trip stop sequence to score
+@param {Array<string>} pattern - Reference pattern to match against
+@returns {number} Score from 0 to 1 representing the ratio of matched stops
+
+
+### 3.2. Time and Date
+
+#### `getTripStopSequence()`
+
+Get stop sequence for a trip
+@param {string} tripId - Trip ID
+@param {Object} stopTimesIndex - Index of stop times by trip_id
+@returns {Array<string>} Array of stop_ids in sequence
+
+
+### 3.6. Direction Enrichment
+
+#### `isCircularRoute()`
+
+Check if a route is circular (starts and ends at same stop)
+@pure Simple check on stop sequence
+@param {Array<string>} stopSequence - Array of stop_ids
+@returns {boolean} True if circular
+
+
+### 3.2. Time and Date
+
+#### `enrichTripsWithDirectionId()`
+
+Enrich trips with direction_id when missing from GTFS feed
+Decision Pipeline:
+1. Group trips by route_id
+2. Build stop sequences for each trip
+3. Check for circular routes (all get direction_id=0)
+4. Find longest trip as reference pattern
+5. Create forward and reverse patterns
+6. Score each trip against both patterns (subsequence matching)
+7. Use bearing as tiebreaker when scores are close
+Edge cases handled:
+- Missing stop sequences: Assign direction_id=0
+- Circular routes: All trips get direction_id=0 (no meaningful direction)
+- Routes with branches: Subsequence matching ignores branch-specific stops
+- Close scores: Use geographic bearing as tiebreaker
+- Missing geo data: Fallback to sequence score only
+@impure Mutates trip objects to add direction_id field
+@param {Array<Object>} trips - Array of trip objects
+@param {Object} stopTimesIndex - Index of stop times by trip_id
+@param {Object} stopsIndex - Index of stops by stop_id
+
+
+### 3.1. Data Normalization
+
+#### `getCanonicalKeyForCurrentSelection()`
+
+Get the canonical cache key for the current route/group selection
+Returns a key like 'group::123' or 'raw::route_id'
+
+#### `buildCanonicalMasterList()`
+
+Build a canonical master list from ALL trips (no date filter, tail included).
+This list is stable per route/group + direction and never changes.
+Only visibility is filtered at render time.
+Algorithm:
+1. Get core stops from profile (ordered sequence of main stations)
+2. Define segments: pre-core, windows between consecutive cores, post-core
+3. For each segment, collect all branch stations that appear in that segment
+4. Rank branch stations by median normalized position within the segment
+5. Stable tie-breaking: name, then stop_id
+6. Build final list: pre-core, first core, [windows with branches], last core, post-core
+Pre-core: Stops before the first core station (e.g., variant starting points)
+Post-core: Stops after the last core station (e.g., variant ending points)
+
+
+### Other Utilities
+
+#### `ensureCanonicalMasterListForCurrentSelection()`
+
+Ensure canonical master list exists for current selection.
+Returns the canonical master list or null if fallback needed.
+
+
+### 3.2. Time and Date
+
+#### `invalidateCanonicalCacheForCurrentSelection()`
+
+Invalidate canonical cache for current route/group.
+Called when route, group, or direction changes.
+
+#### `adjacentSwapOrderConfig()`
+
+Configuration for adjacent-swaps column ordering algorithm
+Parameters:
+- voteThreshold: minimum number of row-votes required to swap a pair (default: 4)
+- marginMinutes: time difference margin to avoid swapping on jitter (default: 2)
+- maxPasses: maximum number of bubble-sort passes to limit runtime (default: 8)
+
+#### `adjacentSwapOrder()`
+
+Adjacent-swaps column ordering algorithm
+Performs local corrections on the trips array based on row-wise time comparisons
+across visible passenger rows only. Unlike global pairwise ranking, this uses
+a bubble-sort approach with voting:
+- Compare adjacent pairs across multiple passes
+- For each pair, count row votes favoring a swap (left time > right time + margin)
+- If votesSwap >= voteThreshold, swap the pair
+- Repeat for maxPasses iterations to allow corrections to propagate
+Benefits:
+- Produces locally monotone ordering (minimizes adjacent inversions)
+- Deterministic and stable with proper parameter tuning
+- Lower complexity than global pairwise: O(n·rows·passes) vs O(n²·rows)
+- Works well for routes with mostly consistent trip progression
+@param {Array} trips - Array of trip objects in current initial order
+@param {Array} tripMappings - Array of mapping objects [tripIdx][rowIdx] = stopTime
+@param {Array} visiblePassengerRowIndices - Row indices to consider (exclude tail rows)
+@param {Object} params - { voteThreshold, marginMinutes, maxPasses }
+@returns {Array} Reordered trips array
+
+#### `findMostFrequentTripPattern()`
+
+Find the most common trip pattern (sequence of stops) for a given stop.
+Used to identify the typical route variant that serves a stop.
+@param {Array} trips - List of trip objects
+@param {Object} stopTimesIndex - Map of trip_id -> stopTimes array
+@param {string} stopId - The stop ID to analyze
+@param {Array} activeServices - List of active service IDs
+@returns {Object|null} Object with tripId, stopIds array, and frequency count
+
+
+### Other Utilities
+
+#### `getCurrentView()`
+
+Określa aktualny widok aplikacji na podstawie stanu
+@returns {string} Jeden z VIEW.*
+
