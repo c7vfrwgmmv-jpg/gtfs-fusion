@@ -922,6 +922,11 @@ let state = {
   currentTimetableData: {
     allTrips: [],           // wszystkie trips (włącznie z ukrytymi)
     stopDepartures: {}      // mapa: stop_id -> lista odjazdów z trip_id i czasem
+  },
+  
+  // UI settings
+  ui: {
+    sortStrategy: 'robust'  // 'robust' (default) or 'borda' (for comparison, to be removed)
   }
 };
 
@@ -5108,7 +5113,7 @@ function updateDeparturesTable() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 12.5 COLUMN ORDERING ALGORITHM (Multi-criteria Borda + Local Optimization)
+// 12.5 COLUMN ORDERING ALGORITHM (Multi-criteria: Robust + Borda)
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -5120,6 +5125,77 @@ function getMinutesFromStopTime(st) {
   const timeStr = st.departure_time || st.arrival_time;
   if (!timeStr) return Infinity;
   return timeToMinutes(timeStr);
+}
+
+/**
+ * Unwrap times in a column to handle next-day transitions
+ * If time decreases by more than 12 hours, add 1440 minutes (24 hours)
+ * This is used ONLY for sorting keys, not for display
+ * @param {Array<number>} times - array of times in minutes for one column
+ * @returns {Array<number>} - unwrapped times
+ */
+function unwrapColumnTimes(times) {
+  if (!times || times.length === 0) return times;
+  
+  const unwrapped = [times[0]];
+  let dayOffset = 0;
+  
+  for (let i = 1; i < times.length; i++) {
+    const prev = times[i - 1];
+    const curr = times[i];
+    
+    // Skip if either time is invalid
+    if (!isFinite(prev) || !isFinite(curr)) {
+      unwrapped.push(curr);
+      continue;
+    }
+    
+    // If time decreases by more than 12 hours (720 min), assume next day
+    if (curr < prev && (prev - curr) > 720) {
+      dayOffset += 1440; // Add 24 hours
+    }
+    
+    unwrapped.push(curr + dayOffset);
+  }
+  
+  return unwrapped;
+}
+
+/**
+ * Compute weighted median of an array
+ * @param {Array<number>} values - values to find median of
+ * @param {Array<number>} weights - weights for each value
+ * @returns {number} - weighted median
+ */
+function weightedMedian(values, weights) {
+  if (!values || values.length === 0) return Infinity;
+  
+  // Filter out invalid values
+  const valid = [];
+  for (let i = 0; i < values.length; i++) {
+    if (isFinite(values[i]) && isFinite(weights[i]) && weights[i] > 0) {
+      valid.push({ value: values[i], weight: weights[i] });
+    }
+  }
+  
+  if (valid.length === 0) return Infinity;
+  
+  // Sort by value
+  valid.sort((a, b) => a.value - b.value);
+  
+  // Find weighted median
+  const totalWeight = valid.reduce((sum, v) => sum + v.weight, 0);
+  const halfWeight = totalWeight / 2;
+  
+  let cumWeight = 0;
+  for (let i = 0; i < valid.length; i++) {
+    cumWeight += valid[i].weight;
+    if (cumWeight >= halfWeight) {
+      return valid[i].value;
+    }
+  }
+  
+  return valid[valid.length - 1].value;
 }
 
 /**
@@ -5419,6 +5495,204 @@ function computeChronoOrderNoAnchor(trips, tripMappings, passengerRowIndices, ti
   const optimizedOrder = localOptimizeOrder(initialOrder, T, rowWeights);
   
   return optimizedOrder;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ROBUST STRATEGY (Weighted Median + Minimal Swaps)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Compute robust chronological order using weighted median
+ * - For each column, compute weighted median of unwrapped times across passenger rows
+ * - Sort columns by this robust key
+ * - Apply minimal local swaps to reduce inversions on top-3 weighted rows
+ * 
+ * @param {Array} trips - sorted trips
+ * @param {Array} tripMappings - trip mappings
+ * @param {Array} passengerRowIndices - indices of passenger rows
+ * @param {Function} tieBreakKeyFn - tie-breaker function (colIdx) => comparable value
+ * @returns {Array<number>} - optimal order (permutation of [0..nTrips-1])
+ */
+function computeRobustChronoOrder(trips, tripMappings, passengerRowIndices, tieBreakKeyFn) {
+  const nTrips = trips.length;
+  
+  // Edge case: no trips or no passenger rows
+  if (nTrips === 0 || !passengerRowIndices || passengerRowIndices.length === 0) {
+    return Array.from({ length: nTrips }, (_, i) => i);
+  }
+  
+  // Build times matrix
+  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
+  
+  // Check if matrix is too sparse (>80% missing data)
+  let totalCells = 0;
+  let missingCells = 0;
+  for (let c = 0; c < T.length; c++) {
+    for (let r = 0; r < T[c].length; r++) {
+      totalCells++;
+      if (!isFinite(T[c][r])) missingCells++;
+    }
+  }
+  const sparsity = missingCells / totalCells;
+  
+  if (sparsity > 0.8) {
+    // Fallback to simple chronological ordering
+    const order = Array.from({ length: nTrips }, (_, i) => i);
+    order.sort((a, b) => {
+      const aTime = trips[a].start || "99:99:99";
+      const bTime = trips[b].start || "99:99:99";
+      const diff = timeToMinutes(aTime) - timeToMinutes(bTime);
+      if (diff !== 0) return diff;
+      return (trips[a].trip_id || '').localeCompare(trips[b].trip_id || '');
+    });
+    return order;
+  }
+  
+  // Compute row weights
+  const rowWeights = computeRowWeights(T);
+  
+  // For each column, compute robust key = weighted median of unwrapped times
+  const robustKeys = [];
+  
+  for (let colIdx = 0; colIdx < nTrips; colIdx++) {
+    const columnTimes = T[colIdx]; // times for this column across all passenger rows
+    
+    // Unwrap times to handle next-day transitions
+    const unwrapped = unwrapColumnTimes(columnTimes);
+    
+    // Compute weighted median
+    const medianTime = weightedMedian(unwrapped, rowWeights);
+    
+    robustKeys.push({
+      colIdx: colIdx,
+      robustKey: medianTime,
+      tieBreaker: tieBreakKeyFn ? tieBreakKeyFn(colIdx) : trips[colIdx].trip_id || ''
+    });
+  }
+  
+  // Sort by robust key, then tie-breaker
+  robustKeys.sort((a, b) => {
+    // Primary: robust key (weighted median)
+    if (isFinite(a.robustKey) && isFinite(b.robustKey)) {
+      const diff = a.robustKey - b.robustKey;
+      if (Math.abs(diff) > 0.001) return diff;
+    } else if (!isFinite(a.robustKey) && isFinite(b.robustKey)) {
+      return 1; // a goes after b
+    } else if (isFinite(a.robustKey) && !isFinite(b.robustKey)) {
+      return -1; // a goes before b
+    }
+    
+    // Secondary: tie-breaker
+    if (typeof a.tieBreaker === 'number' && typeof b.tieBreaker === 'number') {
+      return a.tieBreaker - b.tieBreaker;
+    }
+    return String(a.tieBreaker).localeCompare(String(b.tieBreaker));
+  });
+  
+  // Initial order from robust keys
+  let order = robustKeys.map(k => k.colIdx);
+  
+  // Minimal local optimization: focus on top-3 weighted rows
+  // Sort rows by weight (descending) and take top 3
+  const rowsByWeight = rowWeights.map((w, idx) => ({ rowIdx: idx, weight: w }));
+  rowsByWeight.sort((a, b) => b.weight - a.weight);
+  const topRowIndices = rowsByWeight.slice(0, 3).map(r => r.rowIdx);
+  
+  // Limited swaps: max 3 passes, only swap if reduces inversions on top rows
+  const maxPasses = 3;
+  
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let improved = false;
+    
+    for (let i = 0; i < order.length - 1; i++) {
+      const col1 = order[i];
+      const col2 = order[i + 1];
+      
+      // Count inversions on top rows for current order
+      let currentInversions = 0;
+      for (const r of topRowIndices) {
+        const t1 = T[col1][r];
+        const t2 = T[col2][r];
+        if (isFinite(t1) && isFinite(t2) && t1 > t2) {
+          currentInversions += rowWeights[r];
+        }
+      }
+      
+      // Count inversions if we swap
+      let swappedInversions = 0;
+      for (const r of topRowIndices) {
+        const t1 = T[col2][r];
+        const t2 = T[col1][r];
+        if (isFinite(t1) && isFinite(t2) && t1 > t2) {
+          swappedInversions += rowWeights[r];
+        }
+      }
+      
+      // Swap if it reduces inversions
+      if (swappedInversions < currentInversions) {
+        [order[i], order[i + 1]] = [order[i + 1], order[i]];
+        improved = true;
+      }
+    }
+    
+    if (!improved) break;
+  }
+  
+  return order;
+}
+
+/**
+ * Debug: Show row monotony - which rows have most inversions
+ * @param {Array<number>} order - column order
+ * @param {Array} tripMappings - trip mappings  
+ * @param {Array} masterList - master stop list
+ * @param {Array} passengerRowIndices - passenger row indices
+ */
+function debugRowMonotony(order, tripMappings, masterList, passengerRowIndices) {
+  if (!order || !tripMappings || !passengerRowIndices || passengerRowIndices.length === 0) {
+    console.log('[Row Monotony] No data to analyze');
+    return;
+  }
+  
+  const T = buildTimesMatrix(tripMappings, passengerRowIndices);
+  const rowWeights = computeRowWeights(T);
+  
+  // Count inversions per row
+  const rowInversions = [];
+  
+  for (let i = 0; i < passengerRowIndices.length; i++) {
+    const rowIdx = passengerRowIndices[i];
+    let inversions = 0;
+    
+    for (let j = 0; j < order.length - 1; j++) {
+      const t1 = T[order[j]][i];
+      const t2 = T[order[j + 1]][i];
+      
+      if (isFinite(t1) && isFinite(t2) && t1 > t2) {
+        inversions++;
+      }
+    }
+    
+    const mStop = masterList[rowIdx];
+    rowInversions.push({
+      rowIdx: rowIdx,
+      stopName: mStop ? mStop.name : `Row ${rowIdx}`,
+      inversions: inversions,
+      weight: rowWeights[i] || 0
+    });
+  }
+  
+  // Sort by inversions (descending)
+  rowInversions.sort((a, b) => b.inversions - a.inversions);
+  
+  console.log('[Row Monotony] Top rows with most inversions:');
+  rowInversions.slice(0, 5).forEach(({ stopName, inversions, weight }) => {
+    console.log(`  "${stopName}": ${inversions} inversions (weight: ${weight.toFixed(2)})`);
+  });
+  
+  // Also show total
+  const totalInversions = rowInversions.reduce((sum, r) => sum + r.inversions * r.weight, 0);
+  console.log(`[Row Monotony] Total weighted inversions: ${totalInversions.toFixed(2)}`);
 }
 
 /**
@@ -5737,8 +6011,21 @@ const tieBreakKeyFn = (colIdx) => {
   return `${String(coreTime).padStart(10, '0')}_${trip.trip_id || ''}`;
 };
 
-// Compute optimal order using Borda + local optimization
-const optimalOrder = computeChronoOrderNoAnchor(sortedTrips, tripMappings, passengerRowIndices, tieBreakKeyFn);
+// === STRATEGY TOGGLE ===
+// Default to 'robust', can be overridden by state.ui.sortStrategy
+const SORT_STRATEGY = (state.ui && state.ui.sortStrategy) || 'robust';
+
+let optimalOrder;
+if (SORT_STRATEGY === 'robust') {
+  // Use robust strategy (weighted median + minimal swaps)
+  optimalOrder = computeRobustChronoOrder(sortedTrips, tripMappings, passengerRowIndices, tieBreakKeyFn);
+} else if (SORT_STRATEGY === 'borda') {
+  // Use Borda strategy (kept for comparison, to be removed later)
+  optimalOrder = computeChronoOrderNoAnchor(sortedTrips, tripMappings, passengerRowIndices, tieBreakKeyFn);
+} else {
+  // Fallback to identity order
+  optimalOrder = Array.from({ length: sortedTrips.length }, (_, i) => i);
+}
 
 // Apply order to trips and tripMappings
 const orderedTrips = optimalOrder.map(i => sortedTrips[i]);
@@ -5748,10 +6035,14 @@ const orderedMappings = optimalOrder.map(i => tripMappings[i]);
 sortedTrips = orderedTrips;
 const finalTripMappings = orderedMappings;
 
-// Debug output (only if developer mode enabled, or always for now)
+// Debug output
 try {
-  debugColumnOrderQuality(optimalOrder, tripMappings, passengerRowIndices);
-  debugPairwisePreferences(tripMappings, passengerRowIndices);
+  if (SORT_STRATEGY === 'robust') {
+    debugRowMonotony(optimalOrder, tripMappings, masterList, passengerRowIndices);
+  } else if (SORT_STRATEGY === 'borda') {
+    debugColumnOrderQuality(optimalOrder, tripMappings, passengerRowIndices);
+    debugPairwisePreferences(tripMappings, passengerRowIndices);
+  }
 } catch (e) {
   console.error('Debug output error:', e);
 }
