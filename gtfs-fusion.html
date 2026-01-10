@@ -3253,6 +3253,29 @@ if ((masterList[i].stopIds && masterList[i].stopIds.includes(sId)) ||
 // ═══════════════════════════════════════════════════════════════
 // 6B. CANONICAL MASTER LIST (STABLE ROW ORDER)
 // ═══════════════════════════════════════════════════════════════
+// 
+// PURPOSE: Create a stable, canonical master list of stops (rows) per route/group and direction.
+// The canonical list is built ONCE from ALL trips (no date filter, tail included) and cached.
+// At render time, only row VISIBILITY is filtered - rows are never reordered.
+// 
+// ALGORITHM:
+// 1. Use route profile's coreStops to define windows between consecutive core stations
+// 2. For each window, collect all branch stations that appear between those core stations
+// 3. Rank branch stations by median normalized position within the window
+// 4. Stable tie-breaking: name (alphabetical), then stop_id
+// 5. Build canonical rows: core stations in order, with branch stations inserted between
+// 6. Preserve nodeType (tail/passenger/core) from profile for each row
+// 
+// RENDERING:
+// - Rows are filtered by: (a) tail toggle, (b) date (no departures = hidden)
+// - Row order NEVER changes - only visibility
+// - Columns (trips) are reordered separately using pairwise ranking for chronological order
+// 
+// CACHE INVALIDATION:
+// - On GTFS load (new data)
+// - On route/group change
+// - On direction change
+// ═══════════════════════════════════════════════════════════════
 
 /**
  * Get the canonical cache key for the current route/group selection
@@ -3779,13 +3802,25 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
 /**
  * Compute globally chronological column order using pairwise ranking (Copeland-like).
  * 
- * For each pair of trips (A, B), count how many visible rows have time[A] < time[B].
- * Score each trip as (wins - losses). Sort by descending score.
+ * PURPOSE: Achieve globally chronological trip ordering (columns) so times tend to 
+ * increase left→right across visible rows, without relying on a single anchor that 
+ * can cause local inversions.
  * 
- * Tie-breakers: 
- * 1. Time at first core row
- * 2. Time at last core row  
- * 3. trip_id (deterministic)
+ * ALGORITHM:
+ * - For each pair of trips (A, B), count how many visible rows have time[A] < time[B]
+ * - Score each trip as (wins - losses) across all pairwise comparisons
+ * - Sort trips by descending score (higher score = comes first/left)
+ * 
+ * TIE-BREAKERS (in order):
+ * 1. Time at first core row (ascending - earlier comes first)
+ * 2. Time at last core row (ascending - earlier comes first)
+ * 3. trip_id (alphabetical - deterministic)
+ * 
+ * CACHING:
+ * - Column order is cached per (route key, direction, date, showAllTrips)
+ * - Cache is invalidated when any of these parameters change
+ * - Typical complexity: O(n²·m) where n=trips, m=visible rows
+ *   With typical values (n≤100, m≤50), this is acceptable
  * 
  * @param {Array} trips - List of trip objects
  * @param {Object} tripStopMaps - Map of trip_id -> stopTimes array
