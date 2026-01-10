@@ -6300,7 +6300,9 @@ function renderTimetable() {
         const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
         const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
         
-        state.showAllTrips = !state.showAllTrips; 
+        state.showAllTrips = !state.showAllTrips;
+        // Invalidate column order cache when showAllTrips toggles
+        state.columnOrderCache = {};
         renderTimetable(); 
         
         // Restore scroll position after render
@@ -7594,6 +7596,8 @@ $('direction-select')?.addEventListener('change', async (e) => {
 
 $('date-select')?.addEventListener('change', async (e) => {
     state.selectedDate = String(e.target.value);
+    // Invalidate column order cache when date changes
+    state.columnOrderCache = {};
     resetMap();
     render();
   });
@@ -7622,6 +7626,8 @@ if (state.gtfsData && !state.selectedRoute && state.showStopsView && state.selec
 $('date-select-stop')?.addEventListener('change', async (e) => {
   state.selectedDate = String(e.target.value);
   state.stopDetailDepartures = [];
+  // Invalidate column order cache when date changes
+  state.columnOrderCache = {};
   
   // FIX #4: Update layers without restarting map
   if (state.stopDetailMapInstance && state.stopDetailMapInitialized) {
