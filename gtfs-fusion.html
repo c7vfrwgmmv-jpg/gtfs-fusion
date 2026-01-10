@@ -4509,7 +4509,7 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
     }
 
     // Helper function to create SVG icon with dynamic color
-    function createSvgIcon(color, baseSize = 24) {
+    function createSvgIcon(color, baseSize = 32) {
       const width = baseSize;
       const height = Math.round(baseSize * 1.41);
       
@@ -4526,8 +4526,8 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
         html: svgIcon,
         className: 'custom-svg-icon',
         iconSize: [width, height],
-        iconAnchor: [width/2, height],
-        popupAnchor: [0, -height]
+        iconAnchor: [width/2, height/2],
+        popupAnchor: [0, -height/2]
       });
     }
     
