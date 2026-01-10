@@ -2388,6 +2388,12 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
         state.loadingStep = 'Normalizacja stop_sequence (unia geograficzna)...'; render();
         enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex);
         
+        // Re-sort stopTimesIndex after normalization (values were overwritten)
+        Object.keys(stopTimesIndex).forEach(tripId => {
+          stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
+        });
+        console.log('✅ Posortowano stopTimesIndex po normalizacji');
+        
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
 agencies.forEach(a => {
