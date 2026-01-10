@@ -6291,6 +6291,10 @@ function renderTimetable() {
       <button id="toggle-depot-trips-main" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
         ${state.showAllTrips ? 'Ukryj zjazdy i wyjazdy' : 'Pokaż zjazdy i wyjazdy'}
       </button>
+      <div class="slider-group">
+        <label for="threshold-slider">Próg detekcji (<span id="threshold-value">${state.threshold}</span>%):</label>
+        <input type="range" id="threshold-slider" min="0" max="50" step="1" value="${state.threshold}">
+      </div>
     </div>
     <div id="schedule-table-root"></div>
 `;
@@ -6314,6 +6318,21 @@ function renderTimetable() {
           }
         }, 0);
       };
+
+      // Threshold slider handler
+      const thresholdSlider = $('threshold-slider');
+      const thresholdValue = $('threshold-value');
+      if (thresholdSlider && thresholdValue) {
+        thresholdSlider.oninput = (e) => {
+          const newThreshold = parseInt(e.target.value, 10);
+          state.threshold = newThreshold;
+          thresholdValue.textContent = newThreshold;
+          // Invalidate caches when threshold changes
+          state.columnOrderCache = {};
+          invalidateCanonicalCacheForCurrentSelection();
+          renderTimetable();
+        };
+      }
 
       const tableRoot = $('schedule-table-root'); if (!tableRoot) return;
 
