@@ -25,16 +25,12 @@
   <style>
     body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
     #root { height:100vh; }
-    .slider-group{ display:flex; align-items:center; gap:10px; background:#f8fafc; padding:8px 16px; border-radius:8px; border:1px solid #cbd5e1; font-size:14px; font-weight:600; }
-    .slider-group input[type="range"]{ width:150px; }
     .routes-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
     .routes-grid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap:12px; }
     .route-card{ display:flex; align-items:center; justify-content:center; height:48px; background:#eff6ff; border:1px solid #e6eefb; color:#0f172a; font-weight:600; border-radius:6px; cursor:pointer; transition:background .12s, transform .06s; gap:8px; padding:0 8px; text-align:center; }
     .route-card:hover{ background:#e0f2fe; transform:translateY(-1px); }
     .agency-group{ margin-bottom:28px; }
     .agency-title{ font-weight:700; margin:12px 0 8px; color:#334155; }
-    .progress-wrap { max-width:720px; margin:0.5rem auto 0; }
-    .progress-bg { background:#e6eefb; border-radius:8px; height:12px; overflow:hidden; }
     .progress-bar { height:12px; background:linear-gradient(90deg,#60a5fa,#3b82f6); border-radius:8px; transition:width 200ms ease; }
 .progress-badge {
   position: absolute;
@@ -52,9 +48,6 @@
 @keyframes slow-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
-}
-.progress-bar-blinking {
-  animation: slow-blink 2s ease-in-out infinite;
 }
 .route-title {
   display: -webkit-box;
@@ -1009,14 +1002,6 @@ function debounce(func, wait) {
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
-    function getTimeInMinutes(time) {
-      if (!time) return 0;
-      const parts = String(time).split(':');
-      const hours = parseInt(parts[0]||'0',10);
-      const minutes = parseInt(parts[1]||'0',10);
-      return hours*60 + minutes;
-    }
-
     function formatTime(time) {
       if (!time) return '<';
       const str = String(time);
@@ -1438,137 +1423,9 @@ function isCircularRoute(stopSequence) {
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
 
-/**
- * Find reversed sequence pairs among trip patterns
- * @param {Array<Object>} tripPatterns - Array of {tripId, sequence}
- * @returns {Object} {group0: [...tripIds], group1: [...tripIds]} or null
- */
-function findReversedPair(tripPatterns) {
-  if (tripPatterns.length < 2) return null;
-  
-  // Try to find a pair of reversed sequences
-  for (let i = 0; i < tripPatterns.length; i++) {
-    const seqA = tripPatterns[i].sequence;
-    if (seqA.length === 0) continue;
-    
-    for (let j = i + 1; j < tripPatterns.length; j++) {
-      const seqB = tripPatterns[j].sequence;
-      if (seqB.length === 0) continue;
-      
-      // Check if B is reversed version of A by comparing in reverse order
-      const maxLen = Math.max(seqA.length, seqB.length);
-      const minLen = Math.min(seqA.length, seqB.length);
-      let matches = 0;
-      
-      // Compare seqA with reversed seqB without creating a copy
-      for (let k = 0; k < minLen; k++) {
-        if (seqA[k] === seqB[seqB.length - 1 - k]) matches++;
-      }
-      
-      const coverage = matches / maxLen;
-      
-      // If coverage >= 80%, we found reversed pair
-      if (coverage >= 0.8) {
-        // Group all trips by their similarity to pattern A or B
-        const group0 = [];
-        const group1 = [];
-        
-        for (const pattern of tripPatterns) {
-          const seq = pattern.sequence;
-          if (seq.length === 0) {
-            group0.push(pattern.tripId);
-            continue;
-          }
-          
-          // Calculate similarity to seqA
-          let simA = 0;
-          const lenA = Math.min(seq.length, seqA.length);
-          for (let k = 0; k < lenA; k++) {
-            if (seq[k] === seqA[k]) simA++;
-          }
-          
-          // Calculate similarity to seqB
-          let simB = 0;
-          const lenB = Math.min(seq.length, seqB.length);
-          for (let k = 0; k < lenB; k++) {
-            if (seq[k] === seqB[k]) simB++;
-          }
-          
-          // Assign to group with higher similarity
-          if (simA >= simB) {
-            group0.push(pattern.tripId);
-          } else {
-            group1.push(pattern.tripId);
-          }
-        }
-        
-        return { group0, group1 };
-      }
-    }
-  }
-  
-  return null;
-}
 
-/**
- * Cluster trips by bearing into 1 or 2 groups
- * @param {Array<Object>} bearingData - Array of {tripId, bearing}
- * @returns {Object} {group0: [...tripIds], group1: [...tripIds] or null}
- */
-function clusterByBearing(bearingData) {
-  if (bearingData.length === 0) {
-    return { group0: [], group1: null };
-  }
-  
-  if (bearingData.length === 1) {
-    return { group0: [bearingData[0].tripId], group1: null };
-  }
-  
-  // Sort by bearing
-  const sorted = [...bearingData].sort((a, b) => a.bearing - b.bearing);
-  
-  // Find the largest gap in bearings
-  let maxGap = 0;
-  let splitIdx = -1;
-  
-  for (let i = 0; i < sorted.length; i++) {
-    const current = sorted[i].bearing;
-    const next = sorted[(i + 1) % sorted.length].bearing;
-    
-    // Calculate gap (considering wrap-around at 360°)
-    let gap;
-    if (i === sorted.length - 1) {
-      // Wrap-around case: last to first
-      gap = (360 - current) + next;
-    } else {
-      gap = next - current;
-    }
-    
-    if (gap > maxGap) {
-      maxGap = gap;
-      splitIdx = i;
-    }
-  }
-  
-  // If max gap > 90°, split into 2 groups
-  if (maxGap > 90) {
-    const group0 = [];
-    const group1 = [];
-    
-    for (let i = 0; i < sorted.length; i++) {
-      if (i <= splitIdx) {
-        group0.push(sorted[i].tripId);
-      } else {
-        group1.push(sorted[i].tripId);
-      }
-    }
-    
-    return { group0, group1 };
-  }
-  
-  // Single direction
-  return { group0: bearingData.map(b => b.tripId), group1: null };
-}
+
+
 
 /**
  * Main function to enrich trips with direction_id
@@ -1925,11 +1782,6 @@ rawHeaders.forEach((h, i) => {
           const text = await zipFileEntry.async('string');
           
           const workerCode = `
-            function normalizeKey(k) {
-              if (k === null || k === undefined) return k;
-              return String(k).replace(/^\\uFEFF/,'').trim().toLowerCase().replace(/\\s+/g,'_');
-            }
-            
             function smartSplit(line) {
               if (!line.includes('"')) {
                 return line.split(',');
@@ -2509,12 +2361,6 @@ function generateAvailableDates(calendar, calendarDates) {
       return null;
     }
 
-function checkGtfsHasParentStation(stopsIndex) {
-  return Object.values(stopsIndex).some(s => 
-    s.parent_station && s.parent_station.trim() !== ''
-  );
-}
-
 function buildStationNameCache(stopsIndex) {
   if (stationNameToIdCache) return stationNameToIdCache;
   
@@ -2574,37 +2420,6 @@ function getStationIdWithPolicy(stopId, stopsIndex, allowedStationSet) {
   const stationId = getStationId(stopId, stopsIndex);
   if (!allowedStationSet || allowedStationSet.has(stationId)) return stationId;
   return stopId; // no merge if not allowed
-}
-
-function buildStopTooltip(stopId, stopsIndex) {
-  const stop = stopsIndex[stopId];
-  if (!stop) return stopId;
-  
-  const parts = [];
-  
-  // 1. Platform code (jeśli istnieje)
-  if (stop.platform_code && stop.platform_code.trim()) {
-    parts.push(`Peron: ${stop.platform_code.trim()}`);
-  }
-  
-  // 2. Nazwa przystanku (jeśli różni się od parent_station lub brak parenta)
-  const parentId = stop.parent_station?.trim();
-  const parentStop = parentId ? stopsIndex[parentId] : null;
-  
-  if (stop.stop_name) {
-    if (!parentStop || stop.stop_name !== parentStop.stop_name) {
-      parts.push(stop.stop_name);
-    }
-  }
-  
-  // 3. Stop ID - na końcu jako dodatkowa info, lub jako jedyna jeśli brak innych
-  if (parts.length === 0) {
-    parts.push(stopId);
-  } else {
-    parts.push(`ID: ${stopId}`);
-  }
-  
-  return parts.join('\n');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -4407,119 +4222,6 @@ window.debugAdjacentSwapQuality = debugAdjacentSwapQuality;
  * @param {Array} tripMappings - Mappings of trips to master list rows
  * @returns {Array} Reordered trips array
  */
-function computePairwiseColumnOrder(trips, tripStopMaps, visibleRowIndices, masterList, tripMappings) {
-  if (!trips || trips.length <= 1) return trips;
-  
-  const n = trips.length;
-  
-  // Build comparison matrix: for each pair (i, j), count rows where trip[i] < trip[j]
-  const scores = new Array(n).fill(0);
-  
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const tripA = trips[i];
-      const tripB = trips[j];
-      const mappingA = tripMappings[i];
-      const mappingB = tripMappings[j];
-      
-      let aWins = 0;
-      let bWins = 0;
-      
-      // Compare across visible rows
-      visibleRowIndices.forEach(rowIdx => {
-        const stopA = mappingA[rowIdx];
-        const stopB = mappingB[rowIdx];
-        
-        if (!stopA || !stopB) return; // Skip if either trip doesn't stop here
-        
-        const timeA = stopA.departure_time || stopA.arrival_time;
-        const timeB = stopB.departure_time || stopB.arrival_time;
-        
-        if (!timeA || !timeB) return;
-        
-        const minutesA = timeToMinutes(timeA);
-        const minutesB = timeToMinutes(timeB);
-        
-        if (minutesA < minutesB) {
-          aWins++;
-        } else if (minutesB < minutesA) {
-          bWins++;
-        }
-      });
-      
-      // Update scores based on wins
-      if (aWins > bWins) {
-        scores[i]++;
-        scores[j]--;
-      } else if (bWins > aWins) {
-        scores[j]++;
-        scores[i]--;
-      }
-      // If equal, no change (tie)
-    }
-  }
-  
-  // Build sorted indices with tie-breakers
-  const profile = getCurrentRouteProfile();
-  const coreStops = profile?.coreStops || [];
-  
-  // Helper to find time at first/last core stop
-  const getTimeAtCoreStop = (tripMapping, coreIndex) => {
-    if (!coreStops || coreStops.length === 0 || !masterList) return null;
-    
-    // Find the core stop in masterList
-    for (let rowIdx = 0; rowIdx < masterList.length; rowIdx++) {
-      const row = masterList[rowIdx];
-      if (row.stopIds && row.stopIds.some(sid => coreStops[coreIndex] === sid)) {
-        const stopTime = tripMapping[rowIdx];
-        if (stopTime) {
-          return stopTime.departure_time || stopTime.arrival_time;
-        }
-      }
-    }
-    return null;
-  };
-  
-  const tripData = trips.map((trip, idx) => ({
-    trip,
-    score: scores[idx],
-    firstCoreTime: getTimeAtCoreStop(tripMappings[idx], 0),
-    lastCoreTime: getTimeAtCoreStop(tripMappings[idx], coreStops.length - 1),
-    trip_id: trip.trip_id
-  }));
-  
-  // Sort by score (descending), then tie-breakers
-  tripData.sort((a, b) => {
-    // Primary: score (descending - higher score = comes first)
-    if (a.score !== b.score) return b.score - a.score;
-    
-    // Tie-breaker 1: first core time (ascending)
-    if (a.firstCoreTime && b.firstCoreTime) {
-      const diff = timeToMinutes(a.firstCoreTime) - timeToMinutes(b.firstCoreTime);
-      if (diff !== 0) return diff;
-    } else if (a.firstCoreTime) {
-      return -1;
-    } else if (b.firstCoreTime) {
-      return 1;
-    }
-    
-    // Tie-breaker 2: last core time (ascending)
-    if (a.lastCoreTime && b.lastCoreTime) {
-      const diff = timeToMinutes(a.lastCoreTime) - timeToMinutes(b.lastCoreTime);
-      if (diff !== 0) return diff;
-    } else if (a.lastCoreTime) {
-      return -1;
-    } else if (b.lastCoreTime) {
-      return 1;
-    }
-    
-    // Tie-breaker 3: trip_id (deterministic)
-    return a.trip_id.localeCompare(b.trip_id);
-  });
-  
-  return tripData.map(td => td.trip);
-}
-
 function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServices) {
   const patternCounts = new Map(); // klucz: "stop1,stop2,stop3...", wartość: count
   const patternToTrip = new Map(); // mapowanie pattern → przykładowy trip_id
@@ -4714,36 +4416,6 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
   return { labels, reason };
 }
 
-function generateRouteTitle(route, directionId) {
-  if (!route) return '';
-  if (route.route_long_name && !looksLikeGarbageLabel(route.route_long_name, route.route_short_name)) {
-    return (route.route_short_name ? route.route_short_name + ' ' : '') + route.route_long_name;
-  }
-  const tripsForRoute = state.gtfsData && state.gtfsData.tripsIndex ? (state.gtfsData.tripsIndex[route.route_id] || []) : [];
-  const headsigns = tripsForRoute.map(t=>t.trip_headsign).filter(h=>h);
-  const commonHeadsign = mostCommonString(headsigns);
-  if (commonHeadsign) return (route.route_short_name ? route.route_short_name + ' ' : '') + commonHeadsign;
-
-  let best = null, bestLen = 0;
-  for (const t of tripsForRoute) {
-    const dir = (t.direction_id === undefined || t.direction_id === null) ? '0' : String(t.direction_id);
-    if (directionId !== undefined && String(directionId) !== dir) continue;
-    const stops = state.gtfsData.stopTimesIndex && state.gtfsData.stopTimesIndex[t.trip_id] ? state.gtfsData.stopTimesIndex[t.trip_id] : [];
-    if (stops.length > bestLen) { bestLen = stops.length; best = stops; }
-  }
-  if (best && best.length>0) {
-    const first = state.gtfsData.stopsIndex[best[0].stop_id];
-    const last = state.gtfsData.stopsIndex[best[best.length-1].stop_id];
-    const firstName = first?.stop_name || best[0].stop_id;
-    const lastName = last?.stop_name || best[best.length-1].stop_id;
-    if (firstName && lastName && firstName !== lastName) return (route.route_short_name ? route.route_short_name + ' ' : '') + `${firstName} – ${lastName}`;
-    if (lastName) return (route.route_short_name ? route.route_short_name + ' ' : '') + lastName;
-  }
-
-  if (route.route_short_name) return String(route.route_short_name).trim();
-  return route.route_id || '';
-}
-
 // ═══════════════════════════════════════════════════════════════
 // 9. MAP RENDERING
 // ═══════════════════════════════════════════════════════════════
@@ -4802,30 +4474,6 @@ async function generateHybridLineGeometry(stops, shapeId, routeType) {
   
   // Poor coverage - use straight lines
   return await generateLineGeometry(stops, routeType);
-}
-
-async function drawRouteOnMap(map, stops, routeColor = '#3b82f6') {
-  if (!map || !stops || stops.length < 2) return null;
-  
-  // Prepare stops with proper format
-  const formattedStops = stops.map(s => ({
-    stop_id: s.stop_id || s.id,
-    lat: parseFloat(s.stop_lat || s.lat),
-    lon: parseFloat(s.stop_lon || s.lon)
-  })).filter(s => !isNaN(s.lat) && !isNaN(s.lon));
-  
-  if (formattedStops.length < 2) return null;
-  
-  // Use straight lines between stops (no external API calls)
-  const coordinates = formattedStops.map(s => [s.lat, s.lon]);
-  
-  // Draw the polyline on map
-  return window.L.polyline(coordinates, {
-    color: routeColor,
-    weight: 5,
-    opacity: 0.9,
-    smoothFactor: 0.5
-  });
 }
 
 async function updateMap() {
@@ -7050,7 +6698,7 @@ switch(currentView) {
               route: route,
               trip: trip,
               time: departureTime,
-              timeMinutes: getTimeInMinutes(departureTime),
+              timeMinutes: timeToMinutes(departureTime),
               headsign: trip.trip_headsign || ''
             });
             if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
@@ -7586,7 +7234,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
             route: route,
             trip: trip,
             time: departureTime,
-            timeMinutes: getTimeInMinutes(departureTime),
+            timeMinutes: timeToMinutes(departureTime),
             headsign: trip.trip_headsign || ''
           });
           if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
