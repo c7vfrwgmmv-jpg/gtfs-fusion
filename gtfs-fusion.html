@@ -22,9 +22,11 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"></script>
+  <link href="https://fonts.cdnfonts.com/css/nimbus-sans-l" rel="stylesheet">
   <style>
-    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    body { margin:0; font-family: 'Nimbus Sans L', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
     #root { height:100vh; }
+    .custom-svg-icon { background: none !important; border: none !important; }
     .routes-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
     .routes-grid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap:12px; }
     .route-card{ display:flex; align-items:center; justify-content:center; height:48px; background:#eff6ff; border:1px solid #e6eefb; color:#0f172a; font-weight:600; border-radius:6px; cursor:pointer; transition:background .12s, transform .06s; gap:8px; padding:0 8px; text-align:center; }
@@ -496,6 +498,16 @@ video {
 .animate-spin {
   animation:spin 1s linear infinite
 }
+.animate-ellipsis::after {
+  content: '...';
+  animation: ellipsis-dots 1.5s steps(4, end) infinite;
+}
+@keyframes ellipsis-dots {
+  0%, 25% { content: '.'; }
+  26%, 50% { content: '..'; }
+  51%, 75% { content: '...'; }
+  76%, 100% { content: ''; }
+}
 .cursor-pointer {
   cursor:pointer
 }
@@ -520,6 +532,9 @@ video {
 .whitespace-nowrap {
   white-space:nowrap
 }
+.border {
+  border-width:1px
+}
 .rounded-lg {
   border-radius:0.5rem
 }
@@ -528,9 +543,6 @@ video {
 }
 .rounded-full {
   border-radius:9999px
-}
-.border {
-  border-width:1px
 }
 .border-b {
   border-bottom-width:1px
@@ -4483,6 +4495,26 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
       return window.leafletMap;
     }
 
+    // Helper function to create SVG icon with dynamic color
+    function createSvgIcon(color, size = 24) {
+      const svgIcon = `
+        <svg version="1.2" width="${size}" height="${size}" viewBox="0 0 21000 29700" preserveAspectRatio="xMidYMid" fill-rule="evenodd" xmlns="http://www.w3.org/2000/svg">
+          <g>
+            <path fill="#FFF" d="M10913 16775H8225v-5375h5375v5375h-2687z"/>
+            <path fill="${color}" d="M10913 16098H8908v-4020h4009v4020h-2004z"/>
+            <path fill="#FFF" d="M11460 13253c0 95-25 188-73 272-47 82-117 150-200 198-29 17-60 31-91 42v1520c0 31-9 62-25 89s-38 51-66 66c-28 16-61 24-92 24-32 0-63-8-91-24-28-15-51-39-67-66-15-27-24-58-24-89v-1520c-31-12-62-25-91-42-83-48-152-116-200-198-48-84-73-177-73-272s25-188 73-272c48-82 117-150 200-198 84-47 178-73 274-73s190 26 273 73c83 48 153 116 200 198 48 84 73 177 73 272z"/>
+          </g>
+        </svg>
+      `;
+      return window.L.divIcon({
+        html: svgIcon,
+        className: 'custom-svg-icon',
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2],
+        popupAnchor: [0, -size/2]
+      });
+    }
+
 async function generateLineGeometry(stopDetails, routeType) {
   // Generate straight line route from stops
   if (!Array.isArray(stopDetails) || stopDetails.length < 2) return [];
@@ -4571,12 +4603,8 @@ async function updateMap() {
   
 const addMarker = (lat, lon, name, color) => {
   if (isNaN(lat) || isNaN(lon)) return;
-  fg.addLayer(window.L.circleMarker([lat, lon], { 
-      radius:6, 
-      fillColor: color || '#3b82f6', 
-      color:'#fff', 
-      weight:2, 
-      fillOpacity:0.8 
+  fg.addLayer(window.L.marker([lat, lon], { 
+      icon: createSvgIcon(color || '#3b82f6')
     }).bindPopup(name || ''));
   };
   
@@ -4753,12 +4781,8 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
         if (!s || isNaN(parseFloat(s.lat)) || isNaN(parseFloat(s.lon))) return;
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
-        window.L.circleMarker([sLat, sLon], {
-          radius: 3,
-          fillColor: color,
-          color: '#fff',
-          weight: 1,
-          fillOpacity: 0.8
+        window.L.marker([sLat, sLon], {
+          icon: createSvgIcon(color, 16)
         }).addTo(layer).bindPopup(s.name);
 
         allBounds.push([sLat, sLon]);
@@ -4770,12 +4794,8 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
     }
     
     // Add main stop (selected) as larger marker
-    window.L.circleMarker([lat, lon], {
-      radius: 8,
-      fillColor: '#ef4444',
-      color: '#fff',
-      weight: 3,
-      fillOpacity: 1
+    window.L.marker([lat, lon], {
+      icon: createSvgIcon('#ef4444', 32)
     }).addTo(map).bindPopup(`<b>${stop.stop_name}</b>`).openPopup();
     
     allBounds.push([lat, lon]);
@@ -5462,12 +5482,8 @@ function renderStopsView() {
       const lon = parseFloat(stop.stop_lon);
       if (isNaN(lat) || isNaN(lon)) return;
       
-      const marker = window.L.circleMarker([lat, lon], {
-        radius: 6,
-        fillColor: '#3b82f6',
-        color: '#fff',
-        weight: 2,
-        fillOpacity: 0.8
+      const marker = window.L.marker([lat, lon], {
+        icon: createSvgIcon('#3b82f6', 24)
       });
       
       // Popup behavior depends on whether a group is expanded
@@ -6956,7 +6972,7 @@ function openStopTimetable(stopId) {
         <span style="font-size: 1rem; line-height: 1; margin-top: -1px;">←</span>
       </button>
 
-      <h1 class="text-xl font-bold text-blue-600" style="margin:0; line-height: 32px;">GTFS Fusion</h1>
+      <h2 class="text-xl font-bold text-orange-500" style="margin:0; line-height: 32px;">GTFS Fusion</h2>
 
       <label class="bg-orange-500 text-white rounded cursor-pointer hover:bg-orange-600 inline-flex items-center justify-center font-medium" 
         style="position:absolute; right:0; width: 40px; height: 32px;">
@@ -6971,16 +6987,9 @@ switch(currentView) {
   case VIEW.LOADING:
     html += `<div class="flex-1 flex flex-col items-center justify-center bg-gray-50">
     <div class="text-center">
-      <p class="text-gray-600 font-medium mb-4">${state.loadingStep || 'Ładowanie...'}</p>
-      ${state.loadingProgress ? `
-        <p class="text-gray-600 font-medium">
-          ${state.loadingProgressPercent}% (${state.loadingProgress.toLocaleString()} wierszy)
-        </p>
-      ` : `
-        <p class="text-gray-600 font-medium">Przetwarzanie...</p>
-      `}
+      <p class="text-gray-600 font-medium animate-ellipsis">Przetwarzanie</p>
       <div style="margin-top:1rem;">
-        <button id="cancel-parse" class="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600">Anuluj</button>
+        <button id="cancel-parse" class="bg-red-500 text-white px-3 py-1 hover:bg-red-600">Anuluj</button>
       </div>
     </div>
   </div>`;
@@ -7510,12 +7519,8 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
         if (!s || isNaN(parseFloat(s.lat)) || isNaN(parseFloat(s.lon))) return;
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
-        window.L.circleMarker([sLat, sLon], {
-          radius: 3,
-          fillColor: color,
-          color: '#fff',
-          weight: 1,
-          fillOpacity: 0.8
+        window.L.marker([sLat, sLon], {
+          icon: createSvgIcon(color, 16)
         }).addTo(layer).bindPopup(s.name);
       });
       
