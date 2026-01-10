@@ -5551,7 +5551,6 @@ sortedTrips.forEach(t => {
 });
 
 // Use preprocessed masterList from route profile instead of rebuilding
-const profile = getCurrentRouteProfile();
 const masterList = profile.masterList || buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
