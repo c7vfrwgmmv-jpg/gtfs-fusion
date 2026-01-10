@@ -6871,10 +6871,20 @@ function openStopTimetable(stopId) {
             // Only annotate if this pattern should be annotated
             if (patternsToAnnotate.has(weekdaysKey)) {
               if (!weekdayAnnotations.has(weekdaysKey)) {
-                // Map superscript numbers
                 const superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-                weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
-                nextSuperscript++;
+                
+                // Special case: if pattern is a single day, use the weekday number (1-5)
+                if (weekdaysSet.size === 1) {
+                  const dayIndex = Array.from(weekdaysSet)[0];
+                  // dayIndex: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+                  // Display as: 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri
+                  const weekdayNumber = dayIndex + 1;
+                  weekdayAnnotations.set(weekdaysKey, superscripts[weekdayNumber]);
+                } else {
+                  // Multiple days: use sequential superscript
+                  weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
+                  nextSuperscript++;
+                }
               }
               
               weekdayAnnotation = weekdayAnnotations.get(weekdaysKey);
