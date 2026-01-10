@@ -6544,14 +6544,17 @@ function openStopTimetable(stopId) {
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
-  // Collect ALL departures at this stop from ALL routes (not just selected route)
+  // Collect departures at this stop
+  // If a route is selected, filter by route and direction
+  // Otherwise, show ALL routes
   let allDepartures = [];
   
-  // Iterate through ALL routes, not just the selected one
-  state.gtfsData.routes.forEach(route => {
-    const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
+  if (state.selectedRoute && state.selectedDirection !== undefined) {
+    // Filter by selected route and direction
+    const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
+    const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
     
-    routeTrips.forEach(trip => {
+    directionTrips.forEach(trip => {
       const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === stopId);
       
@@ -6564,12 +6567,36 @@ function openStopTimetable(stopId) {
             trip: trip,
             service_id: trip.service_id,
             headsign: trip.trip_headsign || '',
-            route: route  // Include route info
+            route: state.selectedRoute
           });
         }
       }
     });
-  });
+  } else {
+    // No route/direction filter - show ALL routes
+    state.gtfsData.routes.forEach(route => {
+      const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
+      
+      routeTrips.forEach(trip => {
+        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTime = stopTimes.find(st => st.stop_id === stopId);
+        
+        if (stopTime) {
+          const departureTime = stopTime.departure_time || stopTime.arrival_time;
+          if (departureTime) {
+            allDepartures.push({
+              trip_id: trip.trip_id,
+              time: departureTime,
+              trip: trip,
+              service_id: trip.service_id,
+              headsign: trip.trip_headsign || '',
+              route: route
+            });
+          }
+        }
+      });
+    });
+  }
 
   // Determine main destination based on the currently selected route (if any)
   let mainDestination = '';
