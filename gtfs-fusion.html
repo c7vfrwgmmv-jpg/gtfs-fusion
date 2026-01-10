@@ -6540,24 +6540,18 @@ state.currentTimetableData.stopDepartures = stopDepartures;
     }
 
 function openStopTimetable(stopId) {
-  if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return;
+  if (!state.gtfsData || !state.selectedDate) return;
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
-  // Use cached data if available, otherwise fallback to old logic
-  const useCachedData = state.currentTimetableData && 
-                        state.currentTimetableData.stopDepartures && 
-                        state.currentTimetableData.stopDepartures[stopId];
-
+  // Collect ALL departures at this stop from ALL routes (not just selected route)
   let allDepartures = [];
   
-  if (useCachedData) {
-    allDepartures = state.currentTimetableData.stopDepartures[stopId] || [];
-  } else {
-    const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-    const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
+  // Iterate through ALL routes, not just the selected one
+  state.gtfsData.routes.forEach(route => {
+    const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
     
-    directionTrips.forEach(trip => {
+    routeTrips.forEach(trip => {
       const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === stopId);
       
@@ -6569,63 +6563,70 @@ function openStopTimetable(stopId) {
             time: departureTime,
             trip: trip,
             service_id: trip.service_id,
-            headsign: trip.trip_headsign || ''
+            headsign: trip.trip_headsign || '',
+            route: route  // Include route info
           });
         }
       }
     });
-  }
+  });
 
-  // Determine main destination
+  // Determine main destination based on the currently selected route (if any)
   let mainDestination = '';
   let mainTerminusStopId = null;
-  const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-  const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
   
-  try {
-    const directions = getAvailableDirections();
-    const currentDir = directions.find(d => String(d.id) === String(state.selectedDirection));
-    if (currentDir) {
-      mainDestination = currentDir.fullName || currentDir.name || '';
-    }
-  } catch (e) {
-    // Ignore errors
-  }
-  
-  if (!mainDestination) {
-    const headsigns = directionTrips.map(t => t.trip_headsign).filter(h => h);
-    const headsignCounts = {};
-    headsigns.forEach(h => { headsignCounts[h] = (headsignCounts[h] || 0) + 1; });
-    let maxCount = 0;
-    Object.keys(headsignCounts).forEach(h => {
-      if (headsignCounts[h] > maxCount) {
-        maxCount = headsignCounts[h];
-        mainDestination = h;
+  if (state.selectedRoute) {
+    const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
+    const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
+    
+    try {
+      const directions = getAvailableDirections();
+      const currentDir = directions.find(d => String(d.id) === String(state.selectedDirection));
+      if (currentDir) {
+        mainDestination = currentDir.fullName || currentDir.name || '';
       }
-    });
-  }
+    } catch (e) {
+      // Ignore errors
+    }
+    
+    if (!mainDestination) {
+      const headsigns = directionTrips.map(t => t.trip_headsign).filter(h => h);
+      const headsignCounts = {};
+      headsigns.forEach(h => { headsignCounts[h] = (headsignCounts[h] || 0) + 1; });
+      let maxCount = 0;
+      Object.keys(headsignCounts).forEach(h => {
+        if (headsignCounts[h] > maxCount) {
+          maxCount = headsignCounts[h];
+          mainDestination = h;
+        }
+      });
+    }
 
-  if (mainDestination && directionTrips.length > 0) {
-    const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
-    if (trip) {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+    if (mainDestination && directionTrips.length > 0) {
+      const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
+      if (trip) {
+        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        if (stopTimes.length > 0) {
+          const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
+          const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
+          mainTerminusStopId = lastStopTime.stop_id;
+        }
+      }
+    }
+
+    if (!mainDestination && directionTrips.length > 0) {
+      const firstTrip = directionTrips[0];
+      const stopTimes = state.gtfsData.stopTimesIndex[firstTrip.trip_id] || [];
       if (stopTimes.length > 0) {
-        const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
-        const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
+        const lastStopTime = stopTimes[stopTimes.length - 1];
+        const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
+        mainDestination = lastStop?.stop_name || '';
         mainTerminusStopId = lastStopTime.stop_id;
       }
     }
-  }
-
-  if (!mainDestination && directionTrips.length > 0) {
-    const firstTrip = directionTrips[0];
-    const stopTimes = state.gtfsData.stopTimesIndex[firstTrip.trip_id] || [];
-    if (stopTimes.length > 0) {
-      const lastStopTime = stopTimes[stopTimes.length - 1];
-      const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
-      mainDestination = lastStop?.stop_name || '';
-      mainTerminusStopId = lastStopTime.stop_id;
-    }
+  } else {
+    // No route selected - use the stop name as destination
+    mainDestination = stop.stop_name || 'Unknown';
   }
 
   // Resolve dates for each column with future-oriented preference
@@ -6903,7 +6904,22 @@ function openStopTimetable(stopId) {
   
   tableBodyHTML += `</tr>`;
 
-  const modalHTML = `<div id="stop-timetable-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;"><div style="background: white; padding: 0; border-radius: 8px; max-width: 1400px; max-height: 95vh; overflow-y: auto;"><div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;"><div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div><div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div><div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination || 'DESTINATION')}</span></div></div></div><table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;"><thead>${tableHeaderHTML}</thead><tbody>${tableBodyHTML}</tbody></table>${legendHTML}</div></div>`;
+  // Build modal header - show route badge only if a route is selected
+  let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
+  
+  if (state.selectedRoute) {
+    headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${state.selectedRoute.route_short_name || state.selectedRoute.route_id}</div>`;
+  }
+  
+  headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div>`;
+  
+  if (mainDestination && state.selectedRoute) {
+    headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(mainDestination)}</span></div>`;
+  }
+  
+  headerHTML += '</div></div>';
+
+  const modalHTML = `<div id="stop-timetable-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;"><div style="background: white; padding: 0; border-radius: 8px; max-width: 1400px; max-height: 95vh; overflow-y: auto;">${headerHTML}<table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;"><thead>${tableHeaderHTML}</thead><tbody>${tableBodyHTML}</tbody></table>${legendHTML}</div></div>`;
   
   const modalContainer = document.createElement('div');
   modalContainer.innerHTML = modalHTML;
