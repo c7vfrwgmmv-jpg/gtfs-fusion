@@ -22,9 +22,11 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"></script>
-  <link href="https://fonts.cdnfonts.com/css/nimbus-sans-l" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
   <style>
-    body { margin:0; font-family: 'Nimbus Sans L', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    body { margin:0; font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
     #root { height:100vh; }
     .custom-svg-icon { background: none !important; border: none !important; }
     .routes-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
@@ -4347,23 +4349,30 @@ function getAvailableDirections() {
   const dirs = Object.create(null);
   for (const t of routeTripsAll) {
     const dirId = String(t.direction_id === undefined || t.direction_id === null ? '0' : t.direction_id);
-    if (!dirs[dirId]) dirs[dirId] = { id: dirId, rows: 0, tripIds: new Set(), byHeadsign: Object.create(null), trips: [] };
+    if (!dirs[dirId]) dirs[dirId] = { id: dirId, rows: 0, tripIds: new Set(), byFinalStop: Object.create(null), trips: [] };
     dirs[dirId].rows++;
     if (t.trip_id) dirs[dirId].tripIds.add(t.trip_id);
-    const hs = (t.trip_headsign || '').toString().trim();
-    if (hs) dirs[dirId].byHeadsign[hs] = (dirs[dirId].byHeadsign[hs] || 0) + 1;
+    
+    // Extract final stop name from stop_times
+    const stopTimes = state.gtfsData.stopTimesIndex[t.trip_id] || [];
+    const sorted = stopTimes.slice().sort((a, b) => a.stop_sequence - b.stop_sequence);
+    const lastStopId = sorted[sorted.length - 1]?.stop_id;
+    const lastStop = state.gtfsData.stopsIndex[lastStopId];
+    const directionName = lastStop?.stop_name || '';
+    
+    if (directionName) dirs[dirId].byFinalStop[directionName] = (dirs[dirId].byFinalStop[directionName] || 0) + 1;
     dirs[dirId].trips.push(t);
   }
 
   const perDir = Object.keys(dirs).map(id => {
     const info = dirs[id];
-    const headsignEntries = Object.entries(info.byHeadsign).sort((a,b) => b[1] - a[1]);
-    const top1Count = headsignEntries.length ? headsignEntries[0][1] : 0;
-    const top1Label = headsignEntries.length ? headsignEntries[0][0] : '';
-    const top2Count = headsignEntries.length > 1 ? headsignEntries[1][1] : 0;
-    const top2Label = headsignEntries.length > 1 ? headsignEntries[1][0] : '';
+    const finalStopEntries = Object.entries(info.byFinalStop).sort((a,b) => b[1] - a[1]);
+    const top1Count = finalStopEntries.length ? finalStopEntries[0][1] : 0;
+    const top1Label = finalStopEntries.length ? finalStopEntries[0][0] : '';
+    const top2Count = finalStopEntries.length > 1 ? finalStopEntries[1][1] : 0;
+    const top2Label = finalStopEntries.length > 1 ? finalStopEntries[1][0] : '';
 
-    const commonHeadsign = headsignEntries.length ? headsignEntries[0][0] : '';
+    const commonFinalStop = finalStopEntries.length ? finalStopEntries[0][0] : '';
     let termini = '';
     let bestStops = null, bestLen = 0;
     for (const t of info.trips) {
@@ -4377,7 +4386,7 @@ function getAvailableDirections() {
       const lastName  = last?.stop_name  || bestStops[bestStops.length - 1].stop_id;
       termini = (firstName && lastName && firstName !== lastName) ? `${firstName} – ${lastName}` : (lastName || firstName || '');
     }
-    const fullName = commonHeadsign || termini || `Direction ${id}`;
+    const fullName = commonFinalStop || termini || `Direction ${id}`;
     const score = (top1Count || 0) * 3 + (info.rows || 0);
 
     return {
@@ -4495,14 +4504,35 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
         window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'© OpenStreetMap contributors', maxZoom:19 }).addTo(map);
         window.leafletMap = map;
         window.leafletFeatureGroup = window.L.featureGroup().addTo(map);
+        
+        // Add zoomend listener to redraw markers with new sizes
+        map.on('zoomend', () => {
+          if (state.selectedRoute && typeof updateMap === 'function') {
+            updateMap().catch(() => {
+              // Ignore map update errors on zoom
+            });
+          }
+        });
       }
       return window.leafletMap;
     }
 
-    // Helper function to create SVG icon with dynamic color
-    function createSvgIcon(color, size = 12) {
+    // Helper function to create SVG icon with dynamic color and zoom-based scaling
+    function createSvgIcon(color, baseSize = 12, currentZoom = null) {
+      // Calculate size based on zoom level if map is available
+      let size = baseSize;
+      if (currentZoom !== null) {
+        const baseZoom = 13;
+        const scaleFactor = 1.2;
+        size = baseSize * Math.pow(scaleFactor, currentZoom - baseZoom);
+      }
+      
+      // SVG aspect ratio: 1:1.41 (width:height)
+      const width = size;
+      const height = size * 1.41;
+      
       const svgIcon = `
-        <svg version="1.2" width="${size}" height="${size}" viewBox="0 0 21000 29700" preserveAspectRatio="xMidYMid" fill-rule="evenodd" xmlns="http://www.w3.org/2000/svg">
+        <svg version="1.2" width="${width}" height="${height}" viewBox="0 0 21000 29700" preserveAspectRatio="xMidYMid" fill-rule="evenodd" xmlns="http://www.w3.org/2000/svg">
           <g>
             <path fill="#FFF" d="M10913 16775H8225v-5375h5375v5375h-2687z"/>
             <path fill="${color}" d="M10913 16098H8908v-4020h4009v4020h-2004z"/>
@@ -4513,9 +4543,21 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
       return window.L.divIcon({
         html: svgIcon,
         className: 'custom-svg-icon',
-        iconSize: [size, size],
-        iconAnchor: [size/2, size/2],
-        popupAnchor: [0, -size/2]
+        iconSize: [width, height],
+        iconAnchor: [width/2, height],  // Anchor at bottom center of icon
+        popupAnchor: [0, -height]
+      });
+    }
+    
+    // Helper function to create circle marker (scales automatically with zoom)
+    function createCircleMarker(lat, lon, color, radius = 6) {
+      return window.L.circleMarker([lat, lon], {
+        radius: radius,
+        fillColor: color,
+        color: '#fff',
+        weight: 2,
+        opacity: 1,
+        fillOpacity: 0.8
       });
     }
 
@@ -4607,8 +4649,9 @@ async function updateMap() {
   
 const addMarker = (lat, lon, name, color) => {
   if (isNaN(lat) || isNaN(lon)) return;
+  const currentZoom = map.getZoom();
   fg.addLayer(window.L.marker([lat, lon], { 
-      icon: createSvgIcon(color || '#3b82f6')
+      icon: createSvgIcon(color || '#3b82f6', 20, currentZoom)
     }).bindPopup(name || ''));
   };
   
@@ -4785,8 +4828,9 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
         if (!s || isNaN(parseFloat(s.lat)) || isNaN(parseFloat(s.lon))) return;
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
+        const currentZoom = map.getZoom();
         window.L.marker([sLat, sLon], {
-          icon: createSvgIcon(color, 6)
+          icon: createSvgIcon(color, 20, currentZoom)
         }).addTo(layer).bindPopup(s.name);
 
         allBounds.push([sLat, sLon]);
@@ -4798,8 +4842,9 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
     }
     
     // Add main stop (selected) as larger marker
+    const currentZoom = map.getZoom();
     window.L.marker([lat, lon], {
-      icon: createSvgIcon('#ef4444', 16)
+      icon: createSvgIcon('#ef4444', 20, currentZoom)
     }).addTo(map).bindPopup(`<b>${stop.stop_name}</b>`).openPopup();
     
     allBounds.push([lat, lon]);
@@ -5486,8 +5531,9 @@ function renderStopsView() {
       const lon = parseFloat(stop.stop_lon);
       if (isNaN(lat) || isNaN(lon)) return;
       
+      const currentZoom = map.getZoom();
       const marker = window.L.marker([lat, lon], {
-        icon: createSvgIcon('#3b82f6', 12)
+        icon: createSvgIcon('#3b82f6', 20, currentZoom)
       });
       
       // Popup behavior depends on whether a group is expanded
@@ -7250,17 +7296,17 @@ switch(currentView) {
     const longName = String(state.selectedRoute.route_long_name || '').trim();
     
     let routeTitleRaw = '';
-    if (longName) {
+    // Priority: 1. Clean directions from getAvailableDirections (if both available)
+    //           2. Fallback to route_long_name if directions not available
+    if (combinedAB) {
+      routeTitleRaw = combinedAB;
+    } else if (longName) {
       routeTitleRaw = longName;
     } else {
-      if (combinedAB) {
-        routeTitleRaw = combinedAB;
-      } else {
-        const selDir = Array.isArray(directions) && directions.length
-          ? (directions.find(d => String(d.id) === String(state.selectedDirection)) || directions[0])
-          : null;
-        routeTitleRaw = selDir ? (selDir.fullName || selDir.name || '') : (state.selectedRoute.route_id || '');
-      }
+      const selDir = Array.isArray(directions) && directions.length
+        ? (directions.find(d => String(d.id) === String(state.selectedDirection)) || directions[0])
+        : null;
+      routeTitleRaw = selDir ? (selDir.fullName || selDir.name || '') : (state.selectedRoute.route_id || '');
     }
     if (shortName && routeTitleRaw) {
       routeTitleRaw = shortName + ' ' + routeTitleRaw;
@@ -7523,8 +7569,9 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
         if (!s || isNaN(parseFloat(s.lat)) || isNaN(parseFloat(s.lon))) return;
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
+        const currentZoom = map.getZoom();
         window.L.marker([sLat, sLon], {
-          icon: createSvgIcon(color, 6)
+          icon: createSvgIcon(color, 20, currentZoom)
         }).addTo(layer).bindPopup(s.name);
       });
       
