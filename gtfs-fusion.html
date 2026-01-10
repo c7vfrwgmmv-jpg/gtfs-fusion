@@ -2517,6 +2517,12 @@ function getStationId(stopId, stopsIndex) {
   return stopId;
 }
 
+function getStationIdWithPolicy(stopId, stopsIndex, allowedStationSet) {
+  const stationId = getStationId(stopId, stopsIndex);
+  if (!allowedStationSet || allowedStationSet.has(stationId)) return stationId;
+  return stopId; // no merge if not allowed
+}
+
 function buildStopTooltip(stopId, stopsIndex) {
   const stop = stopsIndex[stopId];
   if (!stop) return stopId;
@@ -3081,6 +3087,27 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
+  // Compute stationMergeAllowed: stations that appear at most once per trip
+  const stationMaxOccurrence = new Map();
+  allTripStationData.forEach(({ stationIds }) => {
+    const stationCounts = new Map();
+    stationIds.forEach(stationId => {
+      stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
+    });
+    stationCounts.forEach((count, stationId) => {
+      const currentMax = stationMaxOccurrence.get(stationId) || 0;
+      if (count > currentMax) {
+        stationMaxOccurrence.set(stationId, count);
+      }
+    });
+  });
+  const stationMergeAllowed = new Set();
+  stationMaxOccurrence.forEach((maxCount, stationId) => {
+    if (maxCount <= 1) {
+      stationMergeAllowed.add(stationId);
+    }
+  });
+
   // Określ wzorcowe krawędzie i stacje
   const totalTripsCount = allTrips.length;
   const coreStationsSet = new Set();
@@ -3362,6 +3389,7 @@ function buildRouteProfileForCurrentSelection() {
     stopMetadata,
     coreStationsSet: coreStationsSet,
     tripCoreIndices: tripCoreIndices,
+    stationMergeAllowed: stationMergeAllowed,
     version: 3,
   };
   state.routeProfiles[key][dir] = profile;
@@ -3377,12 +3405,13 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
   }
   
   const coreStops = profile.coreStops;
+  const allowedSet = profile.stationMergeAllowed;
   
   // Step 2: Group core stops by station (merged stops)
   const stopsByStation = new Map();
   
   coreStops.forEach(stopId => {
-    const stationId = getStationId(stopId, stopsIndex);
+    const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
     if (!stopsByStation.has(stationId)) {
       stopsByStation.set(stationId, []);
     }
@@ -3408,7 +3437,7 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
   // Step 4: Add branch stops (stops outside core)
   // Cache stationId for each masterList entry for performance
   const masterListStationIds = masterList.map(entry => {
-    return getStationId(entry.stopIds[0], stopsIndex);
+    return getStationIdWithPolicy(entry.stopIds[0], stopsIndex, allowedSet);
   });
   
   // Process all trips to add stops not in core
@@ -3418,7 +3447,7 @@ function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
     
     tripStops.forEach(stopTime => {
       const stopId = stopTime.stop_id;
-      const stationId = getStationId(stopId, stopsIndex);
+      const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
       
       // Find if this station already exists in masterList
       let existingIdx = -1;
@@ -3543,6 +3572,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
   const coreStops = profile.coreStops;
   const nodeTypes = profile.nodeTypes || {};
+  const allowedSet = profile.stationMergeAllowed;
   
   // Helper to get station display name
   const getStationDisplayName = (stationId, stopIds) => {
@@ -3558,7 +3588,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   const seenStations = new Set();
   
   coreStops.forEach(stopId => {
-    const stationId = getStationId(stopId, stopsIndex);
+    const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
     if (!seenStations.has(stationId)) {
       seenStations.add(stationId);
       coreStationGroups.push({
@@ -3628,7 +3658,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       for (let pos = 0; pos < firstCorePos; pos++) {
         const stopTime = sortedStops[pos];
         const stopId = stopTime.stop_id;
-        const stationId = getStationId(stopId, stopsIndex);
+        const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
         
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
@@ -3657,7 +3687,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       for (let pos = lastCorePos + 1; pos < tripLength; pos++) {
         const stopTime = sortedStops[pos];
         const stopId = stopTime.stop_id;
-        const stationId = getStationId(stopId, stopsIndex);
+        const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
         
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
@@ -3698,7 +3728,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       for (let pos = startPos.position + 1; pos < endPos.position; pos++) {
         const stopTime = sortedStops[pos];
         const stopId = stopTime.stop_id;
-        const stationId = getStationId(stopId, stopsIndex);
+        const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
         
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
@@ -6518,6 +6548,11 @@ state.currentTimetableData.stopDepartures = stopDepartures;
 
         // FIX #8: Check if this is a merged stop for tooltips on time cells
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
+        
+        // Debug: Log merged stop info
+        if (isMergedStop) {
+          console.log(`Merged stop detected: ${mStop.name}, stopIds:`, mStop.stopIds);
+        }
 
         // Inner loop: generate time cells for each trip
         finalTripMappings.forEach((mapping, tripIdx) => {
@@ -6540,6 +6575,7 @@ state.currentTimetableData.stopDepartures = stopDepartures;
                 
                 if (infoParts.length > 0) {
                   cellTooltip = infoParts.join('<br>');
+                  console.log(`Tooltip generated for ${actualStopId}:`, cellTooltip);
                 }
               }
             }
