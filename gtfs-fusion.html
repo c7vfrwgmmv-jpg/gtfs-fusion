@@ -1691,10 +1691,13 @@ function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
       return;
     }
     
-    // Sort by original sequence first (best effort starting point)
-    stopTimes.sort((a, b) => 
-      parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)
-    );
+    // Sort by TIME (chronological order), not by broken sequence
+    // Time is always correct in GTFS - it represents actual chronological order
+    stopTimes.sort((a, b) => {
+      const timeA = a.departure_time || a.arrival_time || '99:99:99';
+      const timeB = b.departure_time || b.arrival_time || '99:99:99';
+      return timeA.localeCompare(timeB);
+    });
     
     // Get coordinates for all stops
     const stopsWithCoords = stopTimes.map((st) => {
