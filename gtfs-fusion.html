@@ -6558,19 +6558,19 @@ state.currentTimetableData.stopDepartures = stopDepartures;
             // Zbuduj tooltip dla TEGO KONKRETNEGO stop_id (nie pierwszego!)
             let cellTooltip = '';
             
-            // Build tooltip if there's useful information (merged or not)
-            const actualStopId = stopMatch.stop_id;  // ← Właściwy stop_id dla TEJ komórki!
-            const stopData = state.gtfsData.stopsIndex[actualStopId];
-            
-            if (stopData) {
-              const infoParts = [];
-              // Only show stop_id if merged (multiple stops in same row)
-              if (isMergedStop && stopData.stop_id) infoParts.push(`ID: ${escapeHtml(stopData.stop_id)}`);
-              if (stopData.stop_desc) infoParts.push(escapeHtml(stopData.stop_desc));
-              if (stopData.platform_code) infoParts.push(`Peron: ${escapeHtml(stopData.platform_code)}`);
+            if (isMergedStop) {
+              const actualStopId = stopMatch.stop_id;  // ← Właściwy stop_id dla TEJ komórki!
+              const stopData = state.gtfsData.stopsIndex[actualStopId];
               
-              if (infoParts.length > 0) {
-                cellTooltip = infoParts.join('<br>');
+              if (stopData) {
+                const infoParts = [];
+                if (stopData.stop_id) infoParts.push(`ID: ${escapeHtml(stopData.stop_id)}`);
+                if (stopData.stop_desc) infoParts.push(escapeHtml(stopData.stop_desc));
+                if (stopData.platform_code) infoParts.push(`Peron: ${escapeHtml(stopData.platform_code)}`);
+                
+                if (infoParts.length > 0) {
+                  cellTooltip = infoParts.join('<br>');
+                }
               }
             }
             
