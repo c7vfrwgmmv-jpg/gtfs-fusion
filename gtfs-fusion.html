@@ -4504,32 +4504,14 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
         window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'© OpenStreetMap contributors', maxZoom:19 }).addTo(map);
         window.leafletMap = map;
         window.leafletFeatureGroup = window.L.featureGroup().addTo(map);
-        
-        // Add zoomend listener to redraw markers with new sizes
-        map.on('zoomend', () => {
-          if (state.selectedRoute && typeof updateMap === 'function') {
-            updateMap().catch(() => {
-              // Ignore map update errors on zoom
-            });
-          }
-        });
       }
       return window.leafletMap;
     }
 
-    // Helper function to create SVG icon with dynamic color and zoom-based scaling
-    function createSvgIcon(color, baseSize = 12, currentZoom = null) {
-      // Calculate size based on zoom level if map is available
-      let size = baseSize;
-      if (currentZoom !== null) {
-        const baseZoom = 13;
-        const scaleFactor = 1.2;
-        size = baseSize * Math.pow(scaleFactor, currentZoom - baseZoom);
-      }
-      
-      // SVG aspect ratio: 1:1.41 (width:height)
-      const width = size;
-      const height = size * 1.41;
+    // Helper function to create SVG icon with dynamic color
+    function createSvgIcon(color, baseSize = 24) {
+      const width = baseSize;
+      const height = Math.round(baseSize * 1.41);
       
       const svgIcon = `
         <svg version="1.2" width="${width}" height="${height}" viewBox="0 0 21000 29700" preserveAspectRatio="xMidYMid" fill-rule="evenodd" xmlns="http://www.w3.org/2000/svg">
@@ -4544,7 +4526,7 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
         html: svgIcon,
         className: 'custom-svg-icon',
         iconSize: [width, height],
-        iconAnchor: [width/2, height],  // Anchor at bottom center of icon
+        iconAnchor: [width/2, height],
         popupAnchor: [0, -height]
       });
     }
@@ -4649,9 +4631,8 @@ async function updateMap() {
   
 const addMarker = (lat, lon, name, color) => {
   if (isNaN(lat) || isNaN(lon)) return;
-  const currentZoom = map.getZoom();
   fg.addLayer(window.L.marker([lat, lon], { 
-      icon: createSvgIcon(color || '#3b82f6', 20, currentZoom)
+      icon: createSvgIcon(color || '#3b82f6')
     }).bindPopup(name || ''));
   };
   
@@ -4828,9 +4809,8 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
         if (!s || isNaN(parseFloat(s.lat)) || isNaN(parseFloat(s.lon))) return;
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
-        const currentZoom = map.getZoom();
         window.L.marker([sLat, sLon], {
-          icon: createSvgIcon(color, 20, currentZoom)
+          icon: createSvgIcon(color)
         }).addTo(layer).bindPopup(s.name);
 
         allBounds.push([sLat, sLon]);
@@ -4842,9 +4822,8 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
     }
     
     // Add main stop (selected) as larger marker
-    const currentZoom = map.getZoom();
     window.L.marker([lat, lon], {
-      icon: createSvgIcon('#ef4444', 20, currentZoom)
+      icon: createSvgIcon('#ef4444')
     }).addTo(map).bindPopup(`<b>${stop.stop_name}</b>`).openPopup();
     
     allBounds.push([lat, lon]);
@@ -5531,9 +5510,8 @@ function renderStopsView() {
       const lon = parseFloat(stop.stop_lon);
       if (isNaN(lat) || isNaN(lon)) return;
       
-      const currentZoom = map.getZoom();
       const marker = window.L.marker([lat, lon], {
-        icon: createSvgIcon('#3b82f6', 20, currentZoom)
+        icon: createSvgIcon('#3b82f6')
       });
       
       // Popup behavior depends on whether a group is expanded
@@ -7569,9 +7547,8 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
         if (!s || isNaN(parseFloat(s.lat)) || isNaN(parseFloat(s.lon))) return;
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
-        const currentZoom = map.getZoom();
         window.L.marker([sLat, sLon], {
-          icon: createSvgIcon(color, 20, currentZoom)
+          icon: createSvgIcon(color)
         }).addTo(layer).bindPopup(s.name);
       });
       
