@@ -6661,14 +6661,41 @@ function openStopTimetable(stopId) {
   const saturdayDate = findDateForDayOfWeek(6); // Saturday
   const sundayDate = findDateForDayOfWeek(0); // Sunday
   
-  // Collect all weekday dates (Mon-Fri) for aggregation
+  // Find holidays in upcoming week
+  const nearbyHolidays = findNearbyHolidays(state.selectedDate);
+  
+  // Classify holidays by day of week
+  const holidaysByDayOfWeek = new Map(); // dayOfWeek -> holiday object
+  const weekdayHolidays = []; // Holidays falling on Mon-Fri
+  
+  nearbyHolidays.forEach(holiday => {
+    const holidayDate = parseGTFSDate(holiday.date);
+    if (holidayDate) {
+      const dayOfWeek = holidayDate.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+      holidaysByDayOfWeek.set(dayOfWeek, holiday);
+      
+      // Check if it's a weekday (Mon-Fri)
+      if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+        weekdayHolidays.push(holiday);
+      }
+    }
+  });
+  
+  // Collect all weekday dates (Mon-Fri) for aggregation, excluding holidays
   const weekdayDates = [];
+  const weekdayHolidayDates = new Set(weekdayHolidays.map(h => h.date));
+  
   if (mondayDate) {
     const monDate = parseGTFSDate(mondayDate);
     for (let i = 0; i < 5; i++) { // Mon to Fri
       const d = new Date(monDate);
       d.setDate(monDate.getDate() + i);
-      weekdayDates.push(formatDateToGTFS(d));
+      const dateStr = formatDateToGTFS(d);
+      
+      // Exclude weekday holidays from the weekday column
+      if (!weekdayHolidayDates.has(dateStr)) {
+        weekdayDates.push(dateStr);
+      }
     }
   }
   
@@ -6680,9 +6707,6 @@ function openStopTimetable(stopId) {
   
   const saturdayServices = saturdayDate ? getServicesForDate(saturdayDate) : [];
   const sundayServices = sundayDate ? getServicesForDate(sundayDate) : [];
-  
-  // Find holidays in upcoming week
-  const nearbyHolidays = findNearbyHolidays(state.selectedDate);
 
   // Helper: get trip terminus
   const getTripTerminus = (tripId) => {
@@ -6924,7 +6948,7 @@ function openStopTimetable(stopId) {
     return { timesByHour: result, weekdayAnnotations };
   };
 
-  // Process weekday column with annotations
+  // Process weekday column with annotations (excluding weekday holidays)
   const weekdayDepartures = allDepartures.filter(d => {
     return Array.from(weekdayServicesMap.values()).some(services => services.includes(d.service_id));
   });
@@ -6933,21 +6957,47 @@ function openStopTimetable(stopId) {
   const weekdayTimes = weekdayResult.timesByHour;
   const weekdayAnnotationsMap = weekdayResult.weekdayAnnotations;
   
-  // Process weekend columns (no annotations)
-  const saturdayDepartures = allDepartures.filter(d => saturdayServices.includes(d.service_id));
-  const sundayDepartures = allDepartures.filter(d => sundayServices.includes(d.service_id));
+  // Process weekend columns - check if replaced by holiday
+  let saturdayColumn = null;
+  let sundayColumn = null;
   
-  const saturdayTimes = getTimesByHourWithAnnotations(saturdayDepartures, false).timesByHour;
-  const sundayTimes = getTimesByHourWithAnnotations(sundayDepartures, false).timesByHour;
+  const saturdayHoliday = holidaysByDayOfWeek.get(6); // Saturday
+  const sundayHoliday = holidaysByDayOfWeek.get(0); // Sunday
   
-  // Process holiday columns
-  const holidayColumns = [];
-  nearbyHolidays.forEach(holiday => {
+  if (saturdayHoliday) {
+    // Saturday is a holiday - use holiday data for this column
+    const holidayServices = getServicesForDate(saturdayHoliday.date);
+    const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
+    const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
+    saturdayColumn = { name: saturdayHoliday.name, times: holidayTimes, isHoliday: true };
+  } else {
+    // Normal Saturday
+    const saturdayDepartures = allDepartures.filter(d => saturdayServices.includes(d.service_id));
+    const saturdayTimes = getTimesByHourWithAnnotations(saturdayDepartures, false).timesByHour;
+    saturdayColumn = { name: 'Sobota', times: saturdayTimes, isHoliday: false };
+  }
+  
+  if (sundayHoliday) {
+    // Sunday is a holiday - use holiday data for this column
+    const holidayServices = getServicesForDate(sundayHoliday.date);
+    const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
+    const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
+    sundayColumn = { name: sundayHoliday.name, times: holidayTimes, isHoliday: true };
+  } else {
+    // Normal Sunday
+    const sundayDepartures = allDepartures.filter(d => sundayServices.includes(d.service_id));
+    const sundayTimes = getTimesByHourWithAnnotations(sundayDepartures, false).timesByHour;
+    sundayColumn = { name: 'Niedziela', times: sundayTimes, isHoliday: false };
+  }
+  
+  // Process weekday holiday columns (Mon-Fri holidays as separate columns)
+  const weekdayHolidayColumns = [];
+  weekdayHolidays.forEach(holiday => {
     const holidayServices = getServicesForDate(holiday.date);
     const holidayDepartures = allDepartures.filter(d => holidayServices.includes(d.service_id));
     const holidayTimes = getTimesByHourWithAnnotations(holidayDepartures, false).timesByHour;
     
-    holidayColumns.push({
+    weekdayHolidayColumns.push({
       name: holiday.name,
       times: holidayTimes,
       date: holiday.date
@@ -7006,10 +7056,11 @@ function openStopTimetable(stopId) {
   // Build table HTML
   let tableHeaderHTML = `<tr style="background: #e5e7eb;">
     <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Dzień powszedni</th>
-    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Sobota</th>
-    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">Niedziela</th>`;
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(saturdayColumn.name)}</th>
+    <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(sundayColumn.name)}</th>`;
   
-  holidayColumns.forEach(hCol => {
+  // Add weekday holiday columns
+  weekdayHolidayColumns.forEach(hCol => {
     tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(hCol.name)}</th>`;
   });
   
@@ -7017,10 +7068,11 @@ function openStopTimetable(stopId) {
   
   let tableBodyHTML = `<tr>
     <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(weekdayTimes)}</td>
-    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayTimes)}</td>
-    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayTimes)}</td>`;
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(saturdayColumn.times)}</td>
+    <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(sundayColumn.times)}</td>`;
   
-  holidayColumns.forEach(hCol => {
+  // Add weekday holiday column data
+  weekdayHolidayColumns.forEach(hCol => {
     tableBodyHTML += `<td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(hCol.times)}</td>`;
   });
   
