@@ -3343,7 +3343,12 @@ function buildRouteProfileForCurrentSelection() {
   );
 
   // Build masterList (this will use the coreStops we just calculated)
-  const masterListForProfile = buildMasterList(sortedTripsForProfile, tripStopMapsForProfile, stopsIndex);
+  const masterListForProfile = buildMasterList(
+    sortedTripsForProfile, 
+    tripStopMapsForProfile, 
+    stopsIndex,
+    coreStops  // Pass coreStops that we already have in this scope
+  );
 
   // 10. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
@@ -3367,15 +3372,11 @@ function buildRouteProfileForCurrentSelection() {
   return profile;
 }
 
-function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
-  // Step 1: Get core stops from profile
-  const profile = getCurrentRouteProfile();
-  if (!profile || !profile.coreStops) {
-    // This should never happen, but fail gracefully
+function buildMasterList(sortedTrips, tripStopMaps, stopsIndex, coreStops) {
+  // coreStops passed as parameter - no profile fetch needed
+  if (!coreStops || coreStops.length === 0) {
     return [];
   }
-  
-  const coreStops = profile.coreStops;
   
   // Step 2: Group core stops by station (merged stops)
   const stopsByStation = new Map();
@@ -5551,7 +5552,12 @@ sortedTrips.forEach(t => {
 });
 
 // Use preprocessed masterList from route profile instead of rebuilding
-const masterList = profile.masterList || buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
+const masterList = profile.masterList || buildMasterList(
+  sortedTrips, 
+  newTripStopMaps, 
+  state.gtfsData.stopsIndex,
+  profile.coreStops  // Pass coreStops from profile
+);
 const tripMappings = createTripMappings(sortedTrips, newTripStopMaps, masterList);
 
 // === POPULATE CACHED TIMETABLE DATA FOR MODAL ===
