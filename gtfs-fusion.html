@@ -1582,7 +1582,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     
     if (validPatterns.length === 0) {
       // No valid patterns, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      tripsToProcess.forEach(trip => {
+        trip.direction_id = '0';
+        trip._direction_id_enriched = true;
+      });
       continue;
     }
     
@@ -1590,7 +1593,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
     if (isCircular) {
       // All trips are circular, assign direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      tripsToProcess.forEach(trip => {
+        trip.direction_id = '0';
+        trip._direction_id_enriched = true;
+      });
       continue;
     }
     
@@ -1605,10 +1611,13 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       tripsToProcess.forEach(trip => {
         if (group0Set.has(trip.trip_id)) {
           trip.direction_id = '0';
+          trip._direction_id_enriched = true;
         } else if (group1Set.has(trip.trip_id)) {
           trip.direction_id = '1';
+          trip._direction_id_enriched = true;
         } else {
           trip.direction_id = '0'; // Fallback
+          trip._direction_id_enriched = true;
         }
       });
       continue;
@@ -1643,7 +1652,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     
     if (bearingData.length === 0) {
       // No geographic data, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
+      tripsToProcess.forEach(trip => {
+        trip.direction_id = '0';
+        trip._direction_id_enriched = true;
+      });
       continue;
     }
     
@@ -1656,10 +1668,13 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     tripsToProcess.forEach(trip => {
       if (bearingGroup0Set.has(trip.trip_id)) {
         trip.direction_id = '0';
+        trip._direction_id_enriched = true;
       } else if (bearingGroup1Set && bearingGroup1Set.has(trip.trip_id)) {
         trip.direction_id = '1';
+        trip._direction_id_enriched = true;
       } else {
         trip.direction_id = '0'; // Fallback
+        trip._direction_id_enriched = true;
       }
     });
   }
@@ -3869,12 +3884,12 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   // ═══════════════════════════════════════════════════════════════
   // DIRECTIONLESS CONFLICT DETECTION AND OVERRIDE
   // ═══════════════════════════════════════════════════════════════
-  // Gating: treat dataset as directionless if only one distinct direction_id
-  const distinctDirs = Array.from(new Set(allTrips.map(t => String(t.direction_id ?? ''))));
-  const isDirectionless = distinctDirs.length === 1;
+  // Gating: treat dataset as directionless if direction_id was synthetically enriched
+  const isDirectionless = allTrips.length > 0 && allTrips.every(trip => trip._direction_id_enriched === true);
   
   if (window.DEBUG_MASTERLIST) {
-    console.log('[buildCanonicalMasterList] distinctDirs=', distinctDirs, 'isDirectionless=', isDirectionless);
+    const enrichedCount = allTrips.filter(t => t._direction_id_enriched === true).length;
+    console.log('[buildCanonicalMasterList] enrichedCount=', enrichedCount, '/', allTrips.length, 'isDirectionless=', isDirectionless);
   }
 
   // Reprezentant (station-aware, with merge policy)
