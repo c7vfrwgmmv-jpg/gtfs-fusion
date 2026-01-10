@@ -6768,10 +6768,93 @@ function openStopTimetable(stopId) {
     });
 
     // Add weekday annotations (superscript numbers) for Mon-Fri column
+    // Smart algorithm: only annotate the minority pattern when there are complementary patterns
     const weekdayAnnotations = new Map(); // Set of day indices -> superscript symbol
     let nextSuperscript = 1;
     
     if (isWeekdayColumn) {
+      // First pass: collect all unique weekday patterns in this hour group
+      const hourPatterns = new Map(); // hour -> Map of minuteKey -> weekday pattern
+      
+      Object.keys(hourGroups).forEach(hour => {
+        hourPatterns.set(hour, new Map());
+        
+        hourGroups[hour].forEach(entry => {
+          const { minute, terminusKey } = entry;
+          const mapKey = `${String(hour).padStart(2, '0')}:${minute}:${terminusKey}`;
+          const weekdaysSet = minuteWeekdayMap.get(mapKey);
+          
+          if (weekdaysSet && weekdaysSet.size > 0) {
+            const pattern = Array.from(weekdaysSet).sort().join(',');
+            hourPatterns.get(hour).set(mapKey, {
+              pattern,
+              dayCount: weekdaysSet.size,
+              minute,
+              terminusKey
+            });
+          }
+        });
+      });
+      
+      // Second pass: determine which patterns need annotation
+      // Strategy: find complementary patterns and only annotate the minority
+      const patternsToAnnotate = new Set();
+      
+      Object.keys(hourGroups).forEach(hour => {
+        const patterns = hourPatterns.get(hour);
+        const patternCounts = new Map(); // pattern -> count of occurrences
+        const patternDayCounts = new Map(); // pattern -> number of days
+        
+        // Count pattern occurrences
+        patterns.forEach((info, mapKey) => {
+          const count = patternCounts.get(info.pattern) || 0;
+          patternCounts.set(info.pattern, count + 1);
+          patternDayCounts.set(info.pattern, info.dayCount);
+        });
+        
+        // Find unique patterns (not all 5 days)
+        const uniquePatterns = Array.from(patternCounts.keys()).filter(p => {
+          const dayCount = patternDayCounts.get(p);
+          return dayCount < 5;
+        });
+        
+        if (uniquePatterns.length === 0) {
+          // All patterns run on all 5 days - no annotation needed
+        } else if (uniquePatterns.length === 1) {
+          // Only one partial pattern - annotate it
+          patternsToAnnotate.add(uniquePatterns[0]);
+        } else {
+          // Multiple patterns - check if they're complementary
+          // Complementary means their union = all 5 weekdays
+          const allDaysInPatterns = new Set();
+          uniquePatterns.forEach(pattern => {
+            pattern.split(',').forEach(d => allDaysInPatterns.add(d));
+          });
+          
+          if (allDaysInPatterns.size === 5 && uniquePatterns.length === 2) {
+            // Two complementary patterns - annotate only the minority (fewer days)
+            const pattern1 = uniquePatterns[0];
+            const pattern2 = uniquePatterns[1];
+            const count1 = patternDayCounts.get(pattern1);
+            const count2 = patternDayCounts.get(pattern2);
+            
+            if (count1 < count2) {
+              patternsToAnnotate.add(pattern1);
+            } else if (count2 < count1) {
+              patternsToAnnotate.add(pattern2);
+            } else {
+              // Equal counts - annotate both
+              patternsToAnnotate.add(pattern1);
+              patternsToAnnotate.add(pattern2);
+            }
+          } else {
+            // Non-complementary or more than 2 patterns - annotate all partial patterns
+            uniquePatterns.forEach(p => patternsToAnnotate.add(p));
+          }
+        }
+      });
+      
+      // Third pass: apply annotations
       Object.keys(hourGroups).forEach(hour => {
         const newMinutes = [];
         
@@ -6783,17 +6866,19 @@ function openStopTimetable(stopId) {
           let weekdayAnnotation = '';
           
           if (weekdaysSet && weekdaysSet.size > 0 && weekdaysSet.size < 5) {
-            // Not all weekdays - needs annotation
             const weekdaysKey = Array.from(weekdaysSet).sort().join(',');
             
-            if (!weekdayAnnotations.has(weekdaysKey)) {
-              // Map superscript numbers
-              const superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-              weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
-              nextSuperscript++;
+            // Only annotate if this pattern should be annotated
+            if (patternsToAnnotate.has(weekdaysKey)) {
+              if (!weekdayAnnotations.has(weekdaysKey)) {
+                // Map superscript numbers
+                const superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+                weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
+                nextSuperscript++;
+              }
+              
+              weekdayAnnotation = weekdayAnnotations.get(weekdaysKey);
             }
-            
-            weekdayAnnotation = weekdayAnnotations.get(weekdaysKey);
           }
           
           // Format: MM + terminus (lowercase) + weekday (superscript)
