@@ -2831,14 +2831,6 @@ window.debugStopCategories = function debugStopCategories() {
     const tailRows = rows.filter(r => r.nodeType === 'tail');
     const unclassifiedRows = rows.filter(r => r.nodeType === '(unclassified)');
 
-    console.log('Podsumowanie:', {
-      totalStops: rows.length,
-      core: coreRows.length,
-      passenger: passengerRows.length,
-      tail: tailRows.length,
-      unclassified: unclassifiedRows.length
-    });
-
     console.groupCollapsed('Core');
     console.table(coreRows);
     console.groupEnd();
@@ -6249,11 +6241,6 @@ state.currentTimetableData.stopDepartures = stopDepartures;
 
         // FIX #8: Check if this is a merged stop for tooltips on time cells
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
-        
-        // Debug: Log merged stop info
-        if (isMergedStop) {
-          console.log(`Merged stop detected: ${mStop.name}, stopIds:`, mStop.stopIds);
-        }
 
         // Inner loop: generate time cells for each trip
         finalTripMappings.forEach((mapping, tripIdx) => {
@@ -6276,7 +6263,6 @@ state.currentTimetableData.stopDepartures = stopDepartures;
                 
                 if (infoParts.length > 0) {
                   cellTooltip = infoParts.join('<br>');
-                  console.log(`Tooltip generated for ${actualStopId}:`, cellTooltip);
                 }
               }
             }
