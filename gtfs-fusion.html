@@ -917,13 +917,13 @@ let state = {
   stopsListMapState: null,
   stopsListSearchQuery: '',
   
-  // FAZA 1.5: Pagination state
+  // Pagination state for stops list
   stopsListPage: 1,
   stopsListPageSize: 50,
   
-  // FAZA 2.1: Virtual list state
+  // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
-  virtualListItemHeight: 68, // px - wysokość stop-group
+  virtualListItemHeight: 68, // px - height of stop-group element
 
   // Map layers for stop detail view
   stopDetailMapLayers: {},
@@ -2325,7 +2325,7 @@ agencies.forEach(a => {
 
 const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
 
-// FAZA 1.4 & 2.6: Clear caches when loading new data
+// Clear all caches when loading new GTFS data
 clearStationCache();
 clearStopsSearchIndex();
 clearStopToRoutesCache();
@@ -5174,7 +5174,7 @@ function selectRoute(route) {
 // ═══════════════════════════════════════════════════════════════
 // 12. UI RENDERING - STOPS VIEW
 // ═══════════════════════════════════════════════════════════════
-// FAZA 1.2: Search index dla szybszego wyszukiwania
+// Search index for fast stop name filtering
 
 function buildStopsSearchIndex(groupsArray) {
   if (stopsSearchIndex) return stopsSearchIndex;
@@ -5527,7 +5527,7 @@ async function renderStopsView() {
       }
     });
 
-    // FAZA 1.5: Add "Load More" button if there are more groups
+    // Add "Load More" button if there are more groups to display
     if (groupsToShow.length < totalGroups) {
       const remaining = totalGroups - groupsToShow.length;
       html += `
@@ -5550,7 +5550,7 @@ async function renderStopsView() {
     }
   }
 
-  // FAZA 2.4: Setup scroll listener for virtual list
+  // Setup scroll listener for virtual list rendering
   if (useVirtualList) {
     const container = stopsList.parentElement;
     if (container) {
@@ -5580,9 +5580,9 @@ async function renderStopsView() {
     
     const debouncedSearch = debounce((value) => {
       state.stopsListSearchQuery = value;
-      state.stopsListPage = 1; // FAZA 1.6: Reset pagination on search
+      state.stopsListPage = 1; // Reset pagination on new search
       renderStopsView();
-    }, 500); // FAZA 1.1: Zwiększone z 300ms do 500ms
+    }, 500); // Debounce delay: 500ms for better UX
     
     const newHandler = (e) => {
       debouncedSearch(e.target.value);
