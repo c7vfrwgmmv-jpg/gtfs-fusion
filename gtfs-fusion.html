@@ -1906,6 +1906,27 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
           const text = await zipFileEntry.async('string');
           
           const workerCode = `
+            const KEY_ALIAS = {
+              'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
+              'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
+              'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
+              'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
+              'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
+              'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
+              'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
+              'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
+              'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
+              'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date',
+              'shape id':'shape_id','shape_id':'shape_id','shape pt lat':'shape_pt_lat','shape_pt_lat':'shape_pt_lat',
+              'shape pt lon':'shape_pt_lon','shape_pt_lon':'shape_pt_lon','shape pt sequence':'shape_pt_sequence','shape_pt_sequence':'shape_pt_sequence'
+            };
+            
+            function normalizeKey(k) {
+              if (k === null || k === undefined) return k;
+              let key = String(k).replace(/^\\uFEFF/,'').trim().toLowerCase();
+              return KEY_ALIAS[key] || key.replace(/\\s+/g,'_');
+            }
+            
             function smartSplit(line) {
               if (!line.includes('"')) {
                 return line.split(',');
