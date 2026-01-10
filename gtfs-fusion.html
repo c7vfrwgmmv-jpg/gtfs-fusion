@@ -1667,80 +1667,184 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// STOP_SEQUENCE NORMALIZATION (geography-based)
+// STOP_SEQUENCE NORMALIZATION (geography-based union pattern)
 // ═══════════════════════════════════════════════════════════════
 
+// Constants for stop sequence normalization
+const POSITION_PADDING = 10;  // Spacing between positions (10, 20, 30...)
+const FALLBACK_STOP_SEQUENCE = 999;  // Fallback for stops not in pattern
+
 /**
- * Generate synthetic stop_sequence for ALL trips based on geography
- * Geography is the source of truth - normalize all sequences for consistency
- * @param {Array<Object>} trips - Array of trip objects
- * @param {Object} stopTimesIndex - Index of stop times by trip_id
- * @param {Object} stopsIndex - Index of stops by stop_id
+ * Normalize stop_sequence using union of all stops per route+direction
+ * Creates a complete geographic pattern from ALL trip variants
  */
 function enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex) {
-  let totalTrips = 0;
-  let fixedTrips = 0;
-  let skippedTrips = 0;
-  
+  // Group trips by route+direction
+  const groups = {};
   trips.forEach(trip => {
-    totalTrips++;
-    
-    const stopTimes = stopTimesIndex[trip.trip_id] || [];
-    if (stopTimes.length === 0) {
-      skippedTrips++;
-      return;
+    const directionId = trip.direction_id || '0';
+    const key = `${trip.route_id}_${directionId}`;
+    if (!groups[key]) {
+      groups[key] = {
+        trips: [],
+        route_id: trip.route_id,
+        direction_id: directionId
+      };
     }
-    
-    // Sort by original sequence first (best effort starting point)
-    stopTimes.sort((a, b) => 
-      parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)
-    );
-    
-    // Get coordinates for all stops
-    const stopsWithCoords = stopTimes.map((st) => {
-      const stop = stopsIndex[st.stop_id];
-      const lat = parseFloat(stop?.stop_lat);
-      const lon = parseFloat(stop?.stop_lon);
-      
-      if (isNaN(lat) || isNaN(lon)) {
-        return null;
-      }
-      
-      return { stopTime: st, lat, lon };
-    }).filter(Boolean);
-    
-    // Skip if missing coordinates (broken dataset - can't fix)
-    if (stopsWithCoords.length !== stopTimes.length) {
-      console.warn(`⚠️ Trip ${trip.trip_id}: ${stopTimes.length - stopsWithCoords.length} stops missing coordinates`);
-      skippedTrips++;
-      return;
-    }
-    
-    // Calculate cumulative distance from first stop
-    let cumulativeDistance = 0;
-    stopsWithCoords.forEach((s, idx) => {
-      if (idx === 0) {
-        s.distance = 0;
-      } else {
-        const prev = stopsWithCoords[idx - 1];
-        const segmentDist = haversineDistance(prev.lat, prev.lon, s.lat, s.lon);
-        cumulativeDistance += segmentDist;
-        s.distance = cumulativeDistance;
-      }
-    });
-    
-    // Sort by cumulative distance
-    stopsWithCoords.sort((a, b) => a.distance - b.distance);
-    
-    // Assign new stop_sequence (1, 2, 3...)
-    stopsWithCoords.forEach((item, idx) => {
-      item.stopTime.stop_sequence = idx + 1;
-    });
-    
-    fixedTrips++;
+    groups[key].trips.push(trip);
   });
   
-  console.log(`📍 Stop sequences normalized: ${fixedTrips}/${totalTrips} trips (${skippedTrips} skipped - missing coords)`);
+  let totalGroups = Object.keys(groups).length;
+  let processedTrips = 0;
+  let skippedTrips = 0;
+  
+  // Process each route+direction group
+  Object.values(groups).forEach(group => {
+    // Build pattern from UNION of all stops in this group
+    const pattern = buildUnionPattern(group.trips, stopTimesIndex, stopsIndex);
+    
+    if (!pattern || pattern.length === 0) {
+      skippedTrips += group.trips.length;
+      return;
+    }
+    
+    // Map all trips to the unified pattern
+    group.trips.forEach(trip => {
+      mapTripToPattern(trip, pattern, stopTimesIndex);
+      processedTrips++;
+    });
+  });
+  
+  console.log(`📍 Stop sequences normalized: ${processedTrips} trips in ${totalGroups} route+direction groups (${skippedTrips} skipped)`);
+}
+
+/**
+ * Build geographic pattern from UNION of all stops across all trips
+ * Returns complete pattern sorted by geographic position
+ */
+function buildUnionPattern(trips, stopTimesIndex, stopsIndex) {
+  // Collect ALL unique stops from ALL trips
+  const allStops = new Set();
+  
+  trips.forEach(trip => {
+    const stopTimes = stopTimesIndex[trip.trip_id] || [];
+    stopTimes.forEach(st => {
+      allStops.add(st.stop_id);
+    });
+  });
+  
+  if (allStops.size === 0) return null;
+  
+  // Convert to array with coordinates
+  const stopsWithCoords = Array.from(allStops).map(stopId => {
+    const stop = stopsIndex[stopId];
+    
+    // Check if stop exists before accessing properties
+    if (!stop) {
+      return null;
+    }
+    
+    const lat = parseFloat(stop.stop_lat);
+    const lon = parseFloat(stop.stop_lon);
+    
+    if (isNaN(lat) || isNaN(lon)) {
+      return null;
+    }
+    
+    return {
+      stop_id: stopId,
+      lat: lat,
+      lon: lon
+    };
+  }).filter(Boolean);
+  
+  if (stopsWithCoords.length === 0) return null;
+  
+  // Find the most common starting stop (appears first most often)
+  const startCandidates = {};
+  trips.forEach(trip => {
+    const stopTimes = stopTimesIndex[trip.trip_id] || [];
+    if (stopTimes.length > 0) {
+      // Sort by original sequence
+      const sorted = [...stopTimes].sort((a, b) => 
+        parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)
+      );
+      const firstStopId = sorted[0].stop_id;
+      startCandidates[firstStopId] = (startCandidates[firstStopId] || 0) + 1;
+    }
+  });
+  
+  // Get most common start stop
+  const startCandidateKeys = Object.keys(startCandidates);
+  if (startCandidateKeys.length === 0) {
+    // No valid start candidates, fall back to first stop in array
+    const firstStop = stopsWithCoords[0];
+    
+    // Calculate distance from first stop for ALL stops
+    stopsWithCoords.forEach(s => {
+      s.distance = haversineDistance(
+        firstStop.lat, firstStop.lon,
+        s.lat, s.lon
+      );
+    });
+  } else {
+    let startStopId = startCandidateKeys.reduce((a, b) => 
+      startCandidates[a] > startCandidates[b] ? a : b
+    );
+    
+    let startStop = stopsWithCoords.find(s => s.stop_id === startStopId);
+    if (!startStop) {
+      // Fallback to first stop in array
+      startStop = stopsWithCoords[0];
+    }
+    
+    // Calculate distance from start stop for ALL stops
+    stopsWithCoords.forEach(s => {
+      s.distance = haversineDistance(
+        startStop.lat, startStop.lon,
+        s.lat, s.lon
+      );
+    });
+  }
+  
+  // Sort by distance from start
+  stopsWithCoords.sort((a, b) => a.distance - b.distance);
+  
+  // Assign positions with padding (10, 20, 30... for easy insertion)
+  return stopsWithCoords.map((s, idx) => ({
+    stop_id: s.stop_id,
+    position: (idx + 1) * POSITION_PADDING
+  }));
+}
+
+/**
+ * Map a trip's stops to the unified pattern positions
+ */
+function mapTripToPattern(trip, pattern, stopTimesIndex) {
+  const tripStops = stopTimesIndex[trip.trip_id] || [];
+  let missingStops = 0;
+  
+  // Convert pattern to Map for O(1) lookup instead of O(n)
+  const patternMap = new Map(pattern.map(p => [p.stop_id, p.position]));
+  
+  tripStops.forEach(st => {
+    // Find this stop in the pattern
+    const position = patternMap.get(st.stop_id);
+    
+    if (position !== undefined) {
+      // Use pattern position
+      st.stop_sequence = position;
+    } else {
+      // Should never happen (all stops are in union), but fallback
+      missingStops++;
+      st.stop_sequence = FALLBACK_STOP_SEQUENCE;
+    }
+  });
+  
+  // Report missing stops once per trip (if any)
+  if (missingStops > 0) {
+    console.warn(`Trip ${trip.trip_id}: ${missingStops} stops not found in pattern`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2280,8 +2384,8 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
         state.loadingStep = 'Generowanie brakujących direction_id...'; render();
         enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex);
         
-        // Normalize ALL stop_sequence based on geography
-        state.loadingStep = 'Normalizacja stop_sequence (geografia)...'; render();
+        // Normalize ALL stop_sequence based on geographic union pattern
+        state.loadingStep = 'Normalizacja stop_sequence (unia geograficzna)...'; render();
         enrichTripsWithStopSequence(trips, stopTimesIndex, stopsIndex);
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
