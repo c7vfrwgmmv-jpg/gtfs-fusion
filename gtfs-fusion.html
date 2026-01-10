@@ -4048,37 +4048,18 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         rankFromRep.set(stationId, idx);
       });
       
-      // Build a map from stationId to finalRows entry
-      const stationToRow = new Map();
-      finalRows.forEach(row => {
+      // Helper to get station ID from row
+      const getRowStationId = (row) => {
         const stopId = row.stopIds && row.stopIds.length > 0 ? row.stopIds[0] : row.id;
-        const stationId = allowedSet !== undefined
+        return allowedSet !== undefined
           ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
           : getStationId(stopId, stopsIndex);
-        stationToRow.set(stationId, row);
-      });
+      };
       
-      // Build median rank map for stations not in rep order
-      const medianRankMap = new Map();
-      finalRows.forEach((row, idx) => {
-        const stopId = row.stopIds && row.stopIds.length > 0 ? row.stopIds[0] : row.id;
-        const stationId = allowedSet !== undefined
-          ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
-          : getStationId(stopId, stopsIndex);
-        medianRankMap.set(stationId, idx);
-      });
-      
-      // Override sort: stations in rep order first, then by median rank
-      finalRows.sort((a, b) => {
-        const stopIdA = a.stopIds && a.stopIds.length > 0 ? a.stopIds[0] : a.id;
-        const stopIdB = b.stopIds && b.stopIds.length > 0 ? b.stopIds[0] : b.id;
-        
-        const stationIdA = allowedSet !== undefined
-          ? getStationIdWithPolicy(stopIdA, stopsIndex, allowedSet)
-          : getStationId(stopIdA, stopsIndex);
-        const stationIdB = allowedSet !== undefined
-          ? getStationIdWithPolicy(stopIdB, stopsIndex, allowedSet)
-          : getStationId(stopIdB, stopsIndex);
+      // Override sort comparator using rep order, then median position, then name, then id
+      const overrideComparator = (a, b) => {
+        const stationIdA = getRowStationId(a);
+        const stationIdB = getRowStationId(b);
         
         const hasRepA = rankFromRep.has(stationIdA);
         const hasRepB = rankFromRep.has(stationIdB);
@@ -4098,14 +4079,63 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           return 1;
         }
         
-        // Neither in rep order: use median rank, then name, then stop_id
-        const medianA = medianRankMap.get(stationIdA) || Number.MAX_SAFE_INTEGER;
-        const medianB = medianRankMap.get(stationIdB) || Number.MAX_SAFE_INTEGER;
-        
-        if (medianA !== medianB) return medianA - medianB;
+        // Neither in rep order: use name, then stop_id (median already sorted)
         if (a.name !== b.name) return a.name.localeCompare(b.name);
         return a.id.localeCompare(b.id);
+      };
+      
+      // Rebuild finalRows with override sorting applied to branch stations within segments
+      const newFinalRows = [];
+      
+      // Sort and add pre-core branches with override
+      const sortedPreCore = preCoreBranches.map(branch => ({
+        id: branch.primaryStopId,
+        name: branch.name,
+        stopIds: branch.stopIds,
+        nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+      })).sort(overrideComparator);
+      newFinalRows.push(...sortedPreCore);
+      
+      // Add first core station
+      newFinalRows.push({
+        id: coreStationGroups[0].stopIds[0],
+        name: getStationDisplayName(coreStationGroups[0].stationId, coreStationGroups[0].stopIds),
+        stopIds: coreStationGroups[0].stopIds,
+        nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
       });
+      
+      // For each window, sort branches with override, then add next core
+      windows.forEach((window, winIdx) => {
+        const branchEntries = createSortedBranchEntries(window.branches);
+        const sortedWindowBranches = branchEntries.map(branch => ({
+          id: branch.primaryStopId,
+          name: branch.name,
+          stopIds: branch.stopIds,
+          nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+        })).sort(overrideComparator);
+        newFinalRows.push(...sortedWindowBranches);
+        
+        // Add next core station
+        const nextCore = window.endCore;
+        newFinalRows.push({
+          id: nextCore.stopIds[0],
+          name: getStationDisplayName(nextCore.stationId, nextCore.stopIds),
+          stopIds: nextCore.stopIds,
+          nodeType: nodeTypes[nextCore.stopIds[0]] || 'core'
+        });
+      });
+      
+      // Sort and add post-core branches with override
+      const sortedPostCore = postCoreBranches.map(branch => ({
+        id: branch.primaryStopId,
+        name: branch.name,
+        stopIds: branch.stopIds,
+        nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+      })).sort(overrideComparator);
+      newFinalRows.push(...sortedPostCore);
+      
+      // Replace finalRows with the overridden version
+      return newFinalRows;
     }
   }
 
