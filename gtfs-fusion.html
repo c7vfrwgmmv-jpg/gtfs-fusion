@@ -3445,7 +3445,8 @@ function buildRouteProfileForCurrentSelection() {
   console.log(`  ❌ Odfiltrowano: ${tripsBeforeFilter - filteredTrips.length} trips (wyjazdy/zjazdy z zajezdni)`);
   
   // Pokaż przykłady odfiltrowanych trips
-  const removedTrips = allTrips.filter(t => !filteredTrips.includes(t)).slice(0, 3);
+  const filteredTripIds = new Set(filteredTrips.map(t => t.trip_id));
+  const removedTrips = allTrips.filter(t => !filteredTripIds.has(t.trip_id)).slice(0, 3);
   if (removedTrips.length > 0) {
     console.log(`  📋 Przykłady ODFILTROWANYCH trips:`);
     removedTrips.forEach(trip => {
