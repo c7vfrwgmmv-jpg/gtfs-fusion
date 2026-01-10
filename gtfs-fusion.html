@@ -788,7 +788,7 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
       108: { label: 'Rail shuttle (within complex)', color:'#9ca3af', weight:2 }, 109: { label: 'Suburban railway', color:'#059669', weight:4 },
       110: { label: 'Replacement rail service', color:'#9ca3af', weight:3 }, 111: { label: 'Special rail service', color:'#6b7280', weight:3 },
       112: { label: 'Lorry transport rail service', color:'#6b7280', weight:3 },
-	  113: { label: 'All rail services', color:'#10b981', weight:4 }, 
+      113: { label: 'All rail services', color:'#10b981', weight:4 }, 
       114: { label: 'Cross-country rail service', color:'#10b981', weight: 4 }, 115: { label: 'Vehicle transport rail service', color:'#6b7280', weight:3 },
       116: { label: 'Rack and pinion railway', color:'#f97316', weight:3 }, 117: { label: 'Additional rail service', color:'#0b74de', weight:3 },
 
@@ -2111,14 +2111,9 @@ rawHeaders.forEach((h, i) => {
         const zip = await unzipWithFflate(file);
         state.loadingStep = 'Wyodrębnianie plików...'; render();
         
-        const routesFile = findFile(zip.files, 'routes.txt');
-        const tripsFile = findFile(zip.files, 'trips.txt');
-        const stopTimesFile = findFile(zip.files, 'stop_times.txt');
-        const stopsFile = findFile(zip.files, 'stops.txt');
-        const calendarFile = findFile(zip.files, 'calendar.txt');
-        const calendarDatesFile = findFile(zip.files, 'calendar_dates.txt');
-        const agenciesFile = findFile(zip.files, 'agency.txt');
-        const shapesFile = findFile(zip.files, 'shapes.txt');
+        const [routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile] = 
+          ['routes.txt', 'trips.txt', 'stop_times.txt', 'stops.txt', 'calendar.txt', 'calendar_dates.txt', 'agency.txt', 'shapes.txt']
+          .map(filename => findFile(zip.files, filename));
         
         // Walidacja wymaganych plików
         if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
