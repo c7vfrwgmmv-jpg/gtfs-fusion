@@ -3550,6 +3550,62 @@ function getCanonicalKeyForCurrentSelection() {
 }
 
 /**
+ * Compute representative station order from the longest trip.
+ * Used to override canonical master list order when conflicts exist in directionless datasets.
+ * 
+ * @param {Array} allTrips - All trips in the current selection
+ * @param {Object} stopTimesIndex - Index of stop times by trip_id
+ * @param {Object} stopsIndex - Index of stops by stop_id
+ * @param {Set} allowedSet - Set of stations allowed to merge (stationMergeAllowed)
+ * @returns {Array} Array of station IDs in the order they appear in the longest trip
+ */
+function computeRepStationOrder(allTrips, stopTimesIndex, stopsIndex, allowedSet) {
+  if (!allTrips || allTrips.length === 0) return [];
+  
+  // Find the longest trip by stop_sequence count
+  let longestTrip = null;
+  let maxStops = 0;
+  
+  allTrips.forEach(trip => {
+    const stopTimes = stopTimesIndex[trip.trip_id] || [];
+    const sortedStops = stopTimes
+      .filter(st => st && st.stop_id)
+      .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+    
+    if (sortedStops.length > maxStops) {
+      maxStops = sortedStops.length;
+      longestTrip = trip;
+    }
+  });
+  
+  if (!longestTrip) return [];
+  
+  // Build station-aware sequence from the longest trip
+  const stopTimes = stopTimesIndex[longestTrip.trip_id] || [];
+  const sortedStops = stopTimes
+    .filter(st => st && st.stop_id)
+    .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+  
+  const stationOrder = [];
+  let prevStationId = null;
+  
+  sortedStops.forEach(st => {
+    const stopId = st.stop_id;
+    const stationId = allowedSet !== undefined
+      ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
+      : getStationId(stopId, stopsIndex);
+    
+    // Deduplicate adjacent repeats
+    if (stationId !== prevStationId) {
+      stationOrder.push(stationId);
+      prevStationId = stationId;
+    }
+  });
+  
+  return stationOrder;
+}
+
+/**
  * Build a canonical master list from ALL trips (no date filter, tail included).
  * This list is stable per route/group + direction and never changes.
  * Only visibility is filtered at render time.
@@ -3840,6 +3896,218 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════
+  // DIRECTIONLESS CONFLICT DETECTION AND OVERRIDE
+  // ═══════════════════════════════════════════════════════════════
+  // For directionless datasets, override row order using longest trip when conflicts exist.
+  // Gating: Activate only if ALL trips have missing direction_id.
+  const isDirectionless = allTrips.every(trip => {
+    const dirId = trip.direction_id;
+    return dirId === undefined || dirId === null || dirId === '';
+  });
+  
+  if (isDirectionless && allTrips.length > 0) {
+    // Conflict detection parameters
+    const epsilonMedian = 0.02; // Median tie threshold (within ±2% normalized position)
+    const conflictThreshold = 0.30; // Pairwise contradiction threshold (≥30% frequency)
+    
+    // Build a map of all branch entries across all windows + pre/post segments
+    const allBranchEntries = new Map(); // stationId -> branch entry
+    
+    // Helper to collect branch entries with their segment info
+    const collectBranchEntries = (branches, segmentType) => {
+      branches.forEach(branch => {
+        allBranchEntries.set(branch.stationId, {
+          ...branch,
+          segment: segmentType
+        });
+      });
+    };
+    
+    // Collect all branch entries
+    collectBranchEntries(preCoreBranches, 'preCore');
+    windows.forEach((window, idx) => {
+      const branchEntries = createSortedBranchEntries(window.branches);
+      collectBranchEntries(branchEntries, `window${idx}`);
+    });
+    collectBranchEntries(postCoreBranches, 'postCore');
+    
+    // Conflict detection 1: Check for median ties within segments
+    let hasMedianTies = false;
+    
+    // Check pre-core
+    for (let i = 0; i < preCoreBranches.length - 1; i++) {
+      if (Math.abs(preCoreBranches[i].median - preCoreBranches[i + 1].median) <= epsilonMedian) {
+        hasMedianTies = true;
+        break;
+      }
+    }
+    
+    // Check windows
+    if (!hasMedianTies) {
+      for (const window of windows) {
+        const branchEntries = createSortedBranchEntries(window.branches);
+        for (let i = 0; i < branchEntries.length - 1; i++) {
+          if (Math.abs(branchEntries[i].median - branchEntries[i + 1].median) <= epsilonMedian) {
+            hasMedianTies = true;
+            break;
+          }
+        }
+        if (hasMedianTies) break;
+      }
+    }
+    
+    // Check post-core
+    if (!hasMedianTies) {
+      for (let i = 0; i < postCoreBranches.length - 1; i++) {
+        if (Math.abs(postCoreBranches[i].median - postCoreBranches[i + 1].median) <= epsilonMedian) {
+          hasMedianTies = true;
+          break;
+        }
+      }
+    }
+    
+    // Conflict detection 2: Check for contradictory pairwise orders
+    let hasContradictoryOrders = false;
+    
+    if (!hasMedianTies) {
+      // Build pairwise order statistics
+      const pairwiseStats = new Map(); // "stationA|stationB" -> { AbeforeB: count, BbeforeA: count }
+      
+      allTrips.forEach(trip => {
+        const stopTimes = stopTimesIndex[trip.trip_id] || [];
+        const sortedStops = stopTimes
+          .filter(st => st && st.stop_id)
+          .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+        
+        // Build station positions for this trip
+        const stationPositions = new Map();
+        sortedStops.forEach((st, idx) => {
+          const stopId = st.stop_id;
+          const stationId = allowedSet !== undefined
+            ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
+            : getStationId(stopId, stopsIndex);
+          
+          if (!stationPositions.has(stationId)) {
+            stationPositions.set(stationId, idx);
+          }
+        });
+        
+        // Check all pairs of branch stations
+        const branchStations = Array.from(allBranchEntries.keys());
+        for (let i = 0; i < branchStations.length; i++) {
+          for (let j = i + 1; j < branchStations.length; j++) {
+            const stA = branchStations[i];
+            const stB = branchStations[j];
+            
+            const posA = stationPositions.get(stA);
+            const posB = stationPositions.get(stB);
+            
+            if (posA !== undefined && posB !== undefined) {
+              const pairKey = `${stA}|${stB}`;
+              if (!pairwiseStats.has(pairKey)) {
+                pairwiseStats.set(pairKey, { AbeforeB: 0, BbeforeA: 0 });
+              }
+              const stats = pairwiseStats.get(pairKey);
+              if (posA < posB) {
+                stats.AbeforeB++;
+              } else if (posB < posA) {
+                stats.BbeforeA++;
+              }
+            }
+          }
+        }
+      });
+      
+      // Check if any pair has contradictory orders
+      for (const [pairKey, stats] of pairwiseStats.entries()) {
+        const total = stats.AbeforeB + stats.BbeforeA;
+        if (total > 0) {
+          const freqAB = stats.AbeforeB / total;
+          const freqBA = stats.BbeforeA / total;
+          
+          if (freqAB >= conflictThreshold && freqBA >= conflictThreshold) {
+            hasContradictoryOrders = true;
+            break;
+          }
+        }
+      }
+    }
+    
+    // Apply override if conflicts exist
+    const hasConflict = hasMedianTies || hasContradictoryOrders;
+    
+    if (hasConflict) {
+      // Compute representative station order from longest trip
+      const repStationOrder = computeRepStationOrder(allTrips, stopTimesIndex, stopsIndex, allowedSet);
+      
+      // Build rank map from representative order
+      const rankFromRep = new Map();
+      repStationOrder.forEach((stationId, idx) => {
+        rankFromRep.set(stationId, idx);
+      });
+      
+      // Build a map from stationId to finalRows entry
+      const stationToRow = new Map();
+      finalRows.forEach(row => {
+        const stopId = row.stopIds && row.stopIds.length > 0 ? row.stopIds[0] : row.id;
+        const stationId = allowedSet !== undefined
+          ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
+          : getStationId(stopId, stopsIndex);
+        stationToRow.set(stationId, row);
+      });
+      
+      // Build median rank map for stations not in rep order
+      const medianRankMap = new Map();
+      finalRows.forEach((row, idx) => {
+        const stopId = row.stopIds && row.stopIds.length > 0 ? row.stopIds[0] : row.id;
+        const stationId = allowedSet !== undefined
+          ? getStationIdWithPolicy(stopId, stopsIndex, allowedSet)
+          : getStationId(stopId, stopsIndex);
+        medianRankMap.set(stationId, idx);
+      });
+      
+      // Override sort: stations in rep order first, then by median rank
+      finalRows.sort((a, b) => {
+        const stopIdA = a.stopIds && a.stopIds.length > 0 ? a.stopIds[0] : a.id;
+        const stopIdB = b.stopIds && b.stopIds.length > 0 ? b.stopIds[0] : b.id;
+        
+        const stationIdA = allowedSet !== undefined
+          ? getStationIdWithPolicy(stopIdA, stopsIndex, allowedSet)
+          : getStationId(stopIdA, stopsIndex);
+        const stationIdB = allowedSet !== undefined
+          ? getStationIdWithPolicy(stopIdB, stopsIndex, allowedSet)
+          : getStationId(stopIdB, stopsIndex);
+        
+        const hasRepA = rankFromRep.has(stationIdA);
+        const hasRepB = rankFromRep.has(stationIdB);
+        
+        // Both in rep order: use rep rank
+        if (hasRepA && hasRepB) {
+          return rankFromRep.get(stationIdA) - rankFromRep.get(stationIdB);
+        }
+        
+        // Only A in rep order: A comes first
+        if (hasRepA && !hasRepB) {
+          return -1;
+        }
+        
+        // Only B in rep order: B comes first
+        if (!hasRepA && hasRepB) {
+          return 1;
+        }
+        
+        // Neither in rep order: use median rank, then name, then stop_id
+        const medianA = medianRankMap.get(stationIdA) || Number.MAX_SAFE_INTEGER;
+        const medianB = medianRankMap.get(stationIdB) || Number.MAX_SAFE_INTEGER;
+        
+        if (medianA !== medianB) return medianA - medianB;
+        if (a.name !== b.name) return a.name.localeCompare(b.name);
+        return a.id.localeCompare(b.id);
+      });
+    }
+  }
 
   return finalRows;
 }
