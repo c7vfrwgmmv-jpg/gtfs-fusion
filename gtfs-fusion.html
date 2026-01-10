@@ -6548,6 +6548,11 @@ state.currentTimetableData.stopDepartures = stopDepartures;
 
         // FIX #8: Check if this is a merged stop for tooltips on time cells
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
+        
+        // Debug: Log merged stop info
+        if (isMergedStop) {
+          console.log(`Merged stop detected: ${mStop.name}, stopIds:`, mStop.stopIds);
+        }
 
         // Inner loop: generate time cells for each trip
         finalTripMappings.forEach((mapping, tripIdx) => {
@@ -6570,6 +6575,7 @@ state.currentTimetableData.stopDepartures = stopDepartures;
                 
                 if (infoParts.length > 0) {
                   cellTooltip = infoParts.join('<br>');
+                  console.log(`Tooltip generated for ${actualStopId}:`, cellTooltip);
                 }
               }
             }
