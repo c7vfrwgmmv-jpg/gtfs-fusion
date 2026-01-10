@@ -3410,6 +3410,7 @@ function buildRouteProfileForCurrentSelection() {
   const filteredTrips = allTrips.filter(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     
+    // Allow trips with no stops to pass through (defensive programming)
     if (stops.length === 0) return true;
     
     const firstStopId = stops[0].stop_id;
