@@ -737,6 +737,10 @@ video {
 // ═══════════════════════════════════════════════════════════════
 // 1. CONSTANTS & CONFIGURATION
 // ═══════════════════════════════════════════════════════════════
+
+// Turbo-bearing configuration: number of segments for multi-segment bearing analysis
+const TURBO_BEARING_SEGMENTS = 6; // Change to 8 or other value if needed
+
 const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
 const SUNDAY = 0, WEDNESDAY = 3, SATURDAY = 6;
 const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>` };
@@ -1480,6 +1484,172 @@ function findReversedPair(tripPatterns) {
 }
 
 /**
+ * Calculate bearing vector (multi-segment bearings) for a trip
+ * @param {Array<string>} stopSequence - Array of stop_ids
+ * @param {Object} stopsIndex - Index of stops by stop_id
+ * @param {number} numSegments - Number of segments to divide the trip into
+ * @returns {Array<number>} Array of bearings for each segment, or null if cannot calculate
+ */
+function calculateBearingVector(stopSequence, stopsIndex, numSegments) {
+  if (!stopSequence || stopSequence.length < 2) return null;
+  
+  // For very short trips, fall back to single bearing
+  if (stopSequence.length < numSegments) {
+    const firstStop = stopsIndex[stopSequence[0]];
+    const lastStop = stopsIndex[stopSequence[stopSequence.length - 1]];
+    
+    if (!firstStop || !lastStop) return null;
+    
+    const lat1 = parseFloat(firstStop.stop_lat);
+    const lon1 = parseFloat(firstStop.stop_lon);
+    const lat2 = parseFloat(lastStop.stop_lat);
+    const lon2 = parseFloat(lastStop.stop_lon);
+    
+    if (isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) return null;
+    
+    return [calculateBearing(lat1, lon1, lat2, lon2)];
+  }
+  
+  const bearings = [];
+  const segmentSize = stopSequence.length / numSegments;
+  
+  for (let i = 0; i < numSegments; i++) {
+    const startIdx = Math.floor(i * segmentSize);
+    const endIdx = Math.floor((i + 1) * segmentSize);
+    
+    // For the last segment, use the actual last stop
+    const actualEndIdx = (i === numSegments - 1) ? stopSequence.length - 1 : endIdx;
+    
+    const startStop = stopsIndex[stopSequence[startIdx]];
+    const endStop = stopsIndex[stopSequence[actualEndIdx]];
+    
+    if (!startStop || !endStop) continue;
+    
+    const lat1 = parseFloat(startStop.stop_lat);
+    const lon1 = parseFloat(startStop.stop_lon);
+    const lat2 = parseFloat(endStop.stop_lat);
+    const lon2 = parseFloat(endStop.stop_lon);
+    
+    if (isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) continue;
+    
+    const bearing = calculateBearing(lat1, lon1, lat2, lon2);
+    bearings.push(bearing);
+  }
+  
+  return bearings.length > 0 ? bearings : null;
+}
+
+/**
+ * Calculate angular difference between two bearings (0-180°)
+ * @param {number} bearing1 - First bearing (0-360°)
+ * @param {number} bearing2 - Second bearing (0-360°)
+ * @returns {number} Angular difference in degrees (0-180°)
+ */
+function bearingDifference(bearing1, bearing2) {
+  let diff = Math.abs(bearing1 - bearing2);
+  if (diff > 180) diff = 360 - diff;
+  return diff;
+}
+
+/**
+ * Compare two bearing vectors to determine if they represent opposite directions
+ * @param {Array<number>} vector1 - First bearing vector
+ * @param {Array<number>} vector2 - Second bearing vector
+ * @returns {number} 1 if same direction, -1 if opposite, 0 if uncertain
+ */
+function compareBearingVectors(vector1, vector2) {
+  if (!vector1 || !vector2 || vector1.length === 0 || vector2.length === 0) return 0;
+  
+  const minLength = Math.min(vector1.length, vector2.length);
+  let sameCount = 0;
+  let oppositeCount = 0;
+  
+  for (let i = 0; i < minLength; i++) {
+    const diff = bearingDifference(vector1[i], vector2[i]);
+    
+    // If angle difference < 60°, consider it same direction
+    if (diff < 60) {
+      sameCount++;
+    }
+    // If angle difference > 120°, consider it opposite direction
+    else if (diff > 120) {
+      oppositeCount++;
+    }
+    // 60-120° is ambiguous, don't count
+  }
+  
+  // Require at least 66% of segments to match directionality
+  const threshold = minLength * 0.66;
+  
+  if (sameCount >= threshold) return 1;
+  if (oppositeCount >= threshold) return -1;
+  return 0;
+}
+
+/**
+ * Turbo-bearing: Cluster trips using multi-segment bearing analysis
+ * @param {Array<Object>} tripPatterns - Array of {tripId, trip, sequence}
+ * @param {Object} stopsIndex - Index of stops by stop_id
+ * @param {number} numSegments - Number of segments for bearing analysis
+ * @returns {Object} {group0: [...tripIds], group1: [...tripIds] or null}
+ */
+function turboBearingCluster(tripPatterns, stopsIndex, numSegments) {
+  if (tripPatterns.length === 0) {
+    return { group0: [], group1: null };
+  }
+  
+  if (tripPatterns.length === 1) {
+    return { group0: [tripPatterns[0].tripId], group1: null };
+  }
+  
+  // Find the longest trip as reference pattern
+  let longestPattern = tripPatterns[0];
+  for (const pattern of tripPatterns) {
+    if (pattern.sequence.length > longestPattern.sequence.length) {
+      longestPattern = pattern;
+    }
+  }
+  
+  // Calculate bearing vector for reference trip
+  const refVector = calculateBearingVector(longestPattern.sequence, stopsIndex, numSegments);
+  if (!refVector) {
+    // Fallback: assign all to direction 0
+    return { group0: tripPatterns.map(p => p.tripId), group1: null };
+  }
+  
+  // Calculate bearing vectors for all trips and compare to reference
+  const group0 = []; // Same direction as reference
+  const group1 = []; // Opposite direction to reference
+  
+  for (const pattern of tripPatterns) {
+    const tripVector = calculateBearingVector(pattern.sequence, stopsIndex, numSegments);
+    
+    if (!tripVector) {
+      // Cannot calculate, assign to group0
+      group0.push(pattern.tripId);
+      continue;
+    }
+    
+    const comparison = compareBearingVectors(refVector, tripVector);
+    
+    if (comparison === -1) {
+      // Opposite direction
+      group1.push(pattern.tripId);
+    } else {
+      // Same direction or uncertain - assign to group0
+      group0.push(pattern.tripId);
+    }
+  }
+  
+  // If no trips in group1, return single direction
+  if (group1.length === 0) {
+    return { group0: tripPatterns.map(p => p.tripId), group1: null };
+  }
+  
+  return { group0, group1 };
+}
+
+/**
  * Cluster trips by bearing into 1 or 2 groups
  * @param {Array<Object>} bearingData - Array of {tripId, bearing}
  * @returns {Object} {group0: [...tripIds], group1: [...tripIds] or null}
@@ -1614,41 +1784,10 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
       continue;
     }
     
-    // STEP 3B: Geographic analysis (bearing-based)
-    const bearingData = [];
-    
-    for (const pattern of validPatterns) {
-      const seq = pattern.sequence;
-      if (seq.length < 2) continue;
-      
-      // Get first and last stop coordinates
-      const firstStop = stopsIndex[seq[0]];
-      const lastStop = stopsIndex[seq[seq.length - 1]];
-      
-      if (!firstStop || !lastStop) continue;
-      
-      const lat1 = parseFloat(firstStop.stop_lat);
-      const lon1 = parseFloat(firstStop.stop_lon);
-      const lat2 = parseFloat(lastStop.stop_lat);
-      const lon2 = parseFloat(lastStop.stop_lon);
-      
-      if (isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) continue;
-      
-      const bearing = calculateBearing(lat1, lon1, lat2, lon2);
-      bearingData.push({
-        tripId: pattern.tripId,
-        bearing: bearing
-      });
-    }
-    
-    if (bearingData.length === 0) {
-      // No geographic data, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    // Cluster by bearing
-    const bearingGroups = clusterByBearing(bearingData);
+    // STEP 3B: Turbo-bearing analysis (multi-segment bearing matching)
+    // Uses multiple segments along the route instead of just first->last bearing
+    // This handles L-shaped, U-shaped, and other non-linear routes correctly
+    const bearingGroups = turboBearingCluster(validPatterns, stopsIndex, TURBO_BEARING_SEGMENTS);
     
     const bearingGroup0Set = new Set(bearingGroups.group0);
     const bearingGroup1Set = bearingGroups.group1 ? new Set(bearingGroups.group1) : null;
