@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>GTFS Fusion</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script>
     // Define exports for fflate UMD compatibility
     if (typeof exports === 'undefined') {
@@ -89,14 +88,6 @@
   box-sizing: border-box;
   line-height: 1;
 }
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: nowrap;    /* klucz: zapobiega zawijaniu */
-  min-width: 0;
-}
-
 /* badge + title: inline-flex, nie zawija się wewnętrznie; title może się kurczyć */
 .header-with-badge {
   display: inline-flex;
@@ -742,8 +733,6 @@ video {
 <body>
   <div id="root"></div>
   <script>
-// === ROUTE CACHE MODULE (Removed - no longer using external routing APIs) ===
-// Routes are now rendered using shapes.txt from GTFS or straight lines
 
 // ═══════════════════════════════════════════════════════════════
 // 1. CONSTANTS & CONFIGURATION
@@ -798,8 +787,8 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
       106: { label: 'Regional rail service', color:'#059669', weight:4 }, 107: { label: 'Tourist railway service', color:'#f59e0b', weight:3 },
       108: { label: 'Rail shuttle (within complex)', color:'#9ca3af', weight:2 }, 109: { label: 'Suburban railway', color:'#059669', weight:4 },
       110: { label: 'Replacement rail service', color:'#9ca3af', weight:3 }, 111: { label: 'Special rail service', color:'#6b7280', weight:3 },
-      112: { label: 'Lorry transport rail service', color:'#6b7280', weight:3 }, 113: { label: 'All rail services', color:'#0b74de', weight:4 },
-	  113: { label: 'All rail services', color:'#10b981', weight:4 },        // ← ZMIEŃ 
+      112: { label: 'Lorry transport rail service', color:'#6b7280', weight:3 },
+	  113: { label: 'All rail services', color:'#10b981', weight:4 }, 
       114: { label: 'Cross-country rail service', color:'#10b981', weight: 4 }, 115: { label: 'Vehicle transport rail service', color:'#6b7280', weight:3 },
       116: { label: 'Rack and pinion railway', color:'#f97316', weight:3 }, 117: { label: 'Additional rail service', color:'#0b74de', weight:3 },
 
@@ -2117,32 +2106,19 @@ rawHeaders.forEach((h, i) => {
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
-        // Check if fflate is available
-        let zip;
-        let routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile;
+        // Use fflate for fast ZIP decompression
+        state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
+        const zip = await unzipWithFflate(file);
+        state.loadingStep = 'Wyodrębnianie plików...'; render();
         
-        if (typeof fflate === 'undefined') {
-          state.loadingStep = 'Rozpakowywanie ZIP (JSZip)...'; render();
-          zip = await JSZip.loadAsync(file);
-          state.loadingStep = 'Wyodrębnianie plików...'; render();
-          
-          const files = ['routes.txt','trips.txt','stop_times.txt','stops.txt','calendar.txt','calendar_dates.txt','agency.txt','shapes.txt'];
-          [routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile] = files.map(f => zip.file(f));
-        } else {
-          // Use fflate (fast path)
-          state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
-          zip = await unzipWithFflate(file);
-          state.loadingStep = 'Wyodrębnianie plików...'; render();
-          
-          routesFile = findFile(zip.files, 'routes.txt');
-          tripsFile = findFile(zip.files, 'trips.txt');
-          stopTimesFile = findFile(zip.files, 'stop_times.txt');
-          stopsFile = findFile(zip.files, 'stops.txt');
-          calendarFile = findFile(zip.files, 'calendar.txt');
-          calendarDatesFile = findFile(zip.files, 'calendar_dates.txt');
-          agenciesFile = findFile(zip.files, 'agency.txt');
-          shapesFile = findFile(zip.files, 'shapes.txt');
-        }
+        const routesFile = findFile(zip.files, 'routes.txt');
+        const tripsFile = findFile(zip.files, 'trips.txt');
+        const stopTimesFile = findFile(zip.files, 'stop_times.txt');
+        const stopsFile = findFile(zip.files, 'stops.txt');
+        const calendarFile = findFile(zip.files, 'calendar.txt');
+        const calendarDatesFile = findFile(zip.files, 'calendar_dates.txt');
+        const agenciesFile = findFile(zip.files, 'agency.txt');
+        const shapesFile = findFile(zip.files, 'shapes.txt');
         
         // Walidacja wymaganych plików
         if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
@@ -2353,11 +2329,6 @@ function collectRouteType(route) {
         if (ROUTE_TYPE_META_BASIC[t]) return ROUTE_TYPE_META_BASIC[t];
       }
       return cm[3] || ROUTE_TYPE_META_BASIC[3] || { label:'Other', color:'#6b7280', weight:2 };
-    }
-
-    function renderRouteIcon(svgPath, color='#000', size=14) {
-      if (!svgPath) return '';
-      return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="${svgPath}" /></svg>`;
     }
 
 function buildLogicalRoutes(routes, agenciesIndex) {
@@ -6437,8 +6408,6 @@ if (state.gtfsData && state.selectedRoute) {
       resetMap();
       render();
     });
-
-    function checkLeafletLoaded() { if (typeof window.L !== 'undefined') { state.mapLoaded=true; render(); } else setTimeout(checkLeafletLoaded,100); }
 
     // initial render
     render();
