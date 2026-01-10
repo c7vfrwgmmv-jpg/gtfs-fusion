@@ -4500,7 +4500,7 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
     }
 
     // Helper function to create SVG icon with dynamic color
-    function createSvgIcon(color, size = 24) {
+    function createSvgIcon(color, size = 12) {
       const svgIcon = `
         <svg version="1.2" width="${size}" height="${size}" viewBox="0 0 21000 29700" preserveAspectRatio="xMidYMid" fill-rule="evenodd" xmlns="http://www.w3.org/2000/svg">
           <g>
@@ -4786,7 +4786,7 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
         window.L.marker([sLat, sLon], {
-          icon: createSvgIcon(color, 16)
+          icon: createSvgIcon(color, 6)
         }).addTo(layer).bindPopup(s.name);
 
         allBounds.push([sLat, sLon]);
@@ -4799,7 +4799,7 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
     
     // Add main stop (selected) as larger marker
     window.L.marker([lat, lon], {
-      icon: createSvgIcon('#ef4444', 32)
+      icon: createSvgIcon('#ef4444', 16)
     }).addTo(map).bindPopup(`<b>${stop.stop_name}</b>`).openPopup();
     
     allBounds.push([lat, lon]);
@@ -5487,7 +5487,7 @@ function renderStopsView() {
       if (isNaN(lat) || isNaN(lon)) return;
       
       const marker = window.L.marker([lat, lon], {
-        icon: createSvgIcon('#3b82f6', 24)
+        icon: createSvgIcon('#3b82f6', 12)
       });
       
       // Popup behavior depends on whether a group is expanded
@@ -7524,7 +7524,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
         const sLat = parseFloat(s.lat);
         const sLon = parseFloat(s.lon);
         window.L.marker([sLat, sLon], {
-          icon: createSvgIcon(color, 16)
+          icon: createSvgIcon(color, 6)
         }).addTo(layer).bindPopup(s.name);
       });
       
