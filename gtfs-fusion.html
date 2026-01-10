@@ -4288,6 +4288,9 @@ function debugAdjacentSwapQuality(orderedTrips, tripMappings, visiblePassengerRo
   return { inversions, samplePairs };
 }
 
+// Expose debug function to window scope for console access
+window.debugAdjacentSwapQuality = debugAdjacentSwapQuality;
+
 /**
  * NOTE: This function is DEPRECATED and no longer used in renderTimetable.
  * It is kept for reference only. The timetable now uses adjacentSwapOrder instead.
@@ -6425,7 +6428,7 @@ const orderedDepotTrips = depotTrips.slice().sort((a, b) => {
   return a.trip_id.localeCompare(b.trip_id);
 });
 
-// Combine: service trips first (pairwise ordered), then depot trips (by firstCoreTime)
+// Combine: service trips first (adjacent-swaps ordered), then depot trips (by firstCoreTime)
 let orderedTrips;
 if (state.showAllTrips) {
   orderedTrips = [...orderedServiceTrips, ...orderedDepotTrips];
