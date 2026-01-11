@@ -917,13 +917,13 @@ let state = {
   stopsListMapState: null,
   stopsListSearchQuery: '',
   
-  // FAZA 1.5: Pagination state
+  // Pagination state for stops list
   stopsListPage: 1,
   stopsListPageSize: 50,
   
-  // FAZA 2.1: Virtual list state
+  // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
-  virtualListItemHeight: 68, // px - wysokość stop-group
+  virtualListItemHeight: 68, // px - height of stop-group element
 
   // Map layers for stop detail view
   stopDetailMapLayers: {},
@@ -945,7 +945,10 @@ let state = {
 
   // Column order cache: trips order per (key, dir, date, showAllTrips)
   // Structure: columnOrderCache[cacheKey] = [trip_id, ...]
-  columnOrderCache: {}
+  columnOrderCache: {},
+  
+  // Performance metrics from last load
+  lastLoadMetrics: null
 };
 
 let stopsSearchIndex = null;
@@ -955,63 +958,6 @@ let stationNameToIdCache = null;
 
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
-// ═══════════════════════════════════════════════════════════════
-//
-// DATA PROCESSING PIPELINE OVERVIEW:
-// ══════════════════════════════════
-// 
-// The GTFS data flows through several processing stages:
-//
-// 1. PARSE (CSV → Raw Objects)
-//    - ZIP extraction & CSV parsing
-//    - Worker-based parallel parsing for performance
-//    - Produces raw JavaScript objects
-//
-// 2. NORMALIZE (Raw → Standardized)
-//    - normalizeKey: CSV headers → GTFS standard field names
-//    - normalizeRecord: Clean values (trim, remove quotes, handle nulls)
-//    - Output: Clean GTFS-compliant records
-//
-// 3. INDEX (Records → Lookup Tables)
-//    - Build indexes: stopTimesIndex, stopsIndex, shapesIndex, etc.
-//    - Group related data for fast lookup
-//    - Output: Queryable data structures
-//
-// 4. ENRICH (Add Computed Fields)
-//    - enrichTripsWithDirectionId: Generate missing direction_id
-//    - Shape simplification: Reduce coordinate density
-//    - Route pattern analysis: Build canonical trip patterns
-//    - Output: Enhanced domain model
-//
-// 5. CACHE (Persist Processed Data)
-//    - cacheShapes: Store simplified shapes in localStorage
-//    - Compression: Delta encoding + base36
-//    - TTL: 30 days
-//    - Output: Faster subsequent loads
-//
-// 6. RENDER (Display in UI)
-//    - Map visualization (Leaflet)
-//    - Timetable generation
-//    - escapeHtml: Sanitize for safe HTML rendering
-//    - Output: Interactive web interface
-//
-// FUNCTION PURITY:
-// ────────────────
-// @pure      = No side effects, same input → same output (can be memoized)
-// @impure    = Has side effects (DOM updates, localStorage, mutations)
-// @cached    = Results are memoized internally
-// @presentation = UI-specific logic (not domain logic)
-//
-// MODULARITY:
-// ───────────
-// Functions are organized by concern:
-// - 3.1: Data Normalization (CSV/GTFS cleaning)
-// - 3.2: Time/Date (GTFS temporal logic)
-// - 3.3: Geometry/Geography (WGS84 calculations)
-// - 3.4: Cache/Serialization (localStorage persistence)
-// - 3.5: Data Quality (Heuristics for feed quality)
-// - 3.6: Direction Enrichment (direction_id generation)
-//
 // ═══════════════════════════════════════════════════════════════
 
 const $ = (id) => document.getElementById(id);
@@ -1031,15 +977,6 @@ function debounce(func, wait) {
 
 // ═══════════════════════════════════════════════════════════════
 // 3.1. DATA NORMALIZATION MODULE
-// ═══════════════════════════════════════════════════════════════
-// Pipeline: CSV/GTFS → normalized keys/values → domain model
-//
-// Questions addressed:
-// - normalizeKey is deterministic and globally cacheable (keyCache)
-// - normalizeRecord handles CSV-level normalization (quotes, whitespace)
-// - escapeHtml is UI-layer sanitization (separate concern)
-// - KEY_ALIAS provides GTFS field name standardization
-// - Future: Could support per-feed alias injection via config
 // ═══════════════════════════════════════════════════════════════
     function escapeHtml(s) {
       if (s === null || s === undefined) return '';
@@ -1099,16 +1036,6 @@ function debounce(func, wait) {
 // ═══════════════════════════════════════════════════════════════
 // 3.2. TIME AND DATE MODULE (GTFS-specific)
 // ═══════════════════════════════════════════════════════════════
-// Internal representation: Time is ALWAYS stored as minutes since midnight
-// This allows for GTFS times >24h (e.g., "25:30:00" for late-night service)
-//
-// Questions addressed:
-// - Internal time format: minutes since midnight (0-based, can exceed 1440)
-// - HH:MM:SS >24h is domain logic (GTFS spec allows it for service after midnight)
-// - formatTime handles presentation layer (wraps at 24h for display)
-// - GTFS dates are always in local timezone (YYYYMMDD format, no TZ info)
-// - Date parsing/formatting is bidirectional (GTFS ↔ Date object)
-// ═══════════════════════════════════════════════════════════════
     function timeToMinutes(timeStr) {
       if (!timeStr) return 0;
       const parts = timeStr.split(':');
@@ -1142,17 +1069,6 @@ function debounce(func, wait) {
 
 // ═══════════════════════════════════════════════════════════════
 // 3.3. GEOMETRY AND GEOGRAPHY MODULE
-// ═══════════════════════════════════════════════════════════════
-// Coordinate system: WGS84 (latitude/longitude in decimal degrees)
-// All geographic calculations assume WGS84 datum (implicit assumption)
-//
-// Questions addressed:
-// - Coordinate system: WGS84 everywhere (GTFS standard)
-// - Distance tolerance: 100m hardcoded for stop-shape matching (heuristic)
-// - Shape simplification: Part of parsing/caching, not rendering
-// - Simplification tolerance: 0.0001° (~11m) is configurable via parameter
-// - Coverage calculation: Heuristic for quality assessment, not strict validation
-// - These functions are GTFS-agnostic and could be reused for other geo apps
 // ═══════════════════════════════════════════════════════════════
     function simplifyDouglasPeucker(points, tolerance = 0.0001) {
       if (!points || points.length <= 2) return points;
@@ -1302,18 +1218,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
 // ═══════════════════════════════════════════════════════════════
 // 3.4. CACHE AND SERIALIZATION MODULE
 // ═══════════════════════════════════════════════════════════════
-// Cache backend: localStorage (browser-based persistent storage)
-// Cache strategy: Content-addressable via hash, with TTL and versioning
-//
-// Questions addressed:
-// - Cache backend: localStorage (suitable for client-side caching)
-// - Hash collision resistance: Simple hash (good enough for cache keys, not cryptographic)
-// - TTL: 30 days (arbitrary but reasonable for transit data staleness)
-// - Versioning: Explicit version field (v2 = compressed format)
-// - Cache scope: Currently shapes only, but design is generic (could extend to routeProfiles)
-// - Compression: Delta encoding + base36 (stable, lossy to 6 decimal places ≈ 0.11m precision)
-// - Cleanup: Best-effort on QuotaExceededError (not deterministic)
-// ═══════════════════════════════════════════════════════════════
     function compressCoordinates(coords) {
       if (!coords || coords.length === 0) return '';
       
@@ -1461,15 +1365,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
 // ═══════════════════════════════════════════════════════════════
 // 3.5. DATA QUALITY HEURISTICS MODULE
 // ═══════════════════════════════════════════════════════════════
-// Quality scoring and validation for GTFS feed data
-//
-// Questions addressed:
-// - These heuristics are GTFS-specific (rely on GTFS naming conventions)
-// - "Garbage label" is domain logic (determines if route name is usable)
-// - short_name vs long_name: implicit scoring via looksLikeGarbageLabel
-// - Heuristics are currently hardcoded but could be made configurable
-// - These rules encode domain knowledge about transit data quality
-// ═══════════════════════════════════════════════════════════════
 function mostCommonString(arr) {
   const counts = Object.create(null);
   for (const s of arr) {
@@ -1495,19 +1390,6 @@ function looksLikeGarbageLabel(s, shortName) {
 
 // ═══════════════════════════════════════════════════════════════
 // 3.6. DIRECTION_ID ENRICHMENT MODULE
-// ═══════════════════════════════════════════════════════════════
-// Pipeline for generating direction_id when missing from GTFS feed
-// Decision pipeline: Group by route → Find patterns → Score sequences → Assign directions
-//
-// Questions addressed:
-// - direction_id is treated as binary classification (0/1) but handles edge cases
-// - Routes with >2 directions: Uses heuristics (longest trip as reference pattern)
-// - Circular routes: Detected via first==last stop, handled specially
-// - Subsequence matching: Ignores branch-specific stops, focuses on common trunk
-// - Bearing as tiebreaker: Used when sequence scores are identical
-// - Incomplete stopsIndex: Gracefully degrades (trips without stops get direction_id=0)
-// - Determinism: Stable within a feed, but may vary between feeds with different data
-// - This is a decision pipeline, not a single function (multi-stage enrichment)
 // ═══════════════════════════════════════════════════════════════
 const TO_RAD = Math.PI / 180;
 const TO_DEG = 180 / Math.PI;
@@ -1552,6 +1434,152 @@ function isCircularRoute(stopSequence) {
   if (!stopSequence || stopSequence.length < 2) return false;
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
+// Helper function to process a single route's direction enrichment
+function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
+  const tripsToProcess = routeTrips.filter(t => 
+    !t.direction_id || t.direction_id === ''
+  );
+  
+  if (tripsToProcess.length === 0) return;
+  
+  const tripPatterns = tripsToProcess.map(trip => ({
+    tripId: trip.trip_id,
+    trip: trip,
+    sequence: getTripStopSequence(trip.trip_id, stopTimesIndex)
+  }));
+  
+  const validPatterns = tripPatterns.filter(p => p.sequence.length > 0);
+  
+  if (validPatterns.length === 0) {
+    tripsToProcess.forEach(trip => trip.direction_id = '0');
+    return;
+  }
+  
+  const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
+  if (isCircular) {
+    tripsToProcess.forEach(trip => trip.direction_id = '0');
+    return;
+  }
+  
+  let refPattern = null;
+  let maxLen = 0;
+  
+  for (const pattern of validPatterns) {
+    if (pattern.sequence.length > maxLen) {
+      maxLen = pattern.sequence.length;
+      refPattern = pattern;
+    }
+  }
+  
+  if (!refPattern || refPattern.sequence.length === 0) {
+    tripsToProcess.forEach(trip => trip.direction_id = '0');
+    return;
+  }
+  
+  const patternFwd = refPattern.sequence;
+  const patternRev = [...patternFwd].reverse();
+  
+  let refBearing = null;
+  if (stopsIndex && patternFwd.length >= 2) {
+    const firstStop = stopsIndex[patternFwd[0]];
+    const lastStop = stopsIndex[patternFwd[patternFwd.length - 1]];
+    
+    if (firstStop && lastStop) {
+      const lat1 = parseFloat(firstStop.stop_lat);
+      const lon1 = parseFloat(firstStop.stop_lon);
+      const lat2 = parseFloat(lastStop.stop_lat);
+      const lon2 = parseFloat(lastStop.stop_lon);
+      
+      if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+        refBearing = calculateBearing(lat1, lon1, lat2, lon2);
+      }
+    }
+  }
+  
+  tripsToProcess.forEach(trip => {
+    const seq = getTripStopSequence(trip.trip_id, stopTimesIndex);
+    
+    if (!seq || seq.length === 0) {
+      trip.direction_id = '0';
+      return;
+    }
+    
+    const scoreFwd = tripSequenceScore(seq, patternFwd);
+    const scoreRev = tripSequenceScore(seq, patternRev);
+    
+    if (scoreFwd > scoreRev + 0.1) {
+      trip.direction_id = '0';
+    } else if (scoreRev > scoreFwd + 0.1) {
+      trip.direction_id = '1';
+    } else {
+      if (refBearing !== null && stopsIndex && seq.length >= 2) {
+        const firstStop = stopsIndex[seq[0]];
+        const lastStop = stopsIndex[seq[seq.length - 1]];
+        
+        if (firstStop && lastStop) {
+          const lat1 = parseFloat(firstStop.stop_lat);
+          const lon1 = parseFloat(firstStop.stop_lon);
+          const lat2 = parseFloat(lastStop.stop_lat);
+          const lon2 = parseFloat(lastStop.stop_lon);
+          
+          if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+            const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
+            
+            let diff = Math.abs(tripBearing - refBearing);
+            if (diff > 180) diff = 360 - diff;
+            
+            trip.direction_id = diff < 90 ? '0' : '1';
+          } else {
+            trip.direction_id = '0';
+          }
+        } else {
+          trip.direction_id = '0';
+        }
+      } else {
+        trip.direction_id = '0';
+      }
+    }
+  });
+}
+
+// Async version with chunked processing to prevent UI freezes
+async function enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress) {
+  const tripsByRoute = {};
+  
+  for (const trip of trips) {
+    if (!trip || !trip.trip_id) continue;
+    
+    const routeId = trip.route_id || 'unknown';
+    if (!tripsByRoute[routeId]) {
+      tripsByRoute[routeId] = [];
+    }
+    tripsByRoute[routeId].push(trip);
+  }
+  
+  const routeIds = Object.keys(tripsByRoute);
+  const CHUNK_SIZE = 10; // Process 10 routes at a time
+  
+  for (let i = 0; i < routeIds.length; i += CHUNK_SIZE) {
+    const chunk = routeIds.slice(i, i + CHUNK_SIZE);
+    
+    chunk.forEach(routeId => {
+      enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
+    });
+    
+    // Update progress
+    if (onProgress) {
+      const percent = Math.round(((i + chunk.length) / routeIds.length) * 100);
+      onProgress(i + chunk.length, routeIds.length, percent);
+    }
+    
+    // Yield to browser to keep UI responsive
+    if (i + CHUNK_SIZE < routeIds.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+}
+
+// Synchronous version for backward compatibility
 function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
   const tripsByRoute = {};
   
@@ -1565,129 +1593,61 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
     tripsByRoute[routeId].push(trip);
   }
   
-  // Process each route
   for (const routeId in tripsByRoute) {
-    const routeTrips = tripsByRoute[routeId];
-    
-    const tripsToProcess = routeTrips.filter(t => 
-      !t.direction_id || t.direction_id === ''
-    );
-    
-    if (tripsToProcess.length === 0) continue;
-    
-    const tripPatterns = tripsToProcess.map(trip => ({
-      tripId: trip.trip_id,
-      trip: trip,
-      sequence: getTripStopSequence(trip.trip_id, stopTimesIndex)
-    }));
-    
-    const validPatterns = tripPatterns.filter(p => p.sequence.length > 0);
-    
-    if (validPatterns.length === 0) {
-      // No valid patterns, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    const isCircular = validPatterns.every(p => isCircularRoute(p.sequence));
-    if (isCircular) {
-      // All trips are circular, assign direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    // STEP 3: Reward-only subsequence matching with bearing tiebreaker
-    let refPattern = null;
-    let maxLen = 0;
-    
-    for (const pattern of validPatterns) {
-      if (pattern.sequence.length > maxLen) {
-        maxLen = pattern.sequence.length;
-        refPattern = pattern;
-      }
-    }
-    
-    if (!refPattern || refPattern.sequence.length === 0) {
-      // No valid reference pattern, assign all to direction 0
-      tripsToProcess.forEach(trip => trip.direction_id = '0');
-      continue;
-    }
-    
-    const patternFwd = refPattern.sequence;
-    const patternRev = [...patternFwd].reverse();
-    
-    let refBearing = null;
-    if (stopsIndex && patternFwd.length >= 2) {
-      const firstStop = stopsIndex[patternFwd[0]];
-      const lastStop = stopsIndex[patternFwd[patternFwd.length - 1]];
-      
-      if (firstStop && lastStop) {
-        const lat1 = parseFloat(firstStop.stop_lat);
-        const lon1 = parseFloat(firstStop.stop_lon);
-        const lat2 = parseFloat(lastStop.stop_lat);
-        const lon2 = parseFloat(lastStop.stop_lon);
-        
-        if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
-          refBearing = calculateBearing(lat1, lon1, lat2, lon2);
-        }
-      }
-    }
-    
-    // Score each trip against both patterns
-    tripsToProcess.forEach(trip => {
-      const seq = getTripStopSequence(trip.trip_id, stopTimesIndex);
-      
-      if (!seq || seq.length === 0) {
-        trip.direction_id = '0';
-        return;
-      }
-      
-      const scoreFwd = tripSequenceScore(seq, patternFwd);
-      const scoreRev = tripSequenceScore(seq, patternRev);
-      
-      // If scores are clearly different, use the higher score
-      if (scoreFwd > scoreRev + 0.1) {
-        trip.direction_id = '0';
-      } else if (scoreRev > scoreFwd + 0.1) {
-        trip.direction_id = '1';
-      } else {
-        // Scores are equal or very close - use bearing as tiebreaker
-        if (refBearing !== null && stopsIndex && seq.length >= 2) {
-          const firstStop = stopsIndex[seq[0]];
-          const lastStop = stopsIndex[seq[seq.length - 1]];
-          
-          if (firstStop && lastStop) {
-            const lat1 = parseFloat(firstStop.stop_lat);
-            const lon1 = parseFloat(firstStop.stop_lon);
-            const lat2 = parseFloat(lastStop.stop_lat);
-            const lon2 = parseFloat(lastStop.stop_lon);
-            
-            if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
-              const tripBearing = calculateBearing(lat1, lon1, lat2, lon2);
-              
-              let diff = Math.abs(tripBearing - refBearing);
-              if (diff > 180) diff = 360 - diff;
-              
-              // If bearings are similar (within 90°), same direction
-              // If bearings are opposite (>90°), reverse direction
-              trip.direction_id = diff < 90 ? '0' : '1';
-            } else {
-              trip.direction_id = '0'; // Fallback
-            }
-          } else {
-            trip.direction_id = '0'; // Fallback
-          }
-        } else {
-          trip.direction_id = '0'; // Fallback for equal scores without bearing data
-        }
-      }
-    });
+    enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
+// Helper function to parse a single CSV line (handles quoted fields)
+function parseCSVLine(line) {
+  if (!line) return [];
+  
+  // Fast path: no quotes = simple split (much faster)
+  if (!line.includes('"')) {
+    return line.split(',');
+  }
+  
+  // Slow path: handle quoted fields
+  const result = [];
+  const chars = [];
+  let inQuotes = false;
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        // Escaped quote ("")
+        chars.push('"');
+        i++; // Skip next quote
+      } else {
+        // Toggle quote mode
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      // Field separator (outside quotes)
+      result.push(chars.join(''));
+      chars.length = 0; // Clear array (faster than creating new)
+    } else {
+      chars.push(char);
+    }
+  }
+  
+  // Add last field
+  result.push(chars.join(''));
+  
+  // Warn if quotes are still open (malformed CSV)
+  if (inQuotes) {
+    console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
+  }
+  
+  return result;
+}
+
+// CSV parser - used for all files
 function parseCSV(text) {
   if (!text || typeof text !== 'string') {
     console.warn('parseCSV: Invalid input, expected non-empty string');
@@ -1698,51 +1658,6 @@ function parseCSV(text) {
   const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
   const lines = normalized.split('\n');
   if (lines.length === 0) return [];
-  
-  function parseCSVLine(line) {
-    if (!line) return [];
-    
-    // Fast path: no quotes = simple split (much faster)
-    if (!line.includes('"')) {
-      return line.split(',');
-    }
-    
-    // Slow path: handle quoted fields
-    const result = [];
-    const chars = [];
-    let inQuotes = false;
-    
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          // Escaped quote ("")
-          chars.push('"');
-          i++; // Skip next quote
-        } else {
-          // Toggle quote mode
-          inQuotes = !inQuotes;
-        }
-      } else if (char === ',' && !inQuotes) {
-        // Field separator (outside quotes)
-        result.push(chars.join(''));
-        chars.length = 0; // Clear array (faster than creating new)
-      } else {
-        chars.push(char);
-      }
-    }
-    
-    // Add last field
-    result.push(chars.join(''));
-    
-    // Warn if quotes are still open (malformed CSV)
-    if (inQuotes) {
-      console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
-    }
-    
-    return result;
-  }
   
   const headerLine = lines[0].replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
@@ -1768,6 +1683,8 @@ function parseCSV(text) {
   
   return result;
 }
+
+// Async CSV parser with chunked processing for better UI responsiveness
 
 function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
   return new Promise(async (resolve, reject) => {
@@ -2215,11 +2132,13 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         }
 
 // ==========================================
-// PARALLEL LOADING & PARSING - małe pliki jednocześnie
+// PARALLEL LOADING & PARSING - parse CSV files synchronously
 // ==========================================
-state.loadingStep = 'Wczytywanie i parsowanie plików (równolegle)...'; render();
+state.loadingStep = 'Przetwarzanie plików GTFS...'; render();
 
 perfTimings.parseStart = performance.now();
+
+// Parse all CSV files synchronously (fastest approach)
 const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
   routesFile.async('string').then(text => parseCSV(text)),
   tripsFile.async('string').then(text => parseCSV(text)),
@@ -2228,6 +2147,7 @@ const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.
   calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
   agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
+
 perfTimings.parseEnd = performance.now();
 
         state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
@@ -2271,10 +2191,14 @@ perfTimings.parseEnd = performance.now();
         perfTimings.indexStart = performance.now();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         
-        // Generate missing direction_id values
+        // Generate missing direction_id values with chunked processing
         state.loadingStep = 'Generowanie brakujących direction_id...'; render();
         perfTimings.enrichStart = performance.now();
-        enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex);
+        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
+          state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
+          state.loadingProgressPercent = percent;
+          render();
+        });
         perfTimings.enrichEnd = performance.now();
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
@@ -2287,9 +2211,10 @@ agencies.forEach(a => {
 
 const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
 
-// FAZA 1.4 & 2.6: Clear caches when loading new data
+// Clear all caches when loading new GTFS data
 clearStationCache();
 clearStopsSearchIndex();
+clearStopToRoutesCache();
 cachedGroupsArray = null;
 lastStopsDataHash = null;
 
@@ -2352,6 +2277,7 @@ if (dates.length > 0) {
         const indexTime = perfTimings.indexEnd - perfTimings.indexStart;
         const enrichTime = perfTimings.enrichEnd - perfTimings.enrichStart;
         
+        // Console performance benchmark
         console.log('═══════════════════════════════════════════════');
         console.log('GTFS LOADING PERFORMANCE REPORT');
         console.log('═══════════════════════════════════════════════');
@@ -2376,6 +2302,25 @@ if (dates.length > 0) {
           console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
         }
         console.log('═══════════════════════════════════════════════');
+        
+        // Store metrics in state for optional display
+        const perfMetrics = {
+          totalTime: performance.now() - perfTimings.totalStart,
+          unzipTime: perfTimings.unzipEnd - perfTimings.unzipStart,
+          parseTime: perfTimings.parseEnd - perfTimings.parseStart,
+          stopTimesTime: perfTimings.stopTimesEnd - perfTimings.stopTimesStart,
+          shapesTime: perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0,
+          indexTime: perfTimings.indexEnd - perfTimings.indexStart,
+          enrichTime: perfTimings.enrichEnd - perfTimings.enrichStart,
+          dataSummary: {
+            routes: routes.length,
+            trips: trips.length,
+            stops: stops.length,
+            stopTimes: Object.keys(stopTimesIndex).length,
+            shapes: Object.keys(shapesIndex).length
+          }
+        };
+        state.lastLoadMetrics = perfMetrics;
 
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
         render();
@@ -4527,7 +4472,7 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
         className: 'custom-svg-icon',
         iconSize: [width, height],
         iconAnchor: [width/2, height/2],
-        popupAnchor: [0, -height/2]
+        popupAnchor: [0, -height/2 - 5]  // Popup appears above icon with 5px offset
       });
     }
     
@@ -5144,7 +5089,7 @@ function selectRoute(route) {
 // ═══════════════════════════════════════════════════════════════
 // 12. UI RENDERING - STOPS VIEW
 // ═══════════════════════════════════════════════════════════════
-// FAZA 1.2: Search index dla szybszego wyszukiwania
+// Search index for fast stop name filtering
 
 function buildStopsSearchIndex(groupsArray) {
   if (stopsSearchIndex) return stopsSearchIndex;
@@ -5182,6 +5127,46 @@ function searchStopsInIndex(query, groupsArray) {
     }));
 }
 
+// Async search with chunked processing to prevent UI freeze on large datasets
+async function searchStopsInIndexAsync(query, groupsArray, onProgress) {
+  if (!query || query.trim() === '') return groupsArray;
+  
+  const index = buildStopsSearchIndex(groupsArray);
+  const lowerQuery = query.toLowerCase().trim();
+  const results = [];
+  
+  const CHUNK_SIZE = 200; // Process 200 items at a time
+  
+  for (let i = 0; i < index.length; i += CHUNK_SIZE) {
+    const chunk = index.slice(i, i + CHUNK_SIZE);
+    
+    chunk.forEach(item => {
+      if (item.searchText.includes(lowerQuery)) {
+        results.push({
+          id: item.id,
+          name: item.name,
+          routeCount: item.routeCount,
+          stops: item.stops,
+          routeSet: item.routeSet
+        });
+      }
+    });
+    
+    // Report progress for very large datasets
+    if (onProgress && index.length > 1000) {
+      const percent = Math.round(((i + chunk.length) / index.length) * 100);
+      onProgress(percent);
+    }
+    
+    // Yield to browser every 200 items to keep UI responsive
+    if (i + CHUNK_SIZE < index.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+  
+  return results;
+}
+
 function getOrBuildGroupsArray(stopsData) {
   const currentHash = stopsData.length + '_' + (stopsData[0]?.stop_id || '');
   
@@ -5210,7 +5195,9 @@ function getOrBuildGroupsArray(stopsData) {
   
   const groupsArray = Array.from(stopGroups.values()).map(group => ({
     ...group,
-    routeCount: group.routeSet.size
+    routeCount: group.routeSet.size,
+    // Mark if this is a single-stop group (no grouping needed)
+    isSingleStop: group.stops.length === 1
   }));
   
   groupsArray.sort((a, b) => a.name.localeCompare(b.name));
@@ -5263,29 +5250,43 @@ function renderVirtualStopsList(groupsToRender) {
       (group.routeCount % 10 >= 2 && group.routeCount % 10 <= 4 && (group.routeCount % 100 < 10 || group.routeCount % 100 >= 20)) 
       ? 'linie' : 'linii';
     
-    html += `
-      <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isGroupExpanded ? 'bg-blue-50' : ''}" 
-           data-group-id="${escapeHtml(group.id)}" 
-           data-index="${actualIndex}">
-        <div class="font-semibold">${escapeHtml(group.name)}</div>
-        <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
-      </div>
-    `;
-    
-    // Expanded stops (non-virtualized for simplicity)
-    if (isGroupExpanded) {
-      group.stops.forEach(stop => {
-        const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
-          (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
-          ? 'linie' : 'linii';
-        
-        html += `
-          <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
-            <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
-            <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
-          </div>
-        `;
-      });
+    // For single-stop groups, make them directly clickable
+    if (group.isSingleStop) {
+      const stop = group.stops[0];
+      html += `
+        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer" 
+             data-stop-id="${stop.stop_id}" 
+             data-index="${actualIndex}">
+          <div class="font-semibold">${escapeHtml(group.name)}</div>
+          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+        </div>
+      `;
+    } else {
+      // Multi-stop groups: show as expandable
+      html += `
+        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isGroupExpanded ? 'bg-blue-50' : ''}" 
+             data-group-id="${escapeHtml(group.id)}" 
+             data-index="${actualIndex}">
+          <div class="font-semibold">${escapeHtml(group.name)}</div>
+          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+        </div>
+      `;
+      
+      // Expanded stops (non-virtualized for simplicity)
+      if (isGroupExpanded) {
+        group.stops.forEach(stop => {
+          const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
+            (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
+            ? 'linie' : 'linii';
+          
+          html += `
+            <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
+              <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
+              <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
+            </div>
+          `;
+        });
+      }
     }
   });
   
@@ -5298,30 +5299,92 @@ function renderVirtualStopsList(groupsToRender) {
   }
 }
 
-function renderStopsView() {
+// Cached stop-to-routes mapping to avoid rebuilding
+let cachedStopToRoutesMap = null;
+let cachedStopToRoutesHash = null;
+
+// Build stop-to-routes mapping with chunked processing to prevent UI freeze
+async function buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress) {
+  const stopToRoutes = new Map();
+  const CHUNK_SIZE = 20; // Process 20 routes at a time
+  
+  for (let i = 0; i < routes.length; i += CHUNK_SIZE) {
+    const routeChunk = routes.slice(i, i + CHUNK_SIZE);
+    
+    routeChunk.forEach(route => {
+      const trips = tripsIndex[route.route_id] || [];
+      const stopIds = new Set();
+      
+      trips.forEach(trip => {
+        const stopTimes = stopTimesIndex[trip.trip_id] || [];
+        stopTimes.forEach(st => stopIds.add(st.stop_id));
+      });
+      
+      stopIds.forEach(stopId => {
+        if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
+        stopToRoutes.get(stopId).push(route);
+      });
+    });
+    
+    // Report progress
+    if (onProgress) {
+      const percent = Math.round(((i + routeChunk.length) / routes.length) * 100);
+      onProgress(i + routeChunk.length, routes.length, percent);
+    }
+    
+    // Yield to browser to keep UI responsive
+    if (i + CHUNK_SIZE < routes.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+  
+  return stopToRoutes;
+}
+
+// Get or build stop-to-routes mapping with caching
+async function getStopToRoutesMap(routes, tripsIndex, stopTimesIndex, onProgress) {
+  const currentHash = routes.length + '_' + Object.keys(tripsIndex).length;
+  
+  if (cachedStopToRoutesMap && cachedStopToRoutesHash === currentHash) {
+    return cachedStopToRoutesMap;
+  }
+  
+  const stopToRoutes = await buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress);
+  
+  cachedStopToRoutesMap = stopToRoutes;
+  cachedStopToRoutesHash = currentHash;
+  
+  return stopToRoutes;
+}
+
+function clearStopToRoutesCache() {
+  cachedStopToRoutesMap = null;
+  cachedStopToRoutesHash = null;
+}
+
+async function renderStopsView() {
   if (!state.gtfsData || !state.showStopsView) return;
   
   const stopsList = $('stops-list');
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
   
+  // Show loading indicator for initial data preparation
+  const isInitialLoad = !cachedStopToRoutesMap;
+  if (isInitialLoad) {
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
+  }
+  
+  const stopToRoutes = await getStopToRoutesMap(
+    state.gtfsData.routes,
+    state.gtfsData.tripsIndex,
+    state.gtfsData.stopTimesIndex,
+    isInitialLoad ? (processed, total, percent) => {
+      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
+    } : null
+  );
+  
   const stopsData = [];
-  const stopToRoutes = new Map();
-  
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    const stopIds = new Set();
-    trips.forEach(trip => {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-      stopTimes.forEach(st => stopIds.add(st.stop_id));
-    });
-    
-    stopIds.forEach(stopId => {
-      if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
-      stopToRoutes.get(stopId).push(route);
-    });
-  });
-  
   Object.values(state.gtfsData.stopsIndex).forEach(stop => {
     const routes = stopToRoutes.get(stop.stop_id) || [];
     if (routes.length > 0) {
@@ -5339,7 +5402,19 @@ function renderStopsView() {
   const groupsArray = getOrBuildGroupsArray(stopsData);
   
   const searchQuery = state.stopsListSearchQuery;
-  const filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
+  
+  // Use async search for large datasets to prevent UI freeze
+  let filteredGroups;
+  if (groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '') {
+    // Show searching indicator
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Wyszukiwanie...</div>';
+    filteredGroups = await searchStopsInIndexAsync(searchQuery, groupsArray, (percent) => {
+      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Wyszukiwanie... ${percent}%</div>`;
+    });
+  } else {
+    // For smaller datasets, use synchronous search
+    filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
+  }
   
   const useVirtualList = filteredGroups.length > 100; // Threshold
 
@@ -5358,32 +5433,43 @@ function renderStopsView() {
         (group.routeCount % 10 >= 2 && group.routeCount % 10 <= 4 && (group.routeCount % 100 < 10 || group.routeCount % 100 >= 20)) 
         ? 'linie' : 'linii';
       
-      // Poziom 1: Grupa przystanków
-      html += `
-        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}" data-group-id="${escapeHtml(group.id)}">
-          <div class="font-semibold">${escapeHtml(group.name)}</div>
-          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
-        </div>
-      `;
-      
-      // Poziom 2: Konkretne przystanki w grupie (tylko jeśli rozwinięta)
-      if (isExpanded) {
-        group.stops.forEach(stop => {
-          const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
-            (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
-            ? 'linie' : 'linii';
-          
-          html += `
-            <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
-              <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
-              <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
-            </div>
-          `;
-        });
+      // For single-stop groups, make them directly clickable
+      if (group.isSingleStop) {
+        const stop = group.stops[0];
+        html += `
+          <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer" data-stop-id="${stop.stop_id}">
+            <div class="font-semibold">${escapeHtml(group.name)}</div>
+            <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+          </div>
+        `;
+      } else {
+        // Multi-stop groups: show as expandable
+        html += `
+          <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}" data-group-id="${escapeHtml(group.id)}">
+            <div class="font-semibold">${escapeHtml(group.name)}</div>
+            <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+          </div>
+        `;
+        
+        // Poziom 2: Konkretne przystanki w grupie (tylko jeśli rozwinięta)
+        if (isExpanded) {
+          group.stops.forEach(stop => {
+            const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
+              (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
+              ? 'linie' : 'linii';
+            
+            html += `
+              <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
+                <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
+                <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
+              </div>
+            `;
+          });
+        }
       }
     });
 
-    // FAZA 1.5: Add "Load More" button if there are more groups
+    // Add "Load More" button if there are more groups to display
     if (groupsToShow.length < totalGroups) {
       const remaining = totalGroups - groupsToShow.length;
       html += `
@@ -5406,7 +5492,7 @@ function renderStopsView() {
     }
   }
 
-  // FAZA 2.4: Setup scroll listener for virtual list
+  // Setup scroll listener for virtual list rendering
   if (useVirtualList) {
     const container = stopsList.parentElement;
     if (container) {
@@ -5436,9 +5522,9 @@ function renderStopsView() {
     
     const debouncedSearch = debounce((value) => {
       state.stopsListSearchQuery = value;
-      state.stopsListPage = 1; // FAZA 1.6: Reset pagination on search
+      state.stopsListPage = 1; // Reset pagination on new search
       renderStopsView();
-    }, 500); // FAZA 1.1: Zwiększone z 300ms do 500ms
+    }, 500); // Debounce delay: 500ms for better UX
     
     const newHandler = (e) => {
       debouncedSearch(e.target.value);
@@ -5779,6 +5865,32 @@ function updateRouteFilterButtons() {
   });
 }
 
+// Helper function to get trip destination (headsign or last stop name)
+function getTripDestination(dep) {
+  // 1. Prefer trip_headsign if available
+  if (dep.headsign && dep.headsign.trim().length > 0) {
+    return dep.headsign;
+  }
+  
+  // 2. Fallback: last stop_name from stop_times sequence
+  const stopTimes = state.gtfsData.stopTimesIndex[dep.trip.trip_id] || [];
+  if (stopTimes.length > 0) {
+    const sorted = stopTimes.slice().sort((a, b) => {
+      const seqA = parseInt(a.stop_sequence || '0', 10);
+      const seqB = parseInt(b.stop_sequence || '0', 10);
+      return seqA - seqB;
+    });
+    const lastStopId = sorted[sorted.length - 1]?.stop_id;
+    const lastStop = state.gtfsData.stopsIndex[lastStopId];
+    if (lastStop?.stop_name) {
+      return lastStop.stop_name;
+    }
+  }
+  
+  // 3. Final fallback
+  return "-";
+}
+
 function updateDeparturesTable() {
   const tableContainer = document.querySelector('#stop-detail-departures-table');
   if (!tableContainer || !state.stopDetailDepartures) return;
@@ -5833,7 +5945,7 @@ function updateDeparturesTable() {
           '</div>' +
         '</td>' +
         '<td class="p-1 border break-words">' +
-          escapeHtml(dep.headsign || "-") +
+          escapeHtml(getTripDestination(dep)) +
         '</td>' +
       '</tr>';
     }).join("")}
@@ -7175,7 +7287,7 @@ switch(currentView) {
 
           <!-- DESTINATION: BIERZE RESZTĘ -->
           <td class="p-1 border break-words">
-            ${escapeHtml(dep.headsign || "-")}
+            ${escapeHtml(getTripDestination(dep))}
           </td>
         </tr>
       `;
