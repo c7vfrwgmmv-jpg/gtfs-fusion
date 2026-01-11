@@ -7943,14 +7943,13 @@ if (state.gtfsData && state.selectedRoute) {
         let coreStops = new Set();
         let nodeTypes = {};
         if (profile && profile.coreStops) {
-          profile.coreStops.forEach(cs => {
-            if (cs.stopIds && Array.isArray(cs.stopIds)) {
-              cs.stopIds.forEach(sid => coreStops.add(sid));
-            }
-          });
+          // profile.coreStops is a flat array of stop_ids, not objects
+          if (Array.isArray(profile.coreStops)) {
+            profile.coreStops.forEach(stopId => coreStops.add(stopId));
+          }
         }
-        if (profile && profile.nodeTypeMap) {
-          nodeTypes = profile.nodeTypeMap;
+        if (profile && profile.nodeTypes) {
+          nodeTypes = profile.nodeTypes;
         }
 
         // Calculate firstCoreIdx and lastCoreIdx
