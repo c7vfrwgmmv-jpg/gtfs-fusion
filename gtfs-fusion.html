@@ -7903,6 +7903,7 @@ if (state.gtfsData && state.selectedRoute) {
     .stop-item.core { border-left-color: #4caf50; }
     .stop-item.tail { border-left-color: #f44336; }
     .stop-item.passenger { border-left-color: #2196f3; }
+    .dep-time { font-weight: bold; color: #0066cc; font-size: 10px; }
   </style>
 </head>
 <body>
@@ -7951,8 +7952,9 @@ if (state.gtfsData && state.selectedRoute) {
         let stopSeqHtml = '<div class="stop-list">';
         trip.stop_sequence.forEach(st => {
           stopSeqHtml += `<div class="stop-item ${st.nodeType}">`;
-          stopSeqHtml += `[${st.stop_sequence}] ${st.stop_id} - ${st.stop_name}<br>`;
-          stopSeqHtml += `Arr: ${st.arrival_time} | Dep: ${st.departure_time} | `;
+          stopSeqHtml += `<span class="dep-time">${st.departure_time}</span> `;
+          stopSeqHtml += `[${st.stop_sequence}] ${st.stop_name} (${st.stop_id})<br>`;
+          stopSeqHtml += `Arr: ${st.arrival_time} | `;
           stopSeqHtml += `P/D: ${st.pickup_type}/${st.drop_off_type} | `;
           stopSeqHtml += `Type: ${st.nodeType} | `;
           stopSeqHtml += `Core: ${st.isCore ? '✓' : '✗'} | `;
