@@ -3218,9 +3218,10 @@ function buildRouteProfileForCurrentSelection() {
   });
 
   // 4. Graf z stop_sequence + pickup/drop_off (pasażerski)
-  const nodes = {}; // stop_id → info
+  const nodes = {}; // stationId → info
   const edges = {}; // "A->B" → info
   const tripCount = allTrips.length;
+  const stationToStopIds = new Map(); // stationId → Set of stop_ids
 
   function edgeKey(a, b) {
     return a + '->' + b;
@@ -3247,6 +3248,12 @@ function buildRouteProfileForCurrentSelection() {
       const stationId = getStationId(st.stop_id, stopsIndex);
       
       passengerStops.push({ ...st, stationId });
+      
+      // Track which stop IDs belong to this station
+      if (!stationToStopIds.has(stationId)) {
+        stationToStopIds.set(stationId, new Set());
+      }
+      stationToStopIds.get(stationId).add(st.stop_id);
       
       if (!nodes[stationId]) {
         const stop = stopsIndex[st.stop_id] || {};
@@ -3336,9 +3343,17 @@ function buildRouteProfileForCurrentSelection() {
     Object.keys(coreAdj).forEach(sid => dfsCore(sid, []));
   }
 
-  const coreStops = bestCorePath.filter(sid => nodes[sid]);
+  // bestCorePath contains station IDs; expand to stop IDs for backward compatibility
+  const coreStationIds = bestCorePath.filter(sid => nodes[sid]);
+  const coreStops = [];
+  coreStationIds.forEach(stationId => {
+    const stopIds = stationToStopIds.get(stationId);
+    if (stopIds) {
+      coreStops.push(...Array.from(stopIds));
+    }
+  });
 
-  const coreSet = new Set(coreStops);
+  const coreSet = new Set(coreStationIds);
 
   const edgeTypes = {};
   Object.keys(edges).forEach(k => {
