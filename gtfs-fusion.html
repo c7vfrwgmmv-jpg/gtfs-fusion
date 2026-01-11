@@ -5677,13 +5677,7 @@ async function renderStopsView() {
       
       // Handle single-stop groups (they have data-stop-id instead of data-group-id)
       if (!groupId && stopId) {
-        const groupsArray = getOrBuildGroupsArray(stopsData);
-        let stop = null;
-        
-        for (const group of groupsArray) {
-          stop = group.stops.find(s => s.stop_id === stopId);
-          if (stop) break;
-        }
+        const stop = state.gtfsData.stopsIndex[stopId];
         
         if (stop) {
           // Set map to selected stop
@@ -5752,14 +5746,7 @@ async function renderStopsView() {
       if (!stopItem) return;
       
       const stopId = stopItem.getAttribute('data-stop-id');
-      
-      const groupsArray = getOrBuildGroupsArray(stopsData);
-      let stop = null;
-      
-      for (const group of groupsArray) {
-        stop = group.stops.find(s => s.stop_id === stopId);
-        if (stop) break;
-      }
+      const stop = state.gtfsData.stopsIndex[stopId];
       
 if (stop) {
   // USTAW MAPĘ na wybrany przystanek
