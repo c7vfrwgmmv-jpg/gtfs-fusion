@@ -3634,48 +3634,6 @@ function getCanonicalKeyForCurrentSelection() {
   return key;
 }
 
-/**
- * Helper function to extract stops between two core stations in a trip
- * @param {Array} sortedStops - Sorted stop times for the trip
- * @param {Object} coreStationA - Start core station with stopIds array
- * @param {Object} coreStationB - End core station with stopIds array
- * @param {Object} stopsIndex - Index of all stops
- * @param {Set} allowedSet - Allowed stations for merging
- * @param {Function} getStationIdWithPolicy - Function to get station ID
- * @returns {Array} Array of stop objects between the two cores
- */
-function getStopsBetween(sortedStops, coreStationA, coreStationB, stopsIndex, allowedSet, getStationIdWithPolicy) {
-  if (!sortedStops || sortedStops.length === 0) return [];
-  
-  // Find positions of core stations
-  let posA = -1, posB = -1;
-  sortedStops.forEach((st, idx) => {
-    if (!st || !st.stop_id) return;
-    const stationId = getStationIdWithPolicy(st.stop_id, stopsIndex, allowedSet);
-    
-    // Check if this stop matches coreStationA
-    if (coreStationA.stopIds.includes(st.stop_id) || stationId === coreStationA.stationId) {
-      posA = idx;
-    }
-    // Check if this stop matches coreStationB
-    if (coreStationB.stopIds.includes(st.stop_id) || stationId === coreStationB.stationId) {
-      posB = idx;
-    }
-  });
-  
-  // No stops between if cores not found or adjacent
-  if (posA === -1 || posB === -1 || posB <= posA + 1) return [];
-  
-  // Extract stops between (exclusive of cores)
-  return sortedStops.slice(posA + 1, posB).map((st, relIdx) => ({
-    stop_id: st.stop_id,
-    stop_sequence: st.stop_sequence,
-    position: posA + 1 + relIdx, // absolute position in trip
-    stationId: getStationIdWithPolicy(st.stop_id, stopsIndex, allowedSet),
-    name: (stopsIndex[st.stop_id] || {}).stop_name || st.stop_id
-  }));
-}
-
 function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex) {
   if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
     return null; // Fallback to old behavior
@@ -3796,11 +3754,16 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         } else {
           const chunk = preCore.get(signature);
           // Merge stop_ids for each station in the chunk
-          preCoreStops.forEach((st, idx) => {
-            if (idx < chunk.stops.length && !chunk.stops[idx].stopIds.includes(st.stop_id)) {
-              chunk.stops[idx].stopIds.push(st.stop_id);
+          // Note: Chunks with same signature should have same length
+          if (chunk.stops.length !== preCoreStops.length) {
+            console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${preCoreStops.length}`);
+          }
+          const minLength = Math.min(chunk.stops.length, preCoreStops.length);
+          for (let idx = 0; idx < minLength; idx++) {
+            if (!chunk.stops[idx].stopIds.includes(preCoreStops[idx].stop_id)) {
+              chunk.stops[idx].stopIds.push(preCoreStops[idx].stop_id);
             }
-          });
+          }
           chunk.positions.push(normalizedPos);
         }
       }
@@ -3848,11 +3811,16 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         } else {
           const chunk = postCore.get(signature);
           // Merge stop_ids for each station in the chunk
-          postCoreStops.forEach((st, idx) => {
-            if (idx < chunk.stops.length && !chunk.stops[idx].stopIds.includes(st.stop_id)) {
-              chunk.stops[idx].stopIds.push(st.stop_id);
+          // Note: Chunks with same signature should have same length
+          if (chunk.stops.length !== postCoreStops.length) {
+            console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${postCoreStops.length}`);
+          }
+          const minLength = Math.min(chunk.stops.length, postCoreStops.length);
+          for (let idx = 0; idx < minLength; idx++) {
+            if (!chunk.stops[idx].stopIds.includes(postCoreStops[idx].stop_id)) {
+              chunk.stops[idx].stopIds.push(postCoreStops[idx].stop_id);
             }
-          });
+          }
           chunk.positions.push(normalizedPos);
         }
       }
@@ -3910,11 +3878,16 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         } else {
           const chunk = window.chunks.get(signature);
           // Merge stop_ids for each station in the chunk
-          windowStops.forEach((st, idx) => {
-            if (idx < chunk.stops.length && !chunk.stops[idx].stopIds.includes(st.stop_id)) {
-              chunk.stops[idx].stopIds.push(st.stop_id);
+          // Note: Chunks with same signature should have same length
+          if (chunk.stops.length !== windowStops.length) {
+            console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${windowStops.length}`);
+          }
+          const minLength = Math.min(chunk.stops.length, windowStops.length);
+          for (let idx = 0; idx < minLength; idx++) {
+            if (!chunk.stops[idx].stopIds.includes(windowStops[idx].stop_id)) {
+              chunk.stops[idx].stopIds.push(windowStops[idx].stop_id);
             }
-          });
+          }
           chunk.positions.push(normalizedPos);
         }
       }
