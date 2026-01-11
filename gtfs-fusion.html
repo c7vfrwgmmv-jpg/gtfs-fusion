@@ -6268,6 +6268,7 @@ function renderTimetable() {
   $('toggle-depot-trips-main').onclick = () => { 
     if (state.selectedVariantFilter > 0) return; // Disabled in variant mode
     
+    const tableRoot = $('schedule-table-root');
     const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
     const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
     const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
@@ -6286,6 +6287,7 @@ function renderTimetable() {
   };
   
   $('variant-filter-select').onchange = (e) => {
+    const tableRoot = $('schedule-table-root');
     const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
     const savedScrollLeft = scrollContainer?.scrollLeft || 0;
     const savedScrollTop = scrollContainer?.scrollTop || 0;
