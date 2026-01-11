@@ -6265,51 +6265,56 @@ function renderTimetable() {
     variantSelect.value = state.selectedVariantFilter.toString();
   }
   
-  $('toggle-depot-trips-main').onclick = () => { 
-    if (state.selectedVariantFilter > 0) return; // Disabled in variant mode
-    
-    const tableRoot = $('schedule-table-root');
-    const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
-    const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
-    const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
-    
-    state.showAllTrips = !state.showAllTrips; 
-    renderTimetable(); 
-    
-    // Restore scroll position after render
-    setTimeout(() => {
-      const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
-      if (newScrollContainer) {
-        newScrollContainer.scrollLeft = savedScrollLeft;
-        newScrollContainer.scrollTop = savedScrollTop;
-      }
-    }, 0);
-  };
+  const depotButton = $('toggle-depot-trips-main');
+  if (depotButton) {
+    depotButton.onclick = () => { 
+      if (state.selectedVariantFilter > 0) return; // Disabled in variant mode
+      
+      const tableRoot = $('schedule-table-root');
+      const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
+      const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
+      const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+      
+      state.showAllTrips = !state.showAllTrips; 
+      renderTimetable(); 
+      
+      // Restore scroll position after render
+      setTimeout(() => {
+        const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
+        if (newScrollContainer) {
+          newScrollContainer.scrollLeft = savedScrollLeft;
+          newScrollContainer.scrollTop = savedScrollTop;
+        }
+      }, 0);
+    };
+  }
   
-  $('variant-filter-select').onchange = (e) => {
-    const tableRoot = $('schedule-table-root');
-    const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
-    const savedScrollLeft = scrollContainer?.scrollLeft || 0;
-    const savedScrollTop = scrollContainer?.scrollTop || 0;
-    
-    state.selectedVariantFilter = parseInt(e.target.value, 10);
-    
-    // Auto-enable showAllTrips when variant is selected
-    if (state.selectedVariantFilter > 0) {
-      state.showAllTrips = true;
-    }
-    
-    renderTimetable();
-    
-    // Restore scroll position
-    setTimeout(() => {
-      const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
-      if (newScrollContainer) {
-        newScrollContainer.scrollLeft = savedScrollLeft;
-        newScrollContainer.scrollTop = savedScrollTop;
+  if (variantSelect) {
+    variantSelect.onchange = (e) => {
+      const tableRoot = $('schedule-table-root');
+      const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
+      const savedScrollLeft = scrollContainer?.scrollLeft || 0;
+      const savedScrollTop = scrollContainer?.scrollTop || 0;
+      
+      state.selectedVariantFilter = parseInt(e.target.value, 10);
+      
+      // Auto-enable showAllTrips when variant is selected
+      if (state.selectedVariantFilter > 0) {
+        state.showAllTrips = true;
       }
-    }, 0);
-  };
+      
+      renderTimetable();
+      
+      // Restore scroll position
+      setTimeout(() => {
+        const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
+        if (newScrollContainer) {
+          newScrollContainer.scrollLeft = savedScrollLeft;
+          newScrollContainer.scrollTop = savedScrollTop;
+        }
+      }, 0);
+    };
+  }
 
   const tableRoot = $('schedule-table-root'); if (!tableRoot) return;
 
@@ -6366,7 +6371,7 @@ const processedTrips = trips.map(trip => {
 let filteredTrips = processedTrips;
 if (state.selectedVariantFilter > 0) {
   filteredTrips = processedTrips.filter(trip => {
-    const variantNum = tripToVariantGlobal[trip.trip_id] || 1;
+    const variantNum = tripToVariantGlobal[trip.trip_id];
     return variantNum === state.selectedVariantFilter;
   });
 }
