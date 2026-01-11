@@ -1722,7 +1722,53 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 // ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
-// Synchronous CSV parser for small files
+// Helper function to parse a single CSV line (handles quoted fields)
+function parseCSVLine(line) {
+  if (!line) return [];
+  
+  // Fast path: no quotes = simple split (much faster)
+  if (!line.includes('"')) {
+    return line.split(',');
+  }
+  
+  // Slow path: handle quoted fields
+  const result = [];
+  const chars = [];
+  let inQuotes = false;
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        // Escaped quote ("")
+        chars.push('"');
+        i++; // Skip next quote
+      } else {
+        // Toggle quote mode
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      // Field separator (outside quotes)
+      result.push(chars.join(''));
+      chars.length = 0; // Clear array (faster than creating new)
+    } else {
+      chars.push(char);
+    }
+  }
+  
+  // Add last field
+  result.push(chars.join(''));
+  
+  // Warn if quotes are still open (malformed CSV)
+  if (inQuotes) {
+    console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
+  }
+  
+  return result;
+}
+
+// CSV parser - used for all files (directly for small files, via parseCSVAsync for large files)
 function parseCSV(text) {
   if (!text || typeof text !== 'string') {
     console.warn('parseCSV: Invalid input, expected non-empty string');
@@ -1733,51 +1779,6 @@ function parseCSV(text) {
   const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
   const lines = normalized.split('\n');
   if (lines.length === 0) return [];
-  
-  function parseCSVLine(line) {
-    if (!line) return [];
-    
-    // Fast path: no quotes = simple split (much faster)
-    if (!line.includes('"')) {
-      return line.split(',');
-    }
-    
-    // Slow path: handle quoted fields
-    const result = [];
-    const chars = [];
-    let inQuotes = false;
-    
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          // Escaped quote ("")
-          chars.push('"');
-          i++; // Skip next quote
-        } else {
-          // Toggle quote mode
-          inQuotes = !inQuotes;
-        }
-      } else if (char === ',' && !inQuotes) {
-        // Field separator (outside quotes)
-        result.push(chars.join(''));
-        chars.length = 0; // Clear array (faster than creating new)
-      } else {
-        chars.push(char);
-      }
-    }
-    
-    // Add last field
-    result.push(chars.join(''));
-    
-    // Warn if quotes are still open (malformed CSV)
-    if (inQuotes) {
-      console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
-    }
-    
-    return result;
-  }
   
   const headerLine = lines[0].replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
@@ -1815,46 +1816,6 @@ async function parseCSVAsync(text, onProgress) {
   const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
   const lines = normalized.split('\n');
   if (lines.length === 0) return [];
-  
-  function parseCSVLine(line) {
-    if (!line) return [];
-    
-    // Fast path: no quotes = simple split (much faster)
-    if (!line.includes('"')) {
-      return line.split(',');
-    }
-    
-    // Slow path: handle quoted fields
-    const result = [];
-    const chars = [];
-    let inQuotes = false;
-    
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          chars.push('"');
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (char === ',' && !inQuotes) {
-        result.push(chars.join(''));
-        chars.length = 0;
-      } else {
-        chars.push(char);
-      }
-    }
-    
-    result.push(chars.join(''));
-    
-    if (inQuotes) {
-      console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
-    }
-    
-    return result;
-  }
   
   const headerLine = lines[0].replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
@@ -2387,21 +2348,30 @@ let calendar = [];
 if (calendarFile) {
   const calendarText = await calendarFile.async('string');
   state.loadingStep = 'Parsowanie calendar.txt...'; render();
-  calendar = await smartParse(calendarText, 'calendar.txt');
+  calendar = await smartParse(calendarText, 'calendar.txt', (rows, percent) => {
+    state.loadingStep = `Parsowanie calendar.txt: ${rows} wierszy (${percent}%)`;
+    render();
+  });
 }
 
 let calendarDates = [];
 if (calendarDatesFile) {
   const calendarDatesText = await calendarDatesFile.async('string');
   state.loadingStep = 'Parsowanie calendar_dates.txt...'; render();
-  calendarDates = await smartParse(calendarDatesText, 'calendar_dates.txt');
+  calendarDates = await smartParse(calendarDatesText, 'calendar_dates.txt', (rows, percent) => {
+    state.loadingStep = `Parsowanie calendar_dates.txt: ${rows} wierszy (${percent}%)`;
+    render();
+  });
 }
 
 let agencies = [];
 if (agenciesFile) {
   const agenciesText = await agenciesFile.async('string');
   state.loadingStep = 'Parsowanie agency.txt...'; render();
-  agencies = await smartParse(agenciesText, 'agency.txt');
+  agencies = await smartParse(agenciesText, 'agency.txt', (rows, percent) => {
+    state.loadingStep = `Parsowanie agency.txt: ${rows} wierszy (${percent}%)`;
+    render();
+  });
 }
 
 perfTimings.parseEnd = performance.now();
@@ -6094,6 +6064,32 @@ function updateRouteFilterButtons() {
   });
 }
 
+// Helper function to get trip destination (headsign or last stop name)
+function getTripDestination(dep) {
+  // 1. Prefer trip_headsign if available
+  if (dep.headsign && dep.headsign.trim().length > 0) {
+    return dep.headsign;
+  }
+  
+  // 2. Fallback: last stop_name from stop_times sequence
+  const stopTimes = state.gtfsData.stopTimesIndex[dep.trip.trip_id] || [];
+  if (stopTimes.length > 0) {
+    const sorted = stopTimes.slice().sort((a, b) => {
+      const seqA = parseInt(a.stop_sequence || '0', 10);
+      const seqB = parseInt(b.stop_sequence || '0', 10);
+      return seqA - seqB;
+    });
+    const lastStopId = sorted[sorted.length - 1]?.stop_id;
+    const lastStop = state.gtfsData.stopsIndex[lastStopId];
+    if (lastStop?.stop_name) {
+      return lastStop.stop_name;
+    }
+  }
+  
+  // 3. Final fallback
+  return "-";
+}
+
 function updateDeparturesTable() {
   const tableContainer = document.querySelector('#stop-detail-departures-table');
   if (!tableContainer || !state.stopDetailDepartures) return;
@@ -6148,7 +6144,7 @@ function updateDeparturesTable() {
           '</div>' +
         '</td>' +
         '<td class="p-1 border break-words">' +
-          escapeHtml(dep.headsign || "-") +
+          escapeHtml(getTripDestination(dep)) +
         '</td>' +
       '</tr>';
     }).join("")}
@@ -7490,7 +7486,7 @@ switch(currentView) {
 
           <!-- DESTINATION: BIERZE RESZTĘ -->
           <td class="p-1 border break-words">
-            ${escapeHtml(dep.headsign || "-")}
+            ${escapeHtml(getTripDestination(dep))}
           </td>
         </tr>
       `;
