@@ -4178,6 +4178,59 @@ function getAllTripsForRoute() {
   return routeTrips.filter(t => activeServices.includes(t.service_id));
 }
 
+    // Async version that yields to browser to prevent UI freezing
+    async function computeVariantsForRouteAsync() {
+      if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return null;
+      const trips = getAllTripsForRoute();
+      if (trips.length === 0) return null;
+      
+      const tripStopMaps = {};
+      const CHUNK_SIZE = 50; // Process 50 trips at a time
+      
+      // Build trip stop maps in chunks
+      for (let i = 0; i < trips.length; i += CHUNK_SIZE) {
+        const chunk = trips.slice(i, i + CHUNK_SIZE);
+        chunk.forEach(trip => {
+          const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+          stopTimes.sort((a,b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+          tripStopMaps[trip.trip_id] = stopTimes;
+        });
+        
+        // Yield to browser every chunk to keep UI responsive
+        if (i + CHUNK_SIZE < trips.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+      
+      const patternToVariant = {}, tripToVariant = {}; let variantNum = 1;
+      
+      // Compute patterns in chunks
+      for (let i = 0; i < trips.length; i += CHUNK_SIZE) {
+        const chunk = trips.slice(i, i + CHUNK_SIZE);
+        chunk.forEach(trip => {
+          const stops = tripStopMaps[trip.trip_id] || [];
+          const patternKey = stops.map(st => st.stop_id).join(',');
+          if (!patternToVariant[patternKey]) patternToVariant[patternKey] = variantNum++;
+          tripToVariant[trip.trip_id] = patternToVariant[patternKey];
+        });
+        
+        // Yield to browser every chunk
+        if (i + CHUNK_SIZE < trips.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+      
+      const variantDetails = {};
+      Object.keys(patternToVariant).forEach(patternKey => {
+        const vNum = patternToVariant[patternKey];
+        const stopIds = patternKey ? patternKey.split(',') : [];
+        variantDetails[vNum] = { stops: stopIds, stopDetails: stopIds.map(id => state.gtfsData.stopsIndex[id]) };
+      });
+      
+      return { trips, tripStopMaps, tripToVariant, patternToVariant, variantDetails };
+    }
+    
+    // Synchronous version for backward compatibility (kept for non-critical paths)
     function computeVariantsForRoute() {
       if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return null;
       const trips = getAllTripsForRoute();
@@ -4751,7 +4804,8 @@ async function updateMap() {
   const mapContainer = $('map-container');
   if (!mapContainer || !state.selectedRoute) return;
   
-  const variantsData = state._lastVariants || computeVariantsForRoute();
+  // Use cached variants data if available, otherwise try to compute synchronously as fallback
+  const variantsData = state._cachedVariantsData || state._lastVariants || computeVariantsForRoute();
 
   let routeIds = [state.selectedRoute.route_id];
   if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
@@ -5306,6 +5360,10 @@ function selectRoute(route) {
 
   // Invalidate canonical cache when route changes
   invalidateCanonicalCacheForCurrentSelection();
+  
+  // Invalidate variants cache when route changes
+  state._cachedVariantsData = null;
+  state._variantsCacheKey = null;
 
   resetMap();
   render();
@@ -6203,14 +6261,14 @@ function renderTimetable() {
   const container = $('timetable-container'); 
   if (!container) return;
   
-  // Get variants data early to build dropdown
   const trips = getAllTripsForRoute();
   if (trips.length === 0) {
     container.innerHTML = "<div class='p-4 text-gray-500'>No schedule available.</div>";
     return;
   }
   
-  const variantsData = computeVariantsForRoute();
+  // Use cached variants data if available, otherwise show loading state
+  const variantsData = state._cachedVariantsData;
   const tripToVariantGlobal = variantsData ? variantsData.tripToVariant : {};
   
   // Build variant dropdown options
@@ -6220,6 +6278,9 @@ function renderTimetable() {
     variantNumbers.forEach(vNum => {
       variantOptionsHtml += `<option value="${vNum}">Wariant #${vNum}</option>`;
     });
+  } else {
+    // Show loading option if variants are not yet computed
+    variantOptionsHtml += '<option value="-1" disabled>Ładowanie wariantów...</option>';
   }
   
   // Calculate variant range label
@@ -6248,7 +6309,7 @@ function renderTimetable() {
       <button id="toggle-depot-trips-main" class="${depotButtonClasses}" ${depotButtonDisabled} style="min-width: 280px;">
         ${depotButtonText}
       </button>
-      <select id="variant-filter-select" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 cursor-pointer font-medium" style="appearance: none; background-image: url('data:image/svg+xml;charset=UTF-8,%3csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27%3e%3cpolyline points=%276 9 12 15 18 9%27%3e%3c/polyline%3e%3c/svg%3e'); background-repeat: no-repeat; background-position: right 0.5rem center; background-size: 1.5em 1.5em; padding-right: 2.5rem; margin-left:-0.5rem;">
+      <select id="variant-filter-select" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 cursor-pointer font-medium" style="appearance: none; background-image: url('data:image/svg+xml;charset=UTF-8,%3csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27%3e%3cpolyline points=%276 9 12 15 18 9%27%3e%3c/polyline%3e%3c/svg%3e'); background-repeat: no-repeat; background-position: right 0.5rem center; background-size: 1.5em 1.5em; padding-right: 2.5rem; margin-left:-0.5rem;" ${!variantsData ? 'disabled' : ''}>
         ${variantOptionsHtml}
       </select>
       <div class="flex-1 text-right text-gray-700 font-medium" id="variant-range-label">
@@ -6730,6 +6791,58 @@ state.currentTimetableData.stopDepartures = stopDepartures;
         thead.dataset.variantListenerAttached = '1';
       }
     }
+
+// Compute variants asynchronously and update the dropdown
+async function loadVariantsAsync() {
+  // Only compute if we don't have cached data or if route/direction/date changed
+  const cacheKey = `${state.selectedRoute?.route_id}_${state.selectedDirection}_${state.selectedDate}`;
+  
+  if (state._variantsCacheKey === cacheKey && state._cachedVariantsData) {
+    // Already have cached data for current selection
+    return;
+  }
+  
+  // Clear cache for new selection
+  state._cachedVariantsData = null;
+  state._variantsCacheKey = null;
+  
+  // Compute variants asynchronously
+  const variantsData = await computeVariantsForRouteAsync();
+  
+  // Cache the result
+  state._cachedVariantsData = variantsData;
+  state._variantsCacheKey = cacheKey;
+  state._lastVariants = variantsData; // Also update _lastVariants for map compatibility
+  
+  // Update the dropdown with computed variants
+  const variantSelect = $('variant-filter-select');
+  if (!variantSelect) return; // User may have navigated away
+  
+  // Build variant options
+  let variantOptionsHtml = '<option value="0">Wszystko</option>';
+  if (variantsData && variantsData.variantDetails) {
+    const variantNumbers = Object.keys(variantsData.variantDetails).map(k => parseInt(k, 10)).filter(n => !isNaN(n)).sort((a, b) => a - b);
+    variantNumbers.forEach(vNum => {
+      variantOptionsHtml += `<option value="${vNum}">Wariant #${vNum}</option>`;
+    });
+  }
+  
+  // Update dropdown
+  variantSelect.innerHTML = variantOptionsHtml;
+  variantSelect.value = state.selectedVariantFilter.toString();
+  variantSelect.disabled = false;
+  
+  // Update variant range label if needed
+  const variantRangeLabel = $('variant-range-label');
+  if (variantRangeLabel && state.selectedVariantFilter > 0 && variantsData && variantsData.variantDetails) {
+    const variant = variantsData.variantDetails[state.selectedVariantFilter];
+    if (variant && variant.stopDetails && variant.stopDetails.length > 0) {
+      const firstStop = variant.stopDetails[0]?.stop_name || '?';
+      const lastStop = variant.stopDetails[variant.stopDetails.length - 1]?.stop_name || '?';
+      variantRangeLabel.textContent = `${firstStop} - ${lastStop}`;
+    }
+  }
+}
 
 function openStopTimetable(stopId) {
   if (!state.gtfsData || !state.selectedDate) return;
@@ -7794,12 +7907,18 @@ $('direction-select')?.addEventListener('change', async (e) => {
     state.selectedDirection = newDirection;
     // Invalidate canonical cache when direction changes
     invalidateCanonicalCacheForCurrentSelection();
+    // Invalidate variants cache when direction changes
+    state._cachedVariantsData = null;
+    state._variantsCacheKey = null;
     resetMap();
     render();
   });
 
 $('date-select')?.addEventListener('change', async (e) => {
     state.selectedDate = String(e.target.value);
+    // Invalidate variants cache when date changes
+    state._cachedVariantsData = null;
+    state._variantsCacheKey = null;
     resetMap();
     render();
   });
@@ -7938,6 +8057,10 @@ if (state.gtfsData && !state.selectedRoute && state.showStopsView && !state.sele
 if (state.gtfsData && state.selectedRoute) { 
   try {
     renderTimetable(); 
+    // Load variants asynchronously to avoid blocking UI
+    loadVariantsAsync().catch(err => {
+      console.error('Error loading variants:', err);
+    });
   } catch (err) {
     console.error('renderTimetable error:', err);
   }
