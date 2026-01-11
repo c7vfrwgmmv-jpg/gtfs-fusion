@@ -3235,7 +3235,6 @@ function buildRouteProfileForCurrentSelection() {
 
     const passengerStops = [];
     sts.forEach(st => {
-      const stId = st.stop_id;
       const pickup = st.pickup_type;
       const dropoff = st.drop_off_type;
 
@@ -3244,23 +3243,27 @@ function buildRouteProfileForCurrentSelection() {
         return; // stricte techniczne – pomijamy
       }
 
-      passengerStops.push(st);
-      if (!nodes[stId]) {
-        const stop = stopsIndex[stId] || {};
-        nodes[stId] = {
-          id: stId,
-          name: stop.stop_name || stId,
+      // Use station_id for classification (merge platforms)
+      const stationId = getStationId(st.stop_id, stopsIndex);
+      
+      passengerStops.push({ ...st, stationId });
+      
+      if (!nodes[stationId]) {
+        const stop = stopsIndex[st.stop_id] || {};
+        nodes[stationId] = {
+          id: stationId,
+          name: stop.stop_name || stationId,
           visitCount: 0,
           inDegree: 0,
           outDegree: 0,
         };
       }
-      nodes[stId].visitCount++;
+      nodes[stationId].visitCount++;
     });
 
     for (let i = 0; i < passengerStops.length - 1; i++) {
-      const a = passengerStops[i].stop_id;
-      const b = passengerStops[i + 1].stop_id;
+      const a = passengerStops[i].stationId;
+      const b = passengerStops[i + 1].stationId;
       const k = edgeKey(a, b);
       if (!edges[k]) {
         edges[k] = {
@@ -6233,7 +6236,13 @@ const serviceTrips = [];
 const depotTrips = [];
 
 sortedTrips.forEach(trip => {
-  if (trip.hasPassengerInsideCore) {
+  // For 2-stop trips: can't have "between core" mathematically
+  // For 3+ stop trips: require passenger between core stops
+  const isServiceTrip = trip.pStops.length <= 2 
+    ? trip.hasPassenger 
+    : trip.hasPassengerInsideCore;
+  
+  if (isServiceTrip) {
     serviceTrips.push(trip);
   } else {
     depotTrips.push(trip);
