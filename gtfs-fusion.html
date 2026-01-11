@@ -3547,7 +3547,12 @@ function buildRouteProfileForCurrentSelection() {
       }
       
       if (!isStopTech) {
-        pStops.push(st);
+        // Check for on-demand service
+        const pType = st.pickup_type ? String(st.pickup_type).trim() : "0";
+        const dType = st.drop_off_type ? String(st.drop_off_type).trim() : "0";
+        const isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
+        
+        pStops.push({ ...st, isOnDemand });
         hasPassenger = true;
         
         // Check if inside core segment
