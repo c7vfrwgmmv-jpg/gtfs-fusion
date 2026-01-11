@@ -317,3 +317,119 @@ All changes maintain backward compatibility:
 ## Summary
 
 This cleanup significantly improves the user experience when working with large GTFS datasets by preventing UI freezes, adding progress indicators, and implementing intelligent caching. The code is now cleaner, better documented, and more maintainable while preserving all existing functionality.
+
+---
+
+## 11. Code Architecture Documentation
+
+### Data Processing Pipeline
+
+The GTFS data flows through several processing stages:
+
+1. **PARSE (CSV → Raw Objects)**
+   - ZIP extraction & CSV parsing
+   - Worker-based parallel parsing for performance
+   - Produces raw JavaScript objects
+
+2. **NORMALIZE (Raw → Standardized)**
+   - normalizeKey: CSV headers → GTFS standard field names
+   - normalizeRecord: Clean values (trim, remove quotes, handle nulls)
+   - Output: Clean GTFS-compliant records
+
+3. **INDEX (Records → Lookup Tables)**
+   - Build indexes: stopTimesIndex, stopsIndex, shapesIndex, etc.
+   - Group related data for fast lookup
+   - Output: Queryable data structures
+
+4. **ENRICH (Add Computed Fields)**
+   - enrichTripsWithDirectionId: Generate missing direction_id
+   - Shape simplification: Reduce coordinate density
+   - Route pattern analysis: Build canonical trip patterns
+   - Output: Enhanced domain model
+
+5. **CACHE (Persist Processed Data)**
+   - cacheShapes: Store simplified shapes in localStorage
+   - Compression: Delta encoding + base36
+   - TTL: 30 days
+   - Output: Faster subsequent loads
+
+6. **RENDER (Display in UI)**
+   - Map visualization (Leaflet)
+   - Timetable generation
+   - escapeHtml: Sanitize for safe HTML rendering
+   - Output: Interactive web interface
+
+### Module Organization
+
+Functions are organized by concern:
+- **3.1: Data Normalization** - CSV/GTFS cleaning
+- **3.2: Time/Date** - GTFS temporal logic
+- **3.3: Geometry/Geography** - WGS84 calculations
+- **3.4: Cache/Serialization** - localStorage persistence
+- **3.5: Data Quality** - Heuristics for feed quality
+- **3.6: Direction Enrichment** - direction_id generation
+
+### Data Normalization Module
+
+**Pipeline:** CSV/GTFS → normalized keys/values → domain model
+
+**Key Functions:**
+- `normalizeKey`: Deterministic and globally cacheable (keyCache)
+- `normalizeRecord`: CSV-level normalization (quotes, whitespace)
+- `escapeHtml`: UI-layer sanitization (separate concern)
+- `KEY_ALIAS`: GTFS field name standardization
+
+### Time and Date Module
+
+**Internal representation:** Time is stored as minutes since midnight
+
+**Key Points:**
+- Supports GTFS times >24h (e.g., "25:30:00" for late-night service)
+- formatTime handles presentation layer (wraps at 24h for display)
+- GTFS dates are in local timezone (YYYYMMDD format, no TZ info)
+- Date parsing/formatting is bidirectional (GTFS ↔ Date object)
+
+### Geometry and Geography Module
+
+**Coordinate system:** WGS84 (latitude/longitude in decimal degrees)
+
+**Key Points:**
+- WGS84 everywhere (GTFS standard)
+- Distance tolerance: 100m for stop-shape matching (heuristic)
+- Shape simplification: Part of parsing/caching, not rendering
+- Simplification tolerance: 0.0001° (~11m) configurable
+- These functions are GTFS-agnostic and reusable
+
+### Cache and Serialization Module
+
+**Cache backend:** localStorage (browser-based persistent storage)
+
+**Strategy:**
+- Content-addressable via hash, with TTL and versioning
+- Simple hash (good for cache keys, not cryptographic)
+- TTL: 30 days (reasonable for transit data staleness)
+- Versioning: Explicit version field (v2 = compressed format)
+- Currently shapes only, but design is generic
+- Compression: Delta encoding + base36 (lossy to 6 decimal places ≈ 0.11m precision)
+- Cleanup: Best-effort on QuotaExceededError
+
+### Data Quality Heuristics Module
+
+**Purpose:** Inference and quality assessment
+
+**Key Points:**
+- Heuristic-based (not strict validation)
+- Handles missing/incomplete data gracefully
+- looksLikeGarbageLabel: Pattern-based filter for junk
+- Incomplete stopsIndex: Gracefully degrades
+
+### Direction Enrichment Module
+
+**Purpose:** Generate missing direction_id values
+
+**Key Points:**
+- Decision pipeline with multiple stages
+- Uses pattern analysis and geographic bearing
+- Deterministic within a feed
+- Incomplete stopsIndex: Trips without stops get direction_id=0
+
