@@ -5650,7 +5650,7 @@ async function renderStopsView() {
         });
         
         if (groupBounds.isValid()) {
-          map.fitBounds(groupBounds, { padding: [50, 50], maxZoom: 16 });
+          map.fitBounds(groupBounds, { padding: [50, 50], maxZoom: 20 });
         }
       }
     } else if (bounds.length > 0 && !state.stopsListMapState) {
