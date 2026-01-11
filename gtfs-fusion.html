@@ -7943,14 +7943,13 @@ if (state.gtfsData && state.selectedRoute) {
         let coreStops = new Set();
         let nodeTypes = {};
         if (profile && profile.coreStops) {
-          profile.coreStops.forEach(cs => {
-            if (cs.stopIds && Array.isArray(cs.stopIds)) {
-              cs.stopIds.forEach(sid => coreStops.add(sid));
-            }
-          });
+          // profile.coreStops is a flat array of stop_ids, not objects
+          if (Array.isArray(profile.coreStops)) {
+            profile.coreStops.forEach(stopId => coreStops.add(stopId));
+          }
         }
-        if (profile && profile.nodeTypeMap) {
-          nodeTypes = profile.nodeTypeMap;
+        if (profile && profile.nodeTypes) {
+          nodeTypes = profile.nodeTypes;
         }
 
         // Calculate firstCoreIdx and lastCoreIdx
@@ -8011,8 +8010,11 @@ if (state.gtfsData && state.selectedRoute) {
 
         // Calculate hasPassenger
         const hasPassenger = stopDetails.some(s => !s.isTech);
+        
+        // Count passenger stops (non-technical stops)
+        const passengerStopCount = stopDetails.filter(s => !s.isTech).length;
 
-        // Calculate hasPassengerBetweenCore
+        // Calculate hasPassengerBetweenCore (same as hasPassengerInsideCore in main code)
         let hasPassengerBetweenCore = false;
         if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
           for (let i = firstCoreIdx + 1; i < lastCoreIdx; i++) {
@@ -8025,7 +8027,14 @@ if (state.gtfsData && state.selectedRoute) {
 
         // Calculate filtering status
         const wouldBeFiltered = !hasPassenger && !state.showAllTrips;
-        const wouldBeDepot = !hasPassengerBetweenCore;
+        
+        // Match the main code logic for service vs depot classification
+        // For trips with ≤2 passenger stops: classify as service if it has any passenger stops
+        // For trips with 3+ passenger stops: classify as service only if has passenger stops between core
+        const isServiceTrip = passengerStopCount <= 2 
+          ? hasPassenger 
+          : hasPassengerBetweenCore;
+        const wouldBeDepot = !isServiceTrip;
         const activeOnDate = activeServices.includes(trip.service_id);
         const variant = variantsData ? variantsData.tripToVariant[trip.trip_id] : 'N/A';
 
@@ -8033,16 +8042,19 @@ if (state.gtfsData && state.selectedRoute) {
         let classificationReason = '';
         if (!hasPassenger) {
           classificationReason = '✗ NO passenger stops (all technical) | 🚫 FILTERED OUT (depot positioning)';
+        } else if (passengerStopCount <= 2) {
+          // Short trips (≤2 passenger stops): classified as service if has any passenger stops
+          classificationReason = `✓ Has ${passengerStopCount} passenger stop(s) | ✅ SHORT TRIP → CLASSIFIED AS SERVICE TRIP`;
         } else if (!hasPassengerBetweenCore) {
           const coreRange = firstCoreIdx !== -1 && lastCoreIdx !== -1 
             ? `${firstCoreIdx} to ${lastCoreIdx}` 
             : 'none';
-          classificationReason = `✓ Has passenger stops | ✓ Core stops: ${coreRange} | ❌ NO PASSENGER STOPS BETWEEN CORE | 🔧 CLASSIFIED AS DEPOT TRIP`;
+          classificationReason = `✓ Has ${passengerStopCount} passenger stops | Core stops: ${coreRange} | ❌ NO PASSENGER STOPS BETWEEN CORE | 🔧 CLASSIFIED AS DEPOT TRIP`;
         } else {
           const coreRange = firstCoreIdx !== -1 && lastCoreIdx !== -1 
             ? `${firstCoreIdx} to ${lastCoreIdx}` 
             : 'none';
-          classificationReason = `✓ Has passenger stops | ✓ Core stops: ${coreRange} | ✓ Has passengers between core | ✅ NORMAL SERVICE TRIP`;
+          classificationReason = `✓ Has ${passengerStopCount} passenger stops | Core stops: ${coreRange} | ✓ Has passengers between core | ✅ NORMAL SERVICE TRIP`;
         }
 
         return {
