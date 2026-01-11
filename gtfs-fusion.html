@@ -3504,7 +3504,87 @@ function buildRouteProfileForCurrentSelection() {
     });
   });
 
-  // 9. Save profile to state
+  // 10. Process trips: detect passenger stops, classify service vs depot
+  const processedTrips = {};
+  
+  // Threshold for short trip classification: trips with ≤2 passenger stops
+  // use simpler classification (just check if any passenger stops exist)
+  const SHORT_TRIP_THRESHOLD = 2;
+  
+  allTrips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    let pStops = [];
+    let firstCoreIdx = -1;
+    let lastCoreIdx = -1;
+    
+    // Find core boundaries (in RAW stops, not filtered)
+    if (coreStops && coreStops.length > 0) {
+      const coreStopsSet = new Set(coreStops);
+      for (let i = 0; i < stops.length; i++) {
+        if (coreStopsSet.has(stops[i].stop_id)) {
+          if (firstCoreIdx === -1) firstCoreIdx = i;
+          lastCoreIdx = i;
+        }
+      }
+    }
+    
+    let hasPassenger = false;
+    let hasPassengerInsideCore = false;
+    
+    // Filter stops: remove tail stops, build pStops
+    for (let i = 0; i < stops.length; i++) {
+      const st = stops[i];
+      const sId = st.stop_id;
+      
+      // Use nodeTypes from profile (already computed at station-level!)
+      const profileNodeType = nodeTypes[sId];
+      
+      let isStopTech = false;
+      
+      if (profileNodeType === 'tail') {
+        // Depot/technical stop
+        isStopTech = true;
+      } else {
+        // 'passenger' or 'core' or undefined → show as passenger
+        isStopTech = false;
+      }
+      
+      if (!isStopTech) {
+        // Check for on-demand service
+        const pType = st.pickup_type ? String(st.pickup_type).trim() : "0";
+        const dType = st.drop_off_type ? String(st.drop_off_type).trim() : "0";
+        const isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
+        
+        pStops.push({ ...st, isOnDemand });
+        hasPassenger = true;
+        
+        // Check if inside core segment
+        if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && i >= firstCoreIdx && i <= lastCoreIdx) {
+          hasPassengerInsideCore = true;
+        }
+      }
+    }
+    
+    // Classify as service or depot trip
+    // Business rule:
+    // - For trips with ≤SHORT_TRIP_THRESHOLD passenger stops: if ANY passenger stops exist, it's a service trip
+    // - For trips with 3+ passenger stops: requires passenger stops BETWEEN first and last core stops
+    //   (this distinguishes regular service from depot/yard movements that only touch core at endpoints)
+    const isServiceTrip = pStops.length <= SHORT_TRIP_THRESHOLD 
+      ? hasPassenger 
+      : hasPassengerInsideCore;
+    
+    processedTrips[trip.trip_id] = {
+      pStops: pStops,
+      hasPassenger: hasPassenger,
+      hasPassengerInsideCore: hasPassengerInsideCore,
+      isServiceTrip: isServiceTrip,
+      firstCoreIdx: firstCoreIdx,
+      lastCoreIdx: lastCoreIdx
+    };
+  });
+
+  // 11. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
     key,
@@ -3517,9 +3597,10 @@ function buildRouteProfileForCurrentSelection() {
     coreStops,
     nodeTypes,
     stopMetadata,
-    coreStationsSet: coreStationsSet,
-    tripCoreIndices: tripCoreIndices,
-    stationMergeAllowed: stationMergeAllowed,
+    coreStationsSet,
+    tripCoreIndices,
+    stationMergeAllowed,
+    processedTrips,
     version: 3,
   };
   state.routeProfiles[key][dir] = profile;
@@ -6176,6 +6257,10 @@ const profile = getCurrentRouteProfile();
 const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
 const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : null;
 
+// === STEP 3: Process trips (detect tail stops, filter if needed) ===
+// Use pre-computed trip processing from profile
+const processedTrips = trips.map(trip => {
+  const processed = profile && profile.processedTrips ? profile.processedTrips[trip.trip_id] : null;
 // === STEP 3: Process trips (use profile classification) ===
 // Profile nodeTypes is the single source of truth for stop classification
 // No need for duplicate edgeCount calculation - profile already did station-level aggregation
@@ -6228,20 +6313,13 @@ const processedTrips = trips.map(trip => {
     }
   }
   
-  let hasPassengerInsideCore = false;
-  if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
-    // Check for passenger stops between first and last core
-    for (let i = firstCoreIdx + 1; i < lastCoreIdx; i++) {
-      const pStop = pStops.find(ps => ps.stop_id === stops[i].stop_id);
-      if (pStop && !pStop.isTech) {
-        hasPassengerInsideCore = true;
-        break;
-      }
-    }
+  if (!processed) {
+    // Fallback: trip has no profile data (shouldn't happen)
+    console.warn('No processed data for trip:', trip.trip_id);
+    return { ...trip, pStops: [], hasPassenger: false, hasPassengerInsideCore: false, firstCoreIdx: -1, lastCoreIdx: -1 };
   }
   
-  const hasPassenger = pStops.some(s => !s.isTech);
-  return { ...trip, pStops, hasPassenger, hasPassengerInsideCore, firstCoreIdx, lastCoreIdx };
+  return { ...trip, ...processed };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
 
 if (processedTrips.length === 0) { 
@@ -6312,13 +6390,8 @@ const serviceTrips = [];
 const depotTrips = [];
 
 sortedTrips.forEach(trip => {
-  // For 2-stop trips: can't have "between core" mathematically
-  // For 3+ stop trips: require passenger between core stops
-  const isServiceTrip = trip.pStops.length <= 2 
-    ? trip.hasPassenger 
-    : trip.hasPassengerInsideCore;
-  
-  if (isServiceTrip) {
+  // Use pre-computed classification from profile
+  if (trip.isServiceTrip) {
     serviceTrips.push(trip);
   } else {
     depotTrips.push(trip);
