@@ -6261,6 +6261,57 @@ const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : nu
 // Use pre-computed trip processing from profile
 const processedTrips = trips.map(trip => {
   const processed = profile && profile.processedTrips ? profile.processedTrips[trip.trip_id] : null;
+// === STEP 3: Process trips (use profile classification) ===
+// Profile nodeTypes is the single source of truth for stop classification
+// No need for duplicate edgeCount calculation - profile already did station-level aggregation
+
+const processedTrips = trips.map(trip => {
+  const stops = tripStopMaps[trip.trip_id] || [];
+  let pStops = [];
+  
+  let firstCoreIdx = -1;
+  let lastCoreIdx = -1;
+  
+  if (profile && profile.coreStops) {
+    const coreStopsSet = new Set(profile.coreStops);
+    for (let i = 0; i < stops.length; i++) {
+      if (coreStopsSet.has(stops[i].stop_id)) {
+        if (firstCoreIdx === -1) firstCoreIdx = i;
+        lastCoreIdx = i;
+      }
+    }
+  }
+  
+  for (let i = 0; i < stops.length; i++) {
+    const s = stops[i];
+    const sId = s.stop_id;
+
+    const meta = stopMetadata ? stopMetadata[sId] : null;
+    const profileNodeType = nodeTypes ? nodeTypes[sId] : null;
+    
+    let isStopTech = false;
+    let isOnDemand = false;
+
+    // Profile is the single source of truth for stop classification
+    if (!profileNodeType) {
+      // This should rarely happen - profile should always classify stops
+      console.warn('Missing nodeType for stop (profile not built?):', sId);
+      // Safe fallback: show as passenger stop to avoid hiding valid stops
+      isStopTech = false;
+    } else {
+      // Use profile classification
+      isStopTech = (profileNodeType === 'tail');
+    }
+    
+    // Check for on-demand stops (independent of technical classification)
+    const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
+    const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
+    isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
+
+    if (!isStopTech || state.showAllTrips) {
+      pStops.push({ ...s, isTech: isStopTech, isOnDemand: isOnDemand });
+    }
+  }
   
   if (!processed) {
     // Fallback: trip has no profile data (shouldn't happen)
