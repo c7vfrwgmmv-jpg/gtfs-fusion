@@ -949,7 +949,10 @@ let state = {
   columnOrderCache: {},
   
   // Performance metrics from last load
-  lastLoadMetrics: null
+  lastLoadMetrics: null,
+  
+  // Skip direction_id enrichment when loading GTFS
+  skipDirectionIdEnrichment: false
 };
 
 let stopsSearchIndex = null;
@@ -2427,15 +2430,21 @@ perfTimings.parseEnd = performance.now();
         perfTimings.indexStart = performance.now();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         
-        // Generate missing direction_id values with chunked processing
-        state.loadingStep = 'Generowanie brakujących direction_id...'; render();
-        perfTimings.enrichStart = performance.now();
-        await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
-          state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
-          state.loadingProgressPercent = percent;
-          render();
-        });
-        perfTimings.enrichEnd = performance.now();
+        // Generate missing direction_id values with chunked processing (only if not skipped)
+        if (!state.skipDirectionIdEnrichment) {
+          state.loadingStep = 'Generowanie brakujących direction_id...'; render();
+          perfTimings.enrichStart = performance.now();
+          await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
+            state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
+            state.loadingProgressPercent = percent;
+            render();
+          });
+          perfTimings.enrichEnd = performance.now();
+        } else {
+          state.loadingStep = 'Pomijanie generowania direction_id...'; render();
+          perfTimings.enrichStart = performance.now();
+          perfTimings.enrichEnd = performance.now();
+        }
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -7697,10 +7706,16 @@ switch(currentView) {
     
   case VIEW.UPLOAD:
     html += `<div class="flex-1 flex items-center justify-center">
-    <label class="bg-orange-500 text-white px-6 py-3 rounded-lg cursor-pointer hover:bg-orange-600 inline-flex items-center gap-2 text-lg font-medium">
-      Załaduj GTFS
-      <input type="file" accept=".zip" id="file-input" class="hidden" />
-    </label>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 1rem;">
+      <label class="bg-orange-500 text-white px-6 py-3 rounded-lg cursor-pointer hover:bg-orange-600 inline-flex items-center gap-2 text-lg font-medium">
+        Załaduj GTFS
+        <input type="file" accept=".zip" id="file-input" class="hidden" />
+      </label>
+      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.9rem; color: #374151;">
+        <input type="checkbox" id="skip-direction-enrichment" ${state.skipDirectionIdEnrichment ? 'checked' : ''} style="width: 1.2rem; height: 1.2rem; cursor: pointer;" />
+        <span>Nie konstruuj direction_id</span>
+      </label>
+    </div>
   </div>`;
     break;
     
@@ -8010,6 +8025,17 @@ switch(currentView) {
       $('file-input-header')?.addEventListener('change', handleFileUpload);
 
       $('cancel-parse')?.addEventListener('click', cancelParsing);
+      
+      // Handle skip direction enrichment checkbox
+      $('skip-direction-enrichment')?.addEventListener('change', (e) => {
+        state.skipDirectionIdEnrichment = e.target.checked;
+        try {
+          localStorage.setItem('gtfs_skip_direction_enrichment', JSON.stringify(state.skipDirectionIdEnrichment));
+        } catch (err) {
+          console.warn('Failed to save skip direction enrichment preference:', err);
+        }
+      });
+      
       const routesOptionsBtn = $('routes-options-btn');
       const routesOptions = $('routes-options');
       if (routesOptionsBtn && routesOptions) {
@@ -8293,6 +8319,16 @@ if (state.gtfsData && state.selectedRoute) {
 // ═══════════════════════════════════════════════════════════════
 // 15. GLOBAL EVENT HANDLERS & INITIALIZATION
 // ═══════════════════════════════════════════════════════════════
+    // Load preferences from localStorage
+    try {
+      const savedSkipPref = localStorage.getItem('gtfs_skip_direction_enrichment');
+      if (savedSkipPref !== null) {
+        state.skipDirectionIdEnrichment = JSON.parse(savedSkipPref);
+      }
+    } catch (err) {
+      console.warn('Failed to load skip direction enrichment preference:', err);
+    }
+    
     // global delegated handlers (one-time) ---------------------------------------------------------
     // handle clicks on any .route-link (works for badges in stop detail, modal, lists)
     document.addEventListener('click', (e) => {
