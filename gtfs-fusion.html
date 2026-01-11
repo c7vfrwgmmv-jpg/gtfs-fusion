@@ -8130,7 +8130,7 @@ if (state.gtfsData && state.selectedRoute) {
 
       // 2. Data collection using existing functions
       const allTrips = getAllTripsForRoute();
-      const variantsData = computeVariantsForRoute();
+      const variantsData = state._cachedVariantsData || computeVariantsForRoute();
       const profile = getCurrentRouteProfile();
       const activeServices = getServicesForDate(state.selectedDate);
 
