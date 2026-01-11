@@ -3757,9 +3757,17 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           // Note: Chunks with same signature should have same length
           if (chunk.stops.length !== preCoreStops.length) {
             console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${preCoreStops.length}`);
+            // Extend chunk if new one has more stops
+            for (let idx = chunk.stops.length; idx < preCoreStops.length; idx++) {
+              chunk.stops.push({
+                stationId: preCoreStops[idx].stationId,
+                name: preCoreStops[idx].name,
+                stopIds: [preCoreStops[idx].stop_id]
+              });
+            }
           }
-          const minLength = Math.min(chunk.stops.length, preCoreStops.length);
-          for (let idx = 0; idx < minLength; idx++) {
+          // Merge stopIds for all positions
+          for (let idx = 0; idx < Math.min(chunk.stops.length, preCoreStops.length); idx++) {
             if (!chunk.stops[idx].stopIds.includes(preCoreStops[idx].stop_id)) {
               chunk.stops[idx].stopIds.push(preCoreStops[idx].stop_id);
             }
@@ -3814,9 +3822,17 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           // Note: Chunks with same signature should have same length
           if (chunk.stops.length !== postCoreStops.length) {
             console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${postCoreStops.length}`);
+            // Extend chunk if new one has more stops
+            for (let idx = chunk.stops.length; idx < postCoreStops.length; idx++) {
+              chunk.stops.push({
+                stationId: postCoreStops[idx].stationId,
+                name: postCoreStops[idx].name,
+                stopIds: [postCoreStops[idx].stop_id]
+              });
+            }
           }
-          const minLength = Math.min(chunk.stops.length, postCoreStops.length);
-          for (let idx = 0; idx < minLength; idx++) {
+          // Merge stopIds for all positions
+          for (let idx = 0; idx < Math.min(chunk.stops.length, postCoreStops.length); idx++) {
             if (!chunk.stops[idx].stopIds.includes(postCoreStops[idx].stop_id)) {
               chunk.stops[idx].stopIds.push(postCoreStops[idx].stop_id);
             }
@@ -3881,9 +3897,17 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           // Note: Chunks with same signature should have same length
           if (chunk.stops.length !== windowStops.length) {
             console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${windowStops.length}`);
+            // Extend chunk if new one has more stops
+            for (let idx = chunk.stops.length; idx < windowStops.length; idx++) {
+              chunk.stops.push({
+                stationId: windowStops[idx].stationId,
+                name: windowStops[idx].name,
+                stopIds: [windowStops[idx].stop_id]
+              });
+            }
           }
-          const minLength = Math.min(chunk.stops.length, windowStops.length);
-          for (let idx = 0; idx < minLength; idx++) {
+          // Merge stopIds for all positions
+          for (let idx = 0; idx < Math.min(chunk.stops.length, windowStops.length); idx++) {
             if (!chunk.stops[idx].stopIds.includes(windowStops[idx].stop_id)) {
               chunk.stops[idx].stopIds.push(windowStops[idx].stop_id);
             }
