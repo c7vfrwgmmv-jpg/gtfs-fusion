@@ -2458,7 +2458,13 @@ function getLogicalRouteKeyFromGroup(group) {
 }
 
 function generateAvailableDates(calendar, calendarDates) {
-  const dates = new Set();
+  // Helper: get day of week from GTFS date
+  const getDayOfWeek = (gtfsDate) => {
+    const y = parseInt(gtfsDate.substring(0, 4));
+    const m = parseInt(gtfsDate.substring(4, 6)) - 1;
+    const d = parseInt(gtfsDate.substring(6, 8));
+    return DAY_NAMES[new Date(y, m, d).getDay()];
+  };
   
   // Helper: increment GTFS date by 1 day
   const incrementGTFSDate = (gtfsDate) => {
@@ -2470,44 +2476,81 @@ function generateAvailableDates(calendar, calendarDates) {
     return formatDateToGTFS(date);
   };
   
-  // Helper: get day of week from GTFS date
-  const getDayOfWeek = (gtfsDate) => {
-    const y = parseInt(gtfsDate.substring(0, 4));
-    const m = parseInt(gtfsDate.substring(4, 6)) - 1;
-    const d = parseInt(gtfsDate.substring(6, 8));
-    return DAY_NAMES[new Date(y, m, d).getDay()];
-  };
+  // 🆕 KROK 1: Zbierz WSZYSTKIE możliwe daty (z calendar.txt)
+  const allPossibleDates = new Set();
   
-  // ✅ String iteration and comparison
   calendar.forEach(cal => {
     if (!cal.start_date || !cal.end_date) return;
     
     let current = cal.start_date;
-    while (current <= cal.end_date) {  // ✅ String comparison
+    while (current <= cal.end_date) {
       const dayOfWeek = getDayOfWeek(current);
-      if (cal[dayOfWeek] === '1') dates.add(current);
+      if (cal[dayOfWeek] === '1') {
+        allPossibleDates.add(current);
+      }
       current = incrementGTFSDate(current);
     }
   });
   
-  // ✅ String operations
-  calendarDates.forEach(cd => {
-    if (cd.exception_type === '1') dates.add(cd.date);
-    else if (cd.exception_type === '2') dates.delete(cd.date);
-  });
-
-  return Array.from(dates)
-    .sort()  // ✅ Lexicographic sort works perfectly for YYYYMMDD
-    .map(dateStr => {
-      const date = parseGTFSDate(dateStr);
-      if (!date) return { value: dateStr, label: dateStr };
-      const dd = String(date.getDate()).padStart(2, '0');
-      const mm = String(date.getMonth() + 1).padStart(2, '0');
-      const yyyy = String(date.getFullYear());
-      return { value: dateStr, label: `${dd}-${mm}-${yyyy}` };
+  // 🆕 KROK 2: Dla każdej daty, policz finalne serwisy
+  const dateServiceCounts = new Map();
+  
+  allPossibleDates.forEach(dateStr => {
+    const dayOfWeek = getDayOfWeek(dateStr);
+    
+    // Bazowe serwisy z calendar.txt
+    const services = new Set();
+    calendar.forEach(cal => {
+      if (dateStr >= cal.start_date && dateStr <= cal.end_date && cal[dayOfWeek] === '1') {
+        services.add(cal.service_id);
+      }
     });
+    
+    // Zastosuj wyjątki z calendar_dates.txt
+    calendarDates.forEach(cd => {
+      if (cd.date === dateStr) {
+        if (cd.exception_type === '1') services.add(cd.service_id);
+        else if (cd.exception_type === '2') services.delete(cd.service_id);
+      }
+    });
+    
+    // Zapisz liczbę serwisów
+    dateServiceCounts.set(dateStr, services.size);
+  });
+  
+  // 🆕 KROK 3: Dodaj daty z calendar_dates.txt (exception_type=1)
+  calendarDates.forEach(cd => {
+    if (cd.exception_type === '1' && !dateServiceCounts.has(cd.date)) {
+      // Nowa data nie w calendar.txt - policz serwisy
+      const services = new Set();
+      
+      calendarDates.forEach(cd2 => {
+        if (cd2.date === cd.date) {
+          if (cd2.exception_type === '1') services.add(cd2.service_id);
+        }
+      });
+      
+      dateServiceCounts.set(cd.date, services.size);
+    }
+  });
+  
+  // 🆕 KROK 4: Filtruj - zostaw tylko daty z > 0 serwisów
+  const finalDates = Array.from(dateServiceCounts.entries())
+    .filter(([date, count]) => count > 0)
+    .map(([date, count]) => date)
+    .sort();
+  
+  // KROK 5: Formatuj do UI
+  return finalDates.map(dateStr => {
+    const date = parseGTFSDate(dateStr);
+    if (!date) return { value: dateStr, label: dateStr };
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = String(date.getFullYear());
+    return { value: dateStr, label: `${dd}-${mm}-${yyyy}` };
+  });
 }
-
+	  
 function getServicesForDate(dateStr) {
   if (!state.gtfsData) return [];
   
