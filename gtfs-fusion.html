@@ -7777,8 +7777,30 @@ if (state.gtfsData && state.selectedRoute) {
         return;
       }
 
+      // HTML escape helper function
+      const escapeHtml = (str) => {
+        if (str == null) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      };
+
+      // Filename sanitization helper
+      const sanitizeFilename = (str) => {
+        if (str == null) return 'unknown';
+        return String(str).replace(/[^a-zA-Z0-9_-]/g, '_');
+      };
+
       // Collect data
       const trips = getAllTripsForRoute();
+      if (!trips || trips.length === 0) {
+        console.error('❌ No trips found for selected route!');
+        return;
+      }
+
       const variantsData = computeVariantsForRoute();
       const profile = getCurrentRouteProfile();
       
@@ -7883,7 +7905,7 @@ if (state.gtfsData && state.selectedRoute) {
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Debug Trips - ${routeName} - ${direction} - ${date}</title>
+  <title>Debug Trips - ${escapeHtml(routeName)} - ${escapeHtml(direction)} - ${escapeHtml(date)}</title>
   <style>
     body { font-family: monospace; font-size: 11px; margin: 20px; background: #f5f5f5; }
     .header { background: white; padding: 15px; border-radius: 4px; margin-bottom: 15px; }
@@ -7909,9 +7931,9 @@ if (state.gtfsData && state.selectedRoute) {
 <body>
   <div class="header">
     <h1>Debug Trips Export</h1>
-    <div class="meta"><strong>Route:</strong> ${routeName} (${routeId})</div>
-    <div class="meta"><strong>Direction:</strong> ${direction}</div>
-    <div class="meta"><strong>Date:</strong> ${date}</div>
+    <div class="meta"><strong>Route:</strong> ${escapeHtml(routeName)} (${escapeHtml(routeId)})</div>
+    <div class="meta"><strong>Direction:</strong> ${escapeHtml(direction)}</div>
+    <div class="meta"><strong>Date:</strong> ${escapeHtml(date)}</div>
     <div class="meta"><strong>Show All Trips:</strong> ${state.showAllTrips ? 'YES' : 'NO'}</div>
     <div class="meta"><strong>Core Stops:</strong> ${coreStopsCount}</div>
     <div class="stats">
@@ -7951,12 +7973,13 @@ if (state.gtfsData && state.selectedRoute) {
         // Build stop sequence HTML
         let stopSeqHtml = '<div class="stop-list">';
         trip.stop_sequence.forEach(st => {
-          stopSeqHtml += `<div class="stop-item ${st.nodeType}">`;
-          stopSeqHtml += `<span class="dep-time">${st.departure_time}</span> `;
-          stopSeqHtml += `[${st.stop_sequence}] ${st.stop_name} (${st.stop_id})<br>`;
-          stopSeqHtml += `Arr: ${st.arrival_time} | `;
-          stopSeqHtml += `P/D: ${st.pickup_type}/${st.drop_off_type} | `;
-          stopSeqHtml += `Type: ${st.nodeType} | `;
+          const nodeTypeClass = escapeHtml(st.nodeType);
+          stopSeqHtml += `<div class="stop-item ${nodeTypeClass}">`;
+          stopSeqHtml += `<span class="dep-time">${escapeHtml(st.departure_time)}</span> `;
+          stopSeqHtml += `[${escapeHtml(st.stop_sequence)}] ${escapeHtml(st.stop_name)} (${escapeHtml(st.stop_id)})<br>`;
+          stopSeqHtml += `Arr: ${escapeHtml(st.arrival_time)} | `;
+          stopSeqHtml += `P/D: ${escapeHtml(st.pickup_type)}/${escapeHtml(st.drop_off_type)} | `;
+          stopSeqHtml += `Type: ${escapeHtml(st.nodeType)} | `;
           stopSeqHtml += `Core: ${st.isCore ? '✓' : '✗'} | `;
           stopSeqHtml += `Tech: ${st.isTech ? '✓' : '✗'} | `;
           stopSeqHtml += `Between: ${st.isBetweenCore ? '✓' : '✗'}`;
@@ -7966,10 +7989,10 @@ if (state.gtfsData && state.selectedRoute) {
         
         html += `
       <tr class="${rowClass}">
-        <td class="mono">${trip.trip_id}</td>
-        <td>${trip.variant}</td>
-        <td class="mono">${trip.service_id}</td>
-        <td>${trip.direction_id}</td>
+        <td class="mono">${escapeHtml(trip.trip_id)}</td>
+        <td>${escapeHtml(String(trip.variant))}</td>
+        <td class="mono">${escapeHtml(trip.service_id)}</td>
+        <td>${escapeHtml(trip.direction_id)}</td>
         <td>${trip.stops_count}</td>
         <td>${trip.first_core_idx}</td>
         <td>${trip.last_core_idx}</td>
@@ -7990,7 +8013,7 @@ if (state.gtfsData && state.selectedRoute) {
 </html>`;
 
       // Download file
-      const filename = `debug_trips_${routeId}_${direction}_${date}.html`;
+      const filename = `debug_trips_${sanitizeFilename(routeId)}_${sanitizeFilename(direction)}_${sanitizeFilename(date)}.html`;
       const blob = new Blob([html], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
