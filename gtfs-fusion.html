@@ -2305,16 +2305,16 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
 // ==========================================
 // SMART PARSING - use async for large files, sync for small files
 // ==========================================
-state.loadingStep = 'Wczytywanie i parsowanie plików...'; render();
+state.loadingStep = 'Przetwarzanie plików GTFS...'; render();
 
 perfTimings.parseStart = performance.now();
 
 // Helper to decide if file needs async parsing (threshold: 50KB)
-async function smartParse(text, filename, onProgress) {
+async function smartParse(text, filename) {
   const sizeKB = text.length / 1024;
   if (sizeKB > 50) {
     // Large file - use async parsing for UI responsiveness
-    return await parseCSVAsync(text, onProgress);
+    return await parseCSVAsync(text);
   } else {
     // Small file - use sync parsing for speed
     return parseCSV(text);
@@ -2323,55 +2323,31 @@ async function smartParse(text, filename, onProgress) {
 
 // Parse files with smart async/sync selection
 const routesText = await routesFile.async('string');
-state.loadingStep = 'Parsowanie routes.txt...'; render();
-const routes = await smartParse(routesText, 'routes.txt', (rows, percent) => {
-  state.loadingStep = `Parsowanie routes.txt: ${rows} wierszy (${percent}%)`;
-  render();
-});
+const routes = await smartParse(routesText, 'routes.txt');
 
 const tripsText = await tripsFile.async('string');
-state.loadingStep = 'Parsowanie trips.txt...'; render();
-const trips = await smartParse(tripsText, 'trips.txt', (rows, percent) => {
-  state.loadingStep = `Parsowanie trips.txt: ${rows} wierszy (${percent}%)`;
-  render();
-});
+const trips = await smartParse(tripsText, 'trips.txt');
 
 const stopsText = await stopsFile.async('string');
-state.loadingStep = 'Parsowanie stops.txt...'; render();
-const stops = await smartParse(stopsText, 'stops.txt', (rows, percent) => {
-  state.loadingStep = `Parsowanie stops.txt: ${rows} wierszy (${percent}%)`;
-  render();
-});
+const stops = await smartParse(stopsText, 'stops.txt');
 
 // Parse optional files
 let calendar = [];
 if (calendarFile) {
   const calendarText = await calendarFile.async('string');
-  state.loadingStep = 'Parsowanie calendar.txt...'; render();
-  calendar = await smartParse(calendarText, 'calendar.txt', (rows, percent) => {
-    state.loadingStep = `Parsowanie calendar.txt: ${rows} wierszy (${percent}%)`;
-    render();
-  });
+  calendar = await smartParse(calendarText, 'calendar.txt');
 }
 
 let calendarDates = [];
 if (calendarDatesFile) {
   const calendarDatesText = await calendarDatesFile.async('string');
-  state.loadingStep = 'Parsowanie calendar_dates.txt...'; render();
-  calendarDates = await smartParse(calendarDatesText, 'calendar_dates.txt', (rows, percent) => {
-    state.loadingStep = `Parsowanie calendar_dates.txt: ${rows} wierszy (${percent}%)`;
-    render();
-  });
+  calendarDates = await smartParse(calendarDatesText, 'calendar_dates.txt');
 }
 
 let agencies = [];
 if (agenciesFile) {
   const agenciesText = await agenciesFile.async('string');
-  state.loadingStep = 'Parsowanie agency.txt...'; render();
-  agencies = await smartParse(agenciesText, 'agency.txt', (rows, percent) => {
-    state.loadingStep = `Parsowanie agency.txt: ${rows} wierszy (${percent}%)`;
-    render();
-  });
+  agencies = await smartParse(agenciesText, 'agency.txt');
 }
 
 perfTimings.parseEnd = performance.now();
