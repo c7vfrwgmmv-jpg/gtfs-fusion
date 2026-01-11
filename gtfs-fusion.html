@@ -3664,8 +3664,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         });
       }
     }
-    // Merge stopIds for all positions
-    for (let idx = 0; idx < Math.min(existingChunk.stops.length, newStops.length); idx++) {
+    // Merge stopIds for all positions (up to the length of newStops)
+    // After extension above, existingChunk.stops.length >= newStops.length
+    for (let idx = 0; idx < newStops.length; idx++) {
       if (!existingChunk.stops[idx].stopIds.includes(newStops[idx].stop_id)) {
         existingChunk.stops[idx].stopIds.push(newStops[idx].stop_id);
       }
