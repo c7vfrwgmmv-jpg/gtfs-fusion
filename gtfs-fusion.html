@@ -8016,7 +8016,10 @@ if (state.gtfsData && state.selectedRoute) {
         // Build stop sequence HTML
         let stopSeqHtml = '<div class="stop-list">';
         trip.stop_sequence.forEach(st => {
-          const nodeTypeClass = escapeHtml(st.nodeType);
+          // Validate nodeType against whitelist
+          const validNodeTypes = ['core', 'tail', 'passenger'];
+          const nodeTypeClass = validNodeTypes.includes(st.nodeType) ? st.nodeType : 'passenger';
+          
           stopSeqHtml += `<div class="stop-item ${nodeTypeClass}">`;
           stopSeqHtml += `<span class="dep-time">${escapeHtml(st.departure_time)}</span> `;
           stopSeqHtml += `[${escapeHtml(st.stop_sequence)}] ${escapeHtml(st.stop_name)} (${escapeHtml(st.stop_id)})<br>`;
