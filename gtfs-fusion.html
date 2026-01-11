@@ -1580,25 +1580,260 @@ async function enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex
   }
 }
 
-// Synchronous version for backward compatibility
-function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
-  const tripsByRoute = {};
-  
-  for (const trip of trips) {
-    if (!trip || !trip.trip_id) continue;
-    
-    const routeId = trip.route_id || 'unknown';
-    if (!tripsByRoute[routeId]) {
-      tripsByRoute[routeId] = [];
-    }
-    tripsByRoute[routeId].push(trip);
+async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, onProgress) {
+  // 1) trips do przetworzenia
+  const tripsToProcess = trips.filter(t => t && t.trip_id && (t.direction_id === undefined || t.direction_id === null || String(t.direction_id).trim() === ''));
+  if (!tripsToProcess.length) {
+    if (onProgress) onProgress(0, 0, 100);
+    return;
   }
-  
-  for (const routeId in tripsByRoute) {
-    enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
-  }
-}
 
+  // 2) Zbuduj minimalny filteredStopTimesIndex oraz zbiór używanych stop_id
+  const filteredStopTimesIndex = Object.create(null);
+  const usedStopIds = new Set();
+
+  for (const t of tripsToProcess) {
+    const raw = stopTimesIndex[t.trip_id] || [];
+    // Kopiujemy pełne info wymagane przez algorytm i normalizujemy seq na number
+    const copy = raw.map(st => ({
+      stop_id: st.stop_id,
+      stop_sequence: Number(st.stop_sequence || 0),
+      arrival_time: st.arrival_time || '',
+      departure_time: st.departure_time || '',
+      pickup_type: st.pickup_type || '0',
+      drop_off_type: st.drop_off_type || '0'
+    }));
+    filteredStopTimesIndex[t.trip_id] = copy;
+    copy.forEach(s => usedStopIds.add(s.stop_id));
+  }
+
+  // 3) Zbuduj mapę stop_id -> mały indeks (0..N-1) oraz stopsArray (minimalne dane)
+  const stopIdToIndex = Object.create(null);
+  const stopsArray = [];
+  let idx = 0;
+  usedStopIds.forEach(id => {
+    stopIdToIndex[id] = idx++;
+    const s = stopsIndex[id] || {};
+    stopsArray.push({
+      id,
+      stop_lat: s.stop_lat !== undefined ? s.stop_lat : null,
+      stop_lon: s.stop_lon !== undefined ? s.stop_lon : null,
+      stop_name: s.stop_name || ''
+    });
+  });
+
+  // 4) Zbuduj skompresowany stopTimesIndex: zastępuj stop_id przez indeks
+  const stopTimesIndexCompressed = Object.create(null);
+  for (const trip of tripsToProcess) {
+    const arr = filteredStopTimesIndex[trip.trip_id] || [];
+    // Nie sortujemy tu na zapas - worker to zrobi, ale możemy posortować dla mniejszego transferu niepotrzebnych permutacji
+    arr.sort((a,b) => Number(a.stop_sequence || 0) - Number(b.stop_sequence || 0));
+    stopTimesIndexCompressed[trip.trip_id] = arr.map(st => ({
+      si: stopIdToIndex[st.stop_id],   // stop index
+      seq: Number(st.stop_sequence || 0),
+      arr: st.arrival_time || '',
+      dep: st.departure_time || '',
+      pu: st.pickup_type || '0',
+      do: st.drop_off_type || '0'
+    }));
+  }
+
+  // 5) Minimal trips array
+  const minimalTrips = tripsToProcess.map(t => ({ trip_id: t.trip_id, route_id: t.route_id }));
+
+  // 6) Worker code string (rozumie compressed format)
+  const workerCode = `
+    const TO_RAD = Math.PI / 180;
+    function calculateBearing(lat1, lon1, lat2, lon2) {
+      const dLon = (lon2 - lon1) * TO_RAD;
+      const y = Math.sin(dLon) * Math.cos(lat2 * TO_RAD);
+      const x = Math.cos(lat1 * TO_RAD) * Math.sin(lat2 * TO_RAD) -
+                Math.sin(lat1 * TO_RAD) * Math.cos(lat2 * TO_RAD) * Math.cos(dLon);
+      let bearing = Math.atan2(y, x) * 180 / Math.PI;
+      return (bearing + 360) % 360;
+    }
+    function tripSequenceScore(tripSeq, pattern) {
+      if (!Array.isArray(tripSeq) || !Array.isArray(pattern) || tripSeq.length === 0) return 0;
+      const patternSet = new Set(pattern);
+      const relevant = tripSeq.filter(s => patternSet.has(s));
+      if (relevant.length === 0) return 0;
+      let match = 0, idx = 0;
+      for (let i = 0; i < relevant.length; i++) {
+        const val = relevant[i];
+        while (idx < pattern.length && pattern[idx] !== val) idx++;
+        if (idx < pattern.length) { match++; idx++; }
+      }
+      return match / relevant.length;
+    }
+
+    self.onmessage = function(ev) {
+      try {
+        const { trips, stopTimesIndex, stopsArray } = ev.data;
+        // Build stopsIndexLocal by index for quick lookup
+        const stopsIndexLocal = stopsArray; // array indexed by small ints
+        // Group trips by route
+        const tripsByRoute = {};
+        for (const t of trips) {
+          const rid = t.route_id || 'unknown';
+          if (!tripsByRoute[rid]) tripsByRoute[rid] = [];
+          tripsByRoute[rid].push(t.trip_id);
+        }
+
+        const routeKeys = Object.keys(tripsByRoute);
+        const totalRoutes = routeKeys.length;
+        const resultMap = {};
+        let processedRoutes = 0;
+
+        for (let ri = 0; ri < routeKeys.length; ri++) {
+          const routeId = routeKeys[ri];
+          const tripIds = tripsByRoute[routeId] || [];
+
+          // Build pattern map: compressed seq -> { seqIndexed: [...], trips: [] }
+          const patternMap = {};
+          const patternOrder = [];
+
+          for (const tid of tripIds) {
+            const stArr = (stopTimesIndex[tid] || []).slice();
+            // sort by seq
+            stArr.sort((a,b)=> (Number(a.seq||0) - Number(b.seq||0)));
+            // seq as array of stopIndices (numbers)
+            const seqIndexed = stArr.map(x => x.si);
+            const key = seqIndexed.join(',');
+            if (!patternMap[key]) { patternMap[key] = { seq: seqIndexed, trips: [] }; patternOrder.push(key); }
+            patternMap[key].trips.push(tid);
+          }
+
+          if (patternOrder.length === 0) { processedRoutes++; continue; }
+
+          if (patternOrder.length === 1) {
+            const only = patternMap[patternOrder[0]];
+            let inferred = '0';
+            const seq = only.seq;
+            if (seq.length >= 2) {
+              const sf = stopsIndexLocal[seq[0]], sl = stopsIndexLocal[seq[seq.length-1]];
+              if (sf && sl && sf.stop_lat !== null && sl.stop_lat !== null) {
+                const b = calculateBearing(parseFloat(sf.stop_lat), parseFloat(sf.stop_lon), parseFloat(sl.stop_lat), parseFloat(sl.stop_lon));
+                inferred = (b < 180) ? '0' : '1';
+              }
+            }
+            for (const tid of only.trips) resultMap[tid] = inferred;
+            processedRoutes++;
+            if (processedRoutes % 5 === 0) self.postMessage({ type:'progress', processed: processedRoutes, total: totalRoutes, percent: Math.round(processedRoutes/totalRoutes*100) });
+            continue;
+          }
+
+          let refKey = null, maxCount = -1, maxLen = -1;
+          for (const k of patternOrder) {
+            const info = patternMap[k];
+            if (info.trips.length > maxCount || (info.trips.length === maxCount && info.seq.length > maxLen)) {
+              maxCount = info.trips.length; maxLen = info.seq.length; refKey = k;
+            }
+          }
+          const refPattern = patternMap[refKey].seq;
+          const refPatternRev = [...refPattern].reverse();
+
+          let refBearing = null;
+          if (refPattern.length >= 2) {
+            const sf = stopsIndexLocal[refPattern[0]], sl = stopsIndexLocal[refPattern[refPattern.length-1]];
+            if (sf && sl && sf.stop_lat !== null && sl.stop_lat !== null) {
+              refBearing = calculateBearing(parseFloat(sf.stop_lat), parseFloat(sf.stop_lon), parseFloat(sl.stop_lat), parseFloat(sl.stop_lon));
+            }
+          }
+
+          for (const k of patternOrder) {
+            const info = patternMap[k];
+            const seq = info.seq;
+            if (!seq || seq.length === 0) { info.direction = '0'; continue; }
+            if (k === refKey) { info.direction = '0'; }
+            else {
+              const scoreFwd = tripSequenceScore(seq, refPattern);
+              const scoreRev = tripSequenceScore(seq, refPatternRev);
+              if (scoreFwd > scoreRev + 0.1) info.direction = '0';
+              else if (scoreRev > scoreFwd + 0.1) info.direction = '1';
+              else {
+                if (refBearing !== null && seq.length >= 2) {
+                  const sf = stopsIndexLocal[seq[0]], sl = stopsIndexLocal[seq[seq.length-1]];
+                  if (sf && sl && sf.stop_lat !== null && sl.stop_lat !== null) {
+                    const b = calculateBearing(parseFloat(sf.stop_lat), parseFloat(sf.stop_lon), parseFloat(sl.stop_lat), parseFloat(sl.stop_lon));
+                    let diff = Math.abs(b - refBearing); if (diff > 180) diff = 360 - diff;
+                    info.direction = diff < 90 ? '0' : '1';
+                  } else info.direction = '0';
+                } else info.direction = '0';
+              }
+            }
+            for (const tid of info.trips) resultMap[tid] = info.direction;
+          }
+
+          processedRoutes++;
+          if (processedRoutes % 5 === 0) self.postMessage({ type:'progress', processed: processedRoutes, total: totalRoutes, percent: Math.round(processedRoutes/totalRoutes*100) });
+        }
+
+        self.postMessage({ type:'done', map: resultMap });
+      } catch (err) {
+        self.postMessage({ type:'error', message: (err && err.message) ? err.message : String(err) });
+      }
+    };
+  `;
+
+  // 7) Uruchom worker i wyślij skompresowane struktury
+  let worker;
+  try {
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    worker = new Worker(url);
+    state.currentWorker = worker;
+
+    const resultPromise = new Promise((resolve, reject) => {
+      worker.onmessage = (ev) => {
+        const msg = ev.data;
+        if (!msg) return;
+        if (msg.type === 'progress') {
+          if (onProgress) onProgress(msg.processed, msg.total, msg.percent);
+        } else if (msg.type === 'done') {
+          resolve(msg.map || {});
+        } else if (msg.type === 'error') {
+          reject(new Error(msg.message || 'worker error'));
+        }
+      };
+      worker.onerror = (err) => reject(err || new Error('worker runtime error'));
+    });
+
+    // Post compressed payload
+    worker.postMessage({
+      trips: minimalTrips,
+      stopTimesIndex: stopTimesIndexCompressed,
+      stopsArray: stopsArray
+    });
+
+    const mapResult = await resultPromise;
+
+    // Apply results
+    for (const t of trips) {
+      if (!t || !t.trip_id) continue;
+      if (mapResult && Object.prototype.hasOwnProperty.call(mapResult, t.trip_id)) {
+        t.direction_id = String(mapResult[t.trip_id]);
+      }
+    }
+
+    if (onProgress) onProgress(1,1,100);
+    try { worker.terminate(); } catch(e){}
+    state.currentWorker = null;
+    return;
+  } catch (err) {
+    // fallback
+    try {
+      console.warn('Worker failed; falling back to main-thread enrichment:', err && err.message ? err.message : err);
+      if (typeof enrichTripsWithDirectionIdAsync === 'function') {
+        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress);
+        return;
+      }
+      throw err;
+    } finally {
+      if (worker) try { worker.terminate(); } catch(e){}
+      state.currentWorker = null;
+    }
+  }
+}	  
 // ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
@@ -2195,7 +2430,7 @@ perfTimings.parseEnd = performance.now();
         // Generate missing direction_id values with chunked processing
         state.loadingStep = 'Generowanie brakujących direction_id...'; render();
         perfTimings.enrichStart = performance.now();
-        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
+        await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
           state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
           state.loadingProgressPercent = percent;
           render();
