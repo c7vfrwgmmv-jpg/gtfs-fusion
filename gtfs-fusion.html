@@ -3507,6 +3507,10 @@ function buildRouteProfileForCurrentSelection() {
   // 10. Process trips: detect passenger stops, classify service vs depot
   const processedTrips = {};
   
+  // Threshold for short trip classification: trips with ≤2 passenger stops
+  // use simpler classification (just check if any passenger stops exist)
+  const SHORT_TRIP_THRESHOLD = 2;
+  
   allTrips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     let pStops = [];
@@ -3563,10 +3567,10 @@ function buildRouteProfileForCurrentSelection() {
     
     // Classify as service or depot trip
     // Business rule:
-    // - For trips with ≤2 passenger stops: if ANY passenger stops exist, it's a service trip
+    // - For trips with ≤SHORT_TRIP_THRESHOLD passenger stops: if ANY passenger stops exist, it's a service trip
     // - For trips with 3+ passenger stops: requires passenger stops BETWEEN first and last core stops
     //   (this distinguishes regular service from depot/yard movements that only touch core at endpoints)
-    const isServiceTrip = pStops.length <= 2 
+    const isServiceTrip = pStops.length <= SHORT_TRIP_THRESHOLD 
       ? hasPassenger 
       : hasPassengerInsideCore;
     
@@ -3593,10 +3597,10 @@ function buildRouteProfileForCurrentSelection() {
     coreStops,
     nodeTypes,
     stopMetadata,
-    coreStationsSet: coreStationsSet,
-    tripCoreIndices: tripCoreIndices,
-    stationMergeAllowed: stationMergeAllowed,
-    processedTrips: processedTrips,
+    coreStationsSet,
+    tripCoreIndices,
+    stationMergeAllowed,
+    processedTrips,
     version: 3,
   };
   state.routeProfiles[key][dir] = profile;
