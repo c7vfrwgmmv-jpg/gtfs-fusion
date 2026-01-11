@@ -7770,6 +7770,238 @@ if (state.gtfsData && state.selectedRoute) {
       render();
     });
 
+    // Debug function to export trip data
+    window.debugTrips = function() {
+      if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) {
+        console.error('❌ No route selected!');
+        return;
+      }
+
+      // Collect data
+      const trips = getAllTripsForRoute();
+      const variantsData = computeVariantsForRoute();
+      const profile = getCurrentRouteProfile();
+      
+      const tripToVariant = variantsData ? variantsData.tripToVariant : {};
+      const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : {};
+      const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : {};
+      
+      // Get active services for the selected date
+      const activeServices = getServicesForDate(state.selectedDate);
+      
+      // Get trip stop times
+      const tripStopMaps = {};
+      trips.forEach(trip => {
+        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        stopTimes.sort((a,b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
+        tripStopMaps[trip.trip_id] = stopTimes;
+      });
+
+      // Process each trip to compute classification flags
+      const debugData = trips.map(trip => {
+        const stops = tripStopMaps[trip.trip_id] || [];
+        const variant = tripToVariant[trip.trip_id] || '?';
+        const isActive = activeServices.includes(trip.service_id);
+        
+        // Classify stops
+        let firstCoreIdx = -1;
+        let lastCoreIdx = -1;
+        const stopSequence = [];
+        
+        stops.forEach((st, idx) => {
+          const stopId = st.stop_id;
+          const stopInfo = state.gtfsData.stopsIndex[stopId] || {};
+          const nodeType = nodeTypes[stopId] || 'passenger';
+          const isCore = nodeType === 'core';
+          const isTech = (st.pickup_type === '1' || st.drop_off_type === '1') || nodeType === 'tail';
+          
+          if (isCore) {
+            if (firstCoreIdx === -1) firstCoreIdx = idx;
+            lastCoreIdx = idx;
+          }
+          
+          stopSequence.push({
+            stop_sequence: st.stop_sequence,
+            stop_id: stopId,
+            stop_name: stopInfo.stop_name || stopId,
+            arrival_time: st.arrival_time || '',
+            departure_time: st.departure_time || '',
+            pickup_type: st.pickup_type || '0',
+            drop_off_type: st.drop_off_type || '0',
+            nodeType: nodeType,
+            isCore: isCore,
+            isTech: isTech,
+            isBetweenCore: false // will be set below
+          });
+        });
+        
+        // Mark stops between core
+        if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
+          for (let i = firstCoreIdx + 1; i < lastCoreIdx; i++) {
+            stopSequence[i].isBetweenCore = true;
+          }
+        }
+        
+        // Compute flags
+        const hasPassenger = stopSequence.some(s => !s.isTech);
+        const hasPassengerBetweenCore = stopSequence.some(s => s.isBetweenCore && !s.isTech);
+        
+        // Would be filtered?
+        const wouldBeFiltered = !state.showAllTrips && !hasPassenger;
+        const wouldBeDepot = !hasPassenger || (firstCoreIdx !== -1 && lastCoreIdx !== -1 && !hasPassengerBetweenCore);
+        
+        return {
+          trip_id: trip.trip_id,
+          variant: variant,
+          service_id: trip.service_id,
+          direction_id: trip.direction_id || '0',
+          stops_count: stops.length,
+          first_core_idx: firstCoreIdx,
+          last_core_idx: lastCoreIdx,
+          has_passenger: hasPassenger,
+          has_passenger_between_core: hasPassengerBetweenCore,
+          active_on_date: isActive,
+          would_be_filtered: wouldBeFiltered,
+          would_be_depot: wouldBeDepot,
+          stop_sequence: stopSequence
+        };
+      });
+
+      // Generate HTML
+      const routeId = state.selectedRoute.route_id;
+      const routeName = state.selectedRoute.route_short_name || state.selectedRoute.route_long_name || routeId;
+      const direction = state.selectedDirection;
+      const date = state.selectedDate;
+      
+      const totalTrips = debugData.length;
+      const activeTrips = debugData.filter(t => t.active_on_date).length;
+      const passengerTrips = debugData.filter(t => t.has_passenger).length;
+      const filteredTrips = debugData.filter(t => t.would_be_filtered).length;
+      const coreStopsCount = Object.values(nodeTypes).filter(nt => nt === 'core').length;
+
+      let html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Debug Trips - ${routeName} - ${direction} - ${date}</title>
+  <style>
+    body { font-family: monospace; font-size: 11px; margin: 20px; background: #f5f5f5; }
+    .header { background: white; padding: 15px; border-radius: 4px; margin-bottom: 15px; }
+    .header h1 { margin: 0 0 10px 0; font-size: 18px; }
+    .header .meta { color: #666; margin: 5px 0; }
+    .stats { background: #e3f2fd; padding: 10px; border-radius: 4px; margin: 10px 0; }
+    table { border-collapse: collapse; width: 100%; background: white; font-size: 10px; }
+    th { background: #333; color: white; padding: 6px 4px; text-align: left; position: sticky; top: 0; }
+    td { padding: 4px; border-bottom: 1px solid #eee; vertical-align: top; }
+    tr:hover { background: #f9f9f9; }
+    .filtered { background: #fff3cd !important; }
+    .mono { font-family: monospace; }
+    .check { color: green; }
+    .cross { color: red; }
+    .stop-list { font-size: 9px; max-width: 600px; }
+    .stop-item { margin: 2px 0; padding: 2px; background: #fafafa; border-left: 2px solid #ddd; padding-left: 4px; }
+    .stop-item.core { border-left-color: #4caf50; }
+    .stop-item.tail { border-left-color: #f44336; }
+    .stop-item.passenger { border-left-color: #2196f3; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Debug Trips Export</h1>
+    <div class="meta"><strong>Route:</strong> ${routeName} (${routeId})</div>
+    <div class="meta"><strong>Direction:</strong> ${direction}</div>
+    <div class="meta"><strong>Date:</strong> ${date}</div>
+    <div class="meta"><strong>Show All Trips:</strong> ${state.showAllTrips ? 'YES' : 'NO'}</div>
+    <div class="meta"><strong>Core Stops:</strong> ${coreStopsCount}</div>
+    <div class="stats">
+      <strong>Statistics:</strong>
+      Total Trips: ${totalTrips} |
+      Active on Date: ${activeTrips} |
+      Passenger Trips: ${passengerTrips} |
+      Filtered Trips: ${filteredTrips}
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Trip ID</th>
+        <th>Variant</th>
+        <th>Service ID</th>
+        <th>Dir</th>
+        <th>Stops</th>
+        <th>First Core</th>
+        <th>Last Core</th>
+        <th>Has Passenger</th>
+        <th>Passenger Between Core</th>
+        <th>Active on Date</th>
+        <th>Would Be Filtered</th>
+        <th>Would Be Depot</th>
+        <th>Stop Sequence</th>
+      </tr>
+    </thead>
+    <tbody>
+`;
+
+      debugData.forEach(trip => {
+        const rowClass = trip.would_be_filtered ? 'filtered' : '';
+        const check = '<span class="check">✓</span>';
+        const cross = '<span class="cross">✗</span>';
+        
+        // Build stop sequence HTML
+        let stopSeqHtml = '<div class="stop-list">';
+        trip.stop_sequence.forEach(st => {
+          stopSeqHtml += `<div class="stop-item ${st.nodeType}">`;
+          stopSeqHtml += `[${st.stop_sequence}] ${st.stop_id} - ${st.stop_name}<br>`;
+          stopSeqHtml += `Arr: ${st.arrival_time} | Dep: ${st.departure_time} | `;
+          stopSeqHtml += `P/D: ${st.pickup_type}/${st.drop_off_type} | `;
+          stopSeqHtml += `Type: ${st.nodeType} | `;
+          stopSeqHtml += `Core: ${st.isCore ? '✓' : '✗'} | `;
+          stopSeqHtml += `Tech: ${st.isTech ? '✓' : '✗'} | `;
+          stopSeqHtml += `Between: ${st.isBetweenCore ? '✓' : '✗'}`;
+          stopSeqHtml += `</div>`;
+        });
+        stopSeqHtml += '</div>';
+        
+        html += `
+      <tr class="${rowClass}">
+        <td class="mono">${trip.trip_id}</td>
+        <td>${trip.variant}</td>
+        <td class="mono">${trip.service_id}</td>
+        <td>${trip.direction_id}</td>
+        <td>${trip.stops_count}</td>
+        <td>${trip.first_core_idx}</td>
+        <td>${trip.last_core_idx}</td>
+        <td>${trip.has_passenger ? check : cross}</td>
+        <td>${trip.has_passenger_between_core ? check : cross}</td>
+        <td>${trip.active_on_date ? check : cross}</td>
+        <td>${trip.would_be_filtered ? check : cross}</td>
+        <td>${trip.would_be_depot ? check : cross}</td>
+        <td>${stopSeqHtml}</td>
+      </tr>
+`;
+      });
+
+      html += `
+    </tbody>
+  </table>
+</body>
+</html>`;
+
+      // Download file
+      const filename = `debug_trips_${routeId}_${direction}_${date}.html`;
+      const blob = new Blob([html], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      console.log('✅ Debug HTML exported!');
+    };
+
     // initial render
     render();
   </script>
