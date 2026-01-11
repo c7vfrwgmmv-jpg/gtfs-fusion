@@ -7943,6 +7943,30 @@ if (state.gtfsData && state.selectedRoute) {
       const filteredTrips = debugData.filter(t => t.would_be_filtered).length;
       const coreStopsCount = Object.values(nodeTypes).filter(nt => nt === 'core').length;
 
+      // Calculate active days for current month
+      const currentDate = parseGTFSDate(date);
+      const currentYear = currentDate.getFullYear();
+      const currentMonth = currentDate.getMonth();
+      const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
+      const lastDayOfMonth = new Date(currentYear, currentMonth + 1, 0);
+      
+      const activeDaysInMonth = [];
+      for (let d = new Date(firstDayOfMonth); d <= lastDayOfMonth; d.setDate(d.getDate() + 1)) {
+        const dateStr = formatDateToGTFS(new Date(d));
+        const servicesForDay = getServicesForDate(dateStr);
+        
+        // Check if any trip from this route is active on this day
+        const hasActiveTrips = trips.some(trip => servicesForDay.includes(trip.service_id));
+        if (hasActiveTrips) {
+          activeDaysInMonth.push(d.getDate());
+        }
+      }
+      
+      const monthName = currentDate.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+      const activeDaysStr = activeDaysInMonth.length > 0 
+        ? activeDaysInMonth.join(', ') 
+        : 'None';
+
       let html = `<!DOCTYPE html>
 <html>
 <head>
@@ -7954,6 +7978,7 @@ if (state.gtfsData && state.selectedRoute) {
     .header h1 { margin: 0 0 10px 0; font-size: 18px; }
     .header .meta { color: #666; margin: 5px 0; }
     .stats { background: #e3f2fd; padding: 10px; border-radius: 4px; margin: 10px 0; }
+    .active-days { background: #f0f7ff; padding: 10px; border-radius: 4px; margin: 10px 0; border-left: 3px solid #2196f3; }
     table { border-collapse: collapse; width: 100%; background: white; font-size: 10px; }
     th { background: #333; color: white; padding: 6px 4px; text-align: left; position: sticky; top: 0; }
     td { padding: 4px; border-bottom: 1px solid #eee; vertical-align: top; }
@@ -7978,6 +8003,11 @@ if (state.gtfsData && state.selectedRoute) {
     <div class="meta"><strong>Date:</strong> ${escapeHtml(date)}</div>
     <div class="meta"><strong>Show All Trips:</strong> ${state.showAllTrips ? 'YES' : 'NO'}</div>
     <div class="meta"><strong>Core Stops:</strong> ${coreStopsCount}</div>
+    <div class="active-days">
+      <strong>Active Days in ${escapeHtml(monthName)}:</strong><br>
+      Days: ${escapeHtml(activeDaysStr)}<br>
+      <small>(${activeDaysInMonth.length} days active out of ${lastDayOfMonth.getDate()} days in month)</small>
+    </div>
     <div class="stats">
       <strong>Statistics:</strong>
       Total Trips: ${totalTrips} |
