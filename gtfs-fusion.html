@@ -1768,7 +1768,7 @@ function parseCSVLine(line) {
   return result;
 }
 
-// CSV parser - used for all files (directly for small files, via parseCSVAsync for large files)
+// CSV parser - used for all files
 function parseCSV(text) {
   if (!text || typeof text !== 'string') {
     console.warn('parseCSV: Invalid input, expected non-empty string');
@@ -1806,56 +1806,6 @@ function parseCSV(text) {
 }
 
 // Async CSV parser with chunked processing for better UI responsiveness
-async function parseCSVAsync(text, onProgress) {
-  if (!text || typeof text !== 'string') {
-    console.warn('parseCSVAsync: Invalid input, expected non-empty string');
-    return [];
-  }
-  
-  // Optimize: Replace \r\n with \n first (one-time operation), then simple split
-  const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
-  const lines = normalized.split('\n');
-  if (lines.length === 0) return [];
-  
-  const headerLine = lines[0].replace(/^\uFEFF/, '');
-  const headers = parseCSVLine(headerLine).map(h => h.trim());
-  
-  const result = [];
-  const CHUNK_SIZE = 500; // Process 500 rows at a time
-  
-  // Parse data rows in chunks
-  for (let i = 1; i < lines.length; i += CHUNK_SIZE) {
-    const chunkEnd = Math.min(i + CHUNK_SIZE, lines.length);
-    
-    for (let j = i; j < chunkEnd; j++) {
-      const line = lines[j];
-      if (!line || !line.trim()) continue;
-      
-      const values = parseCSVLine(line);
-      const row = {};
-      
-      for (let k = 0; k < headers.length; k++) {
-        const value = values[k] || '';
-        row[headers[k]] = value.trim();
-      }
-      
-      result.push(normalizeRecord(row));
-    }
-    
-    // Report progress
-    if (onProgress) {
-      const percent = Math.round((chunkEnd / lines.length) * 100);
-      onProgress(result.length, percent);
-    }
-    
-    // Yield to browser to keep UI responsive
-    if (chunkEnd < lines.length) {
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
-  }
-  
-  return result;
-}
 
 function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
   return new Promise(async (resolve, reject) => {
@@ -2303,52 +2253,21 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         }
 
 // ==========================================
-// SMART PARSING - use async for large files, sync for small files
+// PARALLEL LOADING & PARSING - parse CSV files synchronously
 // ==========================================
 state.loadingStep = 'Przetwarzanie plików GTFS...'; render();
 
 perfTimings.parseStart = performance.now();
 
-// Helper to decide if file needs async parsing (threshold: 50KB)
-async function smartParse(text, filename) {
-  const sizeKB = text.length / 1024;
-  if (sizeKB > 50) {
-    // Large file - use async parsing for UI responsiveness
-    return await parseCSVAsync(text);
-  } else {
-    // Small file - use sync parsing for speed
-    return parseCSV(text);
-  }
-}
-
-// Parse files with smart async/sync selection
-const routesText = await routesFile.async('string');
-const routes = await smartParse(routesText, 'routes.txt');
-
-const tripsText = await tripsFile.async('string');
-const trips = await smartParse(tripsText, 'trips.txt');
-
-const stopsText = await stopsFile.async('string');
-const stops = await smartParse(stopsText, 'stops.txt');
-
-// Parse optional files
-let calendar = [];
-if (calendarFile) {
-  const calendarText = await calendarFile.async('string');
-  calendar = await smartParse(calendarText, 'calendar.txt');
-}
-
-let calendarDates = [];
-if (calendarDatesFile) {
-  const calendarDatesText = await calendarDatesFile.async('string');
-  calendarDates = await smartParse(calendarDatesText, 'calendar_dates.txt');
-}
-
-let agencies = [];
-if (agenciesFile) {
-  const agenciesText = await agenciesFile.async('string');
-  agencies = await smartParse(agenciesText, 'agency.txt');
-}
+// Parse all CSV files synchronously (fastest approach)
+const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
+  routesFile.async('string').then(text => parseCSV(text)),
+  tripsFile.async('string').then(text => parseCSV(text)),
+  stopsFile.async('string').then(text => parseCSV(text)),
+  calendarFile ? calendarFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
+  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
+  agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
+]);
 
 perfTimings.parseEnd = performance.now();
 
