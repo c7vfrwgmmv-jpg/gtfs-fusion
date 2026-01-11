@@ -7446,7 +7446,7 @@ switch(currentView) {
         </div>
 
         <div class="title-controls" style="margin-left:auto;display:flex;align-items:center;gap:0.5rem;flex:0 0 auto;">
-          ${directions.length>1 ? `<select id="direction-select" style="width:auto;min-width:200px;display:inline-block;" class="border rounded px-3 py-2 text-sm">${directions.map(dir => `<option value="${escapeHtml(String(dir.id))}" ${String(state.selectedDirection) === String(dir.id) ? 'selected' : ''}>${escapeHtml(dir.name)}</option>`).join('')}</select>` : ''}
+          ${directions.length>1 ? `<select id="direction-select" style="max-width:160px;display:inline-block;" class="border rounded px-3 py-2 text-sm">${directions.map(dir => `<option value="${escapeHtml(String(dir.id))}" ${String(state.selectedDirection) === String(dir.id) ? 'selected' : ''}>${escapeHtml(dir.name)}</option>`).join('')}</select>` : ''}
           ${ (state.availableDates || []).length ? `<select id="date-select" style="width:auto;min-width:160px;display:inline-block;" class="border rounded px-3 py-2 text-sm">${(state.availableDates||[]).map(d => `<option value="${escapeHtml(String(d.value))}" ${String(d.value) === String(state.selectedDate) ? 'selected' : ''}>${escapeHtml(d.label)}</option>`).join('')}</select>` : '' }
         </div>
       </div>
