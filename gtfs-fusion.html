@@ -3506,7 +3506,6 @@ function buildRouteProfileForCurrentSelection() {
 
   // 10. Process trips: detect passenger stops, classify service vs depot
   const processedTrips = {};
-  const thresh = 0.10; // Use same 10% threshold
   
   allTrips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
@@ -3563,6 +3562,10 @@ function buildRouteProfileForCurrentSelection() {
     }
     
     // Classify as service or depot trip
+    // Business rule:
+    // - For trips with ≤2 passenger stops: if ANY passenger stops exist, it's a service trip
+    // - For trips with 3+ passenger stops: requires passenger stops BETWEEN first and last core stops
+    //   (this distinguishes regular service from depot/yard movements that only touch core at endpoints)
     const isServiceTrip = pStops.length <= 2 
       ? hasPassenger 
       : hasPassengerInsideCore;
@@ -6262,7 +6265,7 @@ const processedTrips = trips.map(trip => {
   }
   
   return { ...trip, ...processed };
-}).filter(t => t.pStops.length > 0);
+}).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.hasPassenger));
 
 if (processedTrips.length === 0) { 
   tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; 
