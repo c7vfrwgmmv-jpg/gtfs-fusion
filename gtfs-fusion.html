@@ -3651,6 +3651,27 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     return firstStop?.stop_name || stationId;
   };
 
+  // Helper function to merge chunks with signature collision handling
+  const mergeChunkStops = (existingChunk, newStops, signature) => {
+    if (existingChunk.stops.length !== newStops.length) {
+      console.warn(`Signature collision detected for ${signature}: expected ${existingChunk.stops.length} stops, got ${newStops.length}`);
+      // Extend chunk if new one has more stops
+      for (let idx = existingChunk.stops.length; idx < newStops.length; idx++) {
+        existingChunk.stops.push({
+          stationId: newStops[idx].stationId,
+          name: newStops[idx].name,
+          stopIds: [newStops[idx].stop_id]
+        });
+      }
+    }
+    // Merge stopIds for all positions
+    for (let idx = 0; idx < Math.min(existingChunk.stops.length, newStops.length); idx++) {
+      if (!existingChunk.stops[idx].stopIds.includes(newStops[idx].stop_id)) {
+        existingChunk.stops[idx].stopIds.push(newStops[idx].stop_id);
+      }
+    }
+  };
+
   const coreStationGroups = [];
   const seenStations = new Set();
   
@@ -3753,25 +3774,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           });
         } else {
           const chunk = preCore.get(signature);
-          // Merge stop_ids for each station in the chunk
-          // Note: Chunks with same signature should have same length
-          if (chunk.stops.length !== preCoreStops.length) {
-            console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${preCoreStops.length}`);
-            // Extend chunk if new one has more stops
-            for (let idx = chunk.stops.length; idx < preCoreStops.length; idx++) {
-              chunk.stops.push({
-                stationId: preCoreStops[idx].stationId,
-                name: preCoreStops[idx].name,
-                stopIds: [preCoreStops[idx].stop_id]
-              });
-            }
-          }
-          // Merge stopIds for all positions
-          for (let idx = 0; idx < Math.min(chunk.stops.length, preCoreStops.length); idx++) {
-            if (!chunk.stops[idx].stopIds.includes(preCoreStops[idx].stop_id)) {
-              chunk.stops[idx].stopIds.push(preCoreStops[idx].stop_id);
-            }
-          }
+          mergeChunkStops(chunk, preCoreStops, signature);
           chunk.positions.push(normalizedPos);
         }
       }
@@ -3818,25 +3821,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           });
         } else {
           const chunk = postCore.get(signature);
-          // Merge stop_ids for each station in the chunk
-          // Note: Chunks with same signature should have same length
-          if (chunk.stops.length !== postCoreStops.length) {
-            console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${postCoreStops.length}`);
-            // Extend chunk if new one has more stops
-            for (let idx = chunk.stops.length; idx < postCoreStops.length; idx++) {
-              chunk.stops.push({
-                stationId: postCoreStops[idx].stationId,
-                name: postCoreStops[idx].name,
-                stopIds: [postCoreStops[idx].stop_id]
-              });
-            }
-          }
-          // Merge stopIds for all positions
-          for (let idx = 0; idx < Math.min(chunk.stops.length, postCoreStops.length); idx++) {
-            if (!chunk.stops[idx].stopIds.includes(postCoreStops[idx].stop_id)) {
-              chunk.stops[idx].stopIds.push(postCoreStops[idx].stop_id);
-            }
-          }
+          mergeChunkStops(chunk, postCoreStops, signature);
           chunk.positions.push(normalizedPos);
         }
       }
@@ -3893,25 +3878,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           });
         } else {
           const chunk = window.chunks.get(signature);
-          // Merge stop_ids for each station in the chunk
-          // Note: Chunks with same signature should have same length
-          if (chunk.stops.length !== windowStops.length) {
-            console.warn(`Signature collision detected for ${signature}: expected ${chunk.stops.length} stops, got ${windowStops.length}`);
-            // Extend chunk if new one has more stops
-            for (let idx = chunk.stops.length; idx < windowStops.length; idx++) {
-              chunk.stops.push({
-                stationId: windowStops[idx].stationId,
-                name: windowStops[idx].name,
-                stopIds: [windowStops[idx].stop_id]
-              });
-            }
-          }
-          // Merge stopIds for all positions
-          for (let idx = 0; idx < Math.min(chunk.stops.length, windowStops.length); idx++) {
-            if (!chunk.stops[idx].stopIds.includes(windowStops[idx].stop_id)) {
-              chunk.stops[idx].stopIds.push(windowStops[idx].stop_id);
-            }
-          }
+          mergeChunkStops(chunk, windowStops, signature);
           chunk.positions.push(normalizedPos);
         }
       }
