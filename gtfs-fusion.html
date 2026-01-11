@@ -3234,6 +3234,16 @@ function buildRouteProfileForCurrentSelection() {
       .filter(st => st && st.stop_id)
       .sort((a, b) => (parseInt(a.stop_sequence || '0', 10) - parseInt(b.stop_sequence || '0', 10)));
 
+    // First pass: track all stop IDs for each station (for core expansion later)
+    sts.forEach(st => {
+      const stationId = getStationId(st.stop_id, stopsIndex);
+      if (!stationToStopIds.has(stationId)) {
+        stationToStopIds.set(stationId, new Set());
+      }
+      stationToStopIds.get(stationId).add(st.stop_id);
+    });
+
+    // Second pass: build passenger graph
     const passengerStops = [];
     sts.forEach(st => {
       const pickup = st.pickup_type;
@@ -3248,12 +3258,6 @@ function buildRouteProfileForCurrentSelection() {
       const stationId = getStationId(st.stop_id, stopsIndex);
       
       passengerStops.push({ ...st, stationId });
-      
-      // Track which stop IDs belong to this station
-      if (!stationToStopIds.has(stationId)) {
-        stationToStopIds.set(stationId, new Set());
-      }
-      stationToStopIds.get(stationId).add(st.stop_id);
       
       if (!nodes[stationId]) {
         const stop = stopsIndex[st.stop_id] || {};
