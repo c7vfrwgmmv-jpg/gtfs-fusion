@@ -3345,20 +3345,16 @@ function buildRouteProfileForCurrentSelection() {
 
   // bestCorePath contains station IDs; expand to stop IDs for backward compatibility
   const coreStationIds = bestCorePath.filter(sid => nodes[sid]);
-  const coreStops = [];
-  coreStationIds.forEach(stationId => {
-    const stopIds = stationToStopIds.get(stationId);
-    if (stopIds) {
-      coreStops.push(...Array.from(stopIds));
-    }
-  });
+  const coreStops = coreStationIds.flatMap(stationId => 
+    Array.from(stationToStopIds.get(stationId) || [])
+  );
 
-  const coreSet = new Set(coreStationIds);
+  const coreStationIdsSet = new Set(coreStationIds);
 
   const edgeTypes = {};
   Object.keys(edges).forEach(k => {
     const e = edges[k];
-    if (coreSet.has(e.from) && coreSet.has(e.to) && coreEdges.has(k)) {
+    if (coreStationIdsSet.has(e.from) && coreStationIdsSet.has(e.to) && coreEdges.has(k)) {
       edgeTypes[k] = 'core';
     } else {
       edgeTypes[k] = 'noncore';
