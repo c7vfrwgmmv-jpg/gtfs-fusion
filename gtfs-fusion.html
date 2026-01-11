@@ -6358,7 +6358,7 @@ const processedTrips = trips.map(trip => {
     firstCoreIdx: processed.firstCoreIdx,
     lastCoreIdx: processed.lastCoreIdx
   };
-}).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.isServiceTrip));
+}).filter(t => state.showAllTrips || (t.pStops.length > 0 && t.isServiceTrip));
 
 // Filter trips by selected variant
 let filteredTrips = processedTrips;
