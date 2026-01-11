@@ -2857,7 +2857,7 @@ function normalizePickupDropoffType(value) {
   return normalized;
 }
 
-function calculateStopEdgeFrequency(trips, tripStopMaps) {
+function calculateStopEdgeFrequency(trips, tripStopMaps, stopsIndex) {
   const edgeFrequency = {};
   const totalTrips = trips.length;
   
@@ -2867,12 +2867,18 @@ function calculateStopEdgeFrequency(trips, tripStopMaps) {
   
   trips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
-    for (let i = 0; i < stops.length - 1; i++) {
-      const edge = stops[i].stop_id + '->' + stops[i + 1].stop_id;
+    
+    // Convert stops to stations first
+    const stationIds = stops.map(st => getStationId(st.stop_id, stopsIndex));
+    
+    // Count STATION-level edges
+    for (let i = 0; i < stationIds.length - 1; i++) {
+      const edge = stationIds[i] + '->' + stationIds[i + 1];
       edgeFrequency[edge] = (edgeFrequency[edge] || 0) + 1;
     }
   });
   
+  // Normalize to frequencies (0-1 range)
   Object.keys(edgeFrequency).forEach(key => {
     edgeFrequency[key] = edgeFrequency[key] / totalTrips;
   });
@@ -2903,13 +2909,13 @@ function computeCoreBoundaryFrequency(edgeFrequency, coreStops) {
   return boundaryFreq;
 }
 
-function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
+function findLowFrequencyCandidates(edgeFrequency, allStationIds, threshold = 0.10) {
   const tier1 = new Set();  // <6%
   const tier2 = new Set();  // 6-10%
   
-  allStops.forEach(stopId => {
+  allStationIds.forEach(stationId => {
     const edges = Object.keys(edgeFrequency).filter(e => 
-      e.startsWith(stopId + '->') || e.endsWith('->' + stopId)
+      e.startsWith(stationId + '->') || e.endsWith('->' + stationId)
     );
     
     const allLowFreq = edges.every(e => edgeFrequency[e] < threshold);
@@ -2921,24 +2927,28 @@ function findLowFrequencyCandidates(edgeFrequency, allStops, threshold = 0.10) {
     
     // Classify into tiers
     if (maxEdgeFreq < 0.06) {
-      tier1.add(stopId);
+      tier1.add(stationId);
     } else if (maxEdgeFreq < threshold) {
-      tier2.add(stopId);
+      tier2.add(stationId);
     }
   });
   
   return { tier1, tier2 };
 }
 
-function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
+function isStopBetweenCore(stopId, trip, coreStart, coreEnd, stopsIndex) {
   let stopIdx = -1;
   let coreStartIdx = -1;
   let coreEndIdx = -1;
   
+  // Convert to station IDs for comparison
+  const stationId = getStationId(stopId, stopsIndex);
+  
   for (let i = 0; i < trip.length; i++) {
-    if (trip[i].stop_id === stopId) stopIdx = i;
-    if (trip[i].stop_id === coreStart) coreStartIdx = i;
-    if (trip[i].stop_id === coreEnd) coreEndIdx = i;
+    const tripStationId = getStationId(trip[i].stop_id, stopsIndex);
+    if (tripStationId === stationId) stopIdx = i;
+    if (tripStationId === coreStart) coreStartIdx = i;
+    if (tripStationId === coreEnd) coreEndIdx = i;
   }
   
   // If stop is between coreStart and coreEnd → it's a passenger branch
@@ -2952,16 +2962,16 @@ function isStopBetweenCore(stopId, trip, coreStart, coreEnd) {
   return false;
 }
 
-function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTimesIndex, coreStops) {
+function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTimesIndex, coreStations, stopsIndex) {
   const nodeTypes = {};
-  const coreSet = new Set(coreStops);
+  const coreSet = new Set(coreStations);
   
-  if (!coreStops || coreStops.length === 0) {
+  if (!coreStations || coreStations.length === 0) {
     return nodeTypes;
   }
   
-  const coreStart = coreStops[0];
-  const coreEnd = coreStops[coreStops.length - 1];
+  const coreStart = coreStations[0];
+  const coreEnd = coreStations[coreStations.length - 1];
   
   const tier1Candidates = candidateTiers.tier1 || new Set();
   const tier2Candidates = candidateTiers.tier2 || new Set();
@@ -2970,9 +2980,9 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
   let iterations = 0;
   const MAX_ITERATIONS = 10;
   
-  // Initialize core stops with 'core' classification
-  coreStops.forEach(stopId => {
-    nodeTypes[stopId] = 'core';
+  // Initialize core stations with 'core' classification
+  coreStations.forEach(stationId => {
+    nodeTypes[stationId] = 'core';
   });
   
   const classifyCandidate = (candidateId, fallbackType) => {
@@ -2983,7 +2993,7 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
     
     for (const trip of trips) {
       const stops = tripStopMaps[trip.trip_id] || [];
-      if (isStopBetweenCore(candidateId, stops, coreStart, coreEnd)) {
+      if (isStopBetweenCore(candidateId, stops, coreStart, coreEnd, stopsIndex)) {
         appearsBetweenCore = true;
         break;
       }
@@ -2999,20 +3009,23 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
     let hasDropoff1 = false;
     let hasNormalFlags = false;
     
+    // Check all stops that belong to this station
     trips.forEach(trip => {
       const stopTimes = stopTimesIndex[trip.trip_id] || [];
-      const st = stopTimes.find(s => s.stop_id === candidateId);
-      if (st) {
-        const pickup = normalizePickupDropoffType(st.pickup_type);
-        const dropoff = normalizePickupDropoffType(st.drop_off_type);
-        
-        if (pickup === '1' || dropoff === '1') {
-          if (pickup === '1') hasPickup1 = true;
-          if (dropoff === '1') hasDropoff1 = true;
-        } else {
-          hasNormalFlags = true;
+      stopTimes.forEach(st => {
+        const stationId = getStationId(st.stop_id, stopsIndex);
+        if (stationId === candidateId) {
+          const pickup = normalizePickupDropoffType(st.pickup_type);
+          const dropoff = normalizePickupDropoffType(st.drop_off_type);
+          
+          if (pickup === '1' || dropoff === '1') {
+            if (pickup === '1') hasPickup1 = true;
+            if (dropoff === '1') hasDropoff1 = true;
+          } else {
+            hasNormalFlags = true;
+          }
         }
-      }
+      });
     });
     
     // If ANY occurrence has pickup=1 OR dropoff=1 → tail
@@ -3025,7 +3038,7 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
     if (hasNormalFlags) {
       const tripsWithCandidate = trips.filter(trip => {
         const stops = tripStopMaps[trip.trip_id] || [];
-        return stops.some(s => s.stop_id === candidateId);
+        return stops.some(s => getStationId(s.stop_id, stopsIndex) === candidateId);
       });
       
       let allTripsHaveOtherTails = true;
@@ -3033,11 +3046,12 @@ function classifyTailStopsRecursive(candidateTiers, trips, tripStopMaps, stopTim
       for (const trip of tripsWithCandidate) {
         const stops = tripStopMaps[trip.trip_id] || [];
         
-        const stopsOutsideCore = stops.filter(s => !coreSet.has(s.stop_id));
+        const stopsOutsideCore = stops.filter(s => !coreSet.has(getStationId(s.stop_id, stopsIndex)));
         
-        const hasTailOnRoute = stopsOutsideCore.some(s => 
-          s.stop_id !== candidateId && nodeTypes[s.stop_id] === 'tail'
-        );
+        const hasTailOnRoute = stopsOutsideCore.some(s => {
+          const stationId = getStationId(s.stop_id, stopsIndex);
+          return stationId !== candidateId && nodeTypes[stationId] === 'tail';
+        });
         
         if (!hasTailOnRoute) {
           allTripsHaveOtherTails = false;
@@ -3377,29 +3391,32 @@ function buildRouteProfileForCurrentSelection() {
     tripStopMaps[trip.trip_id] = sts;
   });
   
-  // 7.2: Calculate edge frequency
-  const edgeFrequency = calculateStopEdgeFrequency(allTrips, tripStopMaps);
+  // 7.2: Calculate edge frequency at STATION level
+  const edgeFrequency = calculateStopEdgeFrequency(allTrips, tripStopMaps, stopsIndex);
   
-  // 7.3: Find all stop IDs
-  const allStopIds = new Set();
+  // 7.3: Find all STATION IDs (not stop IDs)
+  const allStationIds = new Set();
   allTrips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
-    stops.forEach(st => allStopIds.add(st.stop_id));
+    stops.forEach(st => {
+      const stationId = getStationId(st.stop_id, stopsIndex);
+      allStationIds.add(stationId);
+    });
   });
   
-  // 7.4: Find low-frequency candidates with tier classification (threshold 10%)
-  const candidateTiers = findLowFrequencyCandidates(edgeFrequency, Array.from(allStopIds), 0.10);
+  // 7.4: Find low-frequency candidates at STATION level
+  const candidateTiers = findLowFrequencyCandidates(edgeFrequency, Array.from(allStationIds), 0.10);
   
   // 7.4b: Core-boundary frequency gating
-  const boundaryFreq = computeCoreBoundaryFrequency(edgeFrequency, coreStops);
+  const boundaryFreq = computeCoreBoundaryFrequency(edgeFrequency, coreStationIds);
   const tier1Boundary = new Set();
   const tier2Boundary = new Set();
   
-  boundaryFreq.forEach((freq, stopId) => {
+  boundaryFreq.forEach((freq, stationId) => {
     if (freq < 0.06) {
-      tier1Boundary.add(stopId);
+      tier1Boundary.add(stationId);
     } else if (freq < 0.10) {
-      tier2Boundary.add(stopId);
+      tier2Boundary.add(stationId);
     }
   });
   
@@ -3408,21 +3425,36 @@ function buildRouteProfileForCurrentSelection() {
     tier2: new Set([...candidateTiers.tier2, ...tier2Boundary])
   };
   
-  // 7.5: Classify stops recursively with tier-specific fallbacks
-  const nodeTypes = classifyTailStopsRecursive(
+  // 7.5: Classify stations recursively with tier-specific fallbacks
+  const stationNodeTypes = classifyTailStopsRecursive(
     mergedTiers,
     allTrips,
     tripStopMaps,
     stopTimesIndex,
-    coreStops
+    coreStationIds,
+    stopsIndex
   );
   
-  // 7.6: Ensure all stops have a classification (fallback to 'passenger' for safety)
+  // 7.6: Expand station-level classifications to individual stops
+  const nodeTypes = {};
+  allTrips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    stops.forEach(st => {
+      const stationId = getStationId(st.stop_id, stopsIndex);
+      const classification = stationNodeTypes[stationId] || 'passenger';
+      nodeTypes[st.stop_id] = classification;
+    });
+  });
+  
+  // 7.7: Ensure all stops have a classification (fallback to 'passenger' for safety)
   // Using 'passenger' instead of 'noncore' ensures unclassified stops are visible
-  allStopIds.forEach(stopId => {
-    if (!nodeTypes[stopId]) {
-      nodeTypes[stopId] = 'passenger';
-    }
+  allTrips.forEach(trip => {
+    const stops = tripStopMaps[trip.trip_id] || [];
+    stops.forEach(st => {
+      if (!nodeTypes[st.stop_id]) {
+        nodeTypes[st.stop_id] = 'passenger';
+      }
+    });
   });
 
   // 8. Collect detailed stop metadata (pickup/drop_off types, positions in routes)
