@@ -1722,6 +1722,7 @@ function enrichTripsWithDirectionId(trips, stopTimesIndex, stopsIndex) {
 // ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
+// Synchronous CSV parser for small files
 function parseCSV(text) {
   if (!text || typeof text !== 'string') {
     console.warn('parseCSV: Invalid input, expected non-empty string');
@@ -1798,6 +1799,98 @@ function parseCSV(text) {
     }
     
     result.push(normalizeRecord(row));
+  }
+  
+  return result;
+}
+
+// Async CSV parser with chunked processing for better UI responsiveness
+async function parseCSVAsync(text, onProgress) {
+  if (!text || typeof text !== 'string') {
+    console.warn('parseCSVAsync: Invalid input, expected non-empty string');
+    return [];
+  }
+  
+  // Optimize: Replace \r\n with \n first (one-time operation), then simple split
+  const normalized = text.includes('\r') ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : text;
+  const lines = normalized.split('\n');
+  if (lines.length === 0) return [];
+  
+  function parseCSVLine(line) {
+    if (!line) return [];
+    
+    // Fast path: no quotes = simple split (much faster)
+    if (!line.includes('"')) {
+      return line.split(',');
+    }
+    
+    // Slow path: handle quoted fields
+    const result = [];
+    const chars = [];
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          chars.push('"');
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        result.push(chars.join(''));
+        chars.length = 0;
+      } else {
+        chars.push(char);
+      }
+    }
+    
+    result.push(chars.join(''));
+    
+    if (inQuotes) {
+      console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
+    }
+    
+    return result;
+  }
+  
+  const headerLine = lines[0].replace(/^\uFEFF/, '');
+  const headers = parseCSVLine(headerLine).map(h => h.trim());
+  
+  const result = [];
+  const CHUNK_SIZE = 500; // Process 500 rows at a time
+  
+  // Parse data rows in chunks
+  for (let i = 1; i < lines.length; i += CHUNK_SIZE) {
+    const chunkEnd = Math.min(i + CHUNK_SIZE, lines.length);
+    
+    for (let j = i; j < chunkEnd; j++) {
+      const line = lines[j];
+      if (!line || !line.trim()) continue;
+      
+      const values = parseCSVLine(line);
+      const row = {};
+      
+      for (let k = 0; k < headers.length; k++) {
+        const value = values[k] || '';
+        row[headers[k]] = value.trim();
+      }
+      
+      result.push(normalizeRecord(row));
+    }
+    
+    // Report progress
+    if (onProgress) {
+      const percent = Math.round((chunkEnd / lines.length) * 100);
+      onProgress(result.length, percent);
+    }
+    
+    // Yield to browser to keep UI responsive
+    if (chunkEnd < lines.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
   
   return result;
@@ -2249,19 +2342,68 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         }
 
 // ==========================================
-// PARALLEL LOADING & PARSING - małe pliki jednocześnie
+// SMART PARSING - use async for large files, sync for small files
 // ==========================================
-state.loadingStep = 'Wczytywanie i parsowanie plików (równolegle)...'; render();
+state.loadingStep = 'Wczytywanie i parsowanie plików...'; render();
 
 perfTimings.parseStart = performance.now();
-const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
-  routesFile.async('string').then(text => parseCSV(text)),
-  tripsFile.async('string').then(text => parseCSV(text)),
-  stopsFile.async('string').then(text => parseCSV(text)),
-  calendarFile ? calendarFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
-]);
+
+// Helper to decide if file needs async parsing (threshold: 50KB)
+async function smartParse(text, filename, onProgress) {
+  const sizeKB = text.length / 1024;
+  if (sizeKB > 50) {
+    // Large file - use async parsing for UI responsiveness
+    return await parseCSVAsync(text, onProgress);
+  } else {
+    // Small file - use sync parsing for speed
+    return parseCSV(text);
+  }
+}
+
+// Parse files with smart async/sync selection
+const routesText = await routesFile.async('string');
+state.loadingStep = 'Parsowanie routes.txt...'; render();
+const routes = await smartParse(routesText, 'routes.txt', (rows, percent) => {
+  state.loadingStep = `Parsowanie routes.txt: ${rows} wierszy (${percent}%)`;
+  render();
+});
+
+const tripsText = await tripsFile.async('string');
+state.loadingStep = 'Parsowanie trips.txt...'; render();
+const trips = await smartParse(tripsText, 'trips.txt', (rows, percent) => {
+  state.loadingStep = `Parsowanie trips.txt: ${rows} wierszy (${percent}%)`;
+  render();
+});
+
+const stopsText = await stopsFile.async('string');
+state.loadingStep = 'Parsowanie stops.txt...'; render();
+const stops = await smartParse(stopsText, 'stops.txt', (rows, percent) => {
+  state.loadingStep = `Parsowanie stops.txt: ${rows} wierszy (${percent}%)`;
+  render();
+});
+
+// Parse optional files
+let calendar = [];
+if (calendarFile) {
+  const calendarText = await calendarFile.async('string');
+  state.loadingStep = 'Parsowanie calendar.txt...'; render();
+  calendar = await smartParse(calendarText, 'calendar.txt');
+}
+
+let calendarDates = [];
+if (calendarDatesFile) {
+  const calendarDatesText = await calendarDatesFile.async('string');
+  state.loadingStep = 'Parsowanie calendar_dates.txt...'; render();
+  calendarDates = await smartParse(calendarDatesText, 'calendar_dates.txt');
+}
+
+let agencies = [];
+if (agenciesFile) {
+  const agenciesText = await agenciesFile.async('string');
+  state.loadingStep = 'Parsowanie agency.txt...'; render();
+  agencies = await smartParse(agenciesText, 'agency.txt');
+}
+
 perfTimings.parseEnd = performance.now();
 
         state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
@@ -2386,7 +2528,38 @@ if (dates.length > 0) {
         const totalTime = perfTimings.indexEnd - perfTimings.totalStart;
         const unzipTime = perfTimings.unzipEnd - perfTimings.unzipStart;
         const parseTime = perfTimings.parseEnd - perfTimings.parseStart;
-        // Performance metrics available for debugging if needed
+        const stopTimesTime = perfTimings.stopTimesEnd - perfTimings.stopTimesStart;
+        const shapesTime = perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0;
+        const indexTime = perfTimings.indexEnd - perfTimings.indexStart;
+        const enrichTime = perfTimings.enrichEnd - perfTimings.enrichStart;
+        
+        // Console performance benchmark
+        console.log('═══════════════════════════════════════════════');
+        console.log('GTFS LOADING PERFORMANCE REPORT');
+        console.log('═══════════════════════════════════════════════');
+        console.log(`Total loading time: ${totalTime.toFixed(2)} ms (${(totalTime/1000).toFixed(2)} s)`);
+        console.log('');
+        console.log('Breakdown by phase:');
+        console.log(`  1. Unzip:           ${unzipTime.toFixed(2)} ms (${((unzipTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  2. Parse CSV files: ${parseTime.toFixed(2)} ms (${((parseTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  3. Parse stop_times:${stopTimesTime.toFixed(2)} ms (${((stopTimesTime/totalTime)*100).toFixed(1)}%)`);
+        if (shapesTime > 0) {
+          console.log(`  4. Parse shapes:    ${shapesTime.toFixed(2)} ms (${((shapesTime/totalTime)*100).toFixed(1)}%)`);
+        }
+        console.log(`  5. Build indexes:   ${indexTime.toFixed(2)} ms (${((indexTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  6. Enrich data:     ${enrichTime.toFixed(2)} ms (${((enrichTime/totalTime)*100).toFixed(1)}%)`);
+        console.log('');
+        console.log('Data summary:');
+        console.log(`  Routes: ${routes.length.toLocaleString()}`);
+        console.log(`  Trips: ${trips.length.toLocaleString()}`);
+        console.log(`  Stops: ${stops.length.toLocaleString()}`);
+        console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips`);
+        if (Object.keys(shapesIndex).length > 0) {
+          console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
+        }
+        console.log('═══════════════════════════════════════════════');
+        
+        // Store metrics in state for optional display
         const perfMetrics = {
           totalTime: performance.now() - perfTimings.totalStart,
           unzipTime: perfTimings.unzipEnd - perfTimings.unzipStart,
@@ -2403,8 +2576,6 @@ if (dates.length > 0) {
             shapes: Object.keys(shapesIndex).length
           }
         };
-        
-        // Store metrics in state for optional display
         state.lastLoadMetrics = perfMetrics;
 
         state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
@@ -4557,7 +4728,7 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
         className: 'custom-svg-icon',
         iconSize: [width, height],
         iconAnchor: [width/2, height/2],
-        popupAnchor: [0, -height/2]
+        popupAnchor: [0, -height/2 - 5]  // Popup appears above icon with 5px offset
       });
     }
     
