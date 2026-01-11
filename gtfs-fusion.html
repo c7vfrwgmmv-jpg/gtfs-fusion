@@ -5421,7 +5421,9 @@ function getOrBuildGroupsArray(stopsData) {
   
   const groupsArray = Array.from(stopGroups.values()).map(group => ({
     ...group,
-    routeCount: group.routeSet.size
+    routeCount: group.routeSet.size,
+    // Mark if this is a single-stop group (no grouping needed)
+    isSingleStop: group.stops.length === 1
   }));
   
   groupsArray.sort((a, b) => a.name.localeCompare(b.name));
@@ -5474,29 +5476,43 @@ function renderVirtualStopsList(groupsToRender) {
       (group.routeCount % 10 >= 2 && group.routeCount % 10 <= 4 && (group.routeCount % 100 < 10 || group.routeCount % 100 >= 20)) 
       ? 'linie' : 'linii';
     
-    html += `
-      <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isGroupExpanded ? 'bg-blue-50' : ''}" 
-           data-group-id="${escapeHtml(group.id)}" 
-           data-index="${actualIndex}">
-        <div class="font-semibold">${escapeHtml(group.name)}</div>
-        <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
-      </div>
-    `;
-    
-    // Expanded stops (non-virtualized for simplicity)
-    if (isGroupExpanded) {
-      group.stops.forEach(stop => {
-        const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
-          (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
-          ? 'linie' : 'linii';
-        
-        html += `
-          <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
-            <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
-            <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
-          </div>
-        `;
-      });
+    // For single-stop groups, make them directly clickable
+    if (group.isSingleStop) {
+      const stop = group.stops[0];
+      html += `
+        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer" 
+             data-stop-id="${stop.stop_id}" 
+             data-index="${actualIndex}">
+          <div class="font-semibold">${escapeHtml(group.name)}</div>
+          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+        </div>
+      `;
+    } else {
+      // Multi-stop groups: show as expandable
+      html += `
+        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isGroupExpanded ? 'bg-blue-50' : ''}" 
+             data-group-id="${escapeHtml(group.id)}" 
+             data-index="${actualIndex}">
+          <div class="font-semibold">${escapeHtml(group.name)}</div>
+          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+        </div>
+      `;
+      
+      // Expanded stops (non-virtualized for simplicity)
+      if (isGroupExpanded) {
+        group.stops.forEach(stop => {
+          const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
+            (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
+            ? 'linie' : 'linii';
+          
+          html += `
+            <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
+              <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
+              <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
+            </div>
+          `;
+        });
+      }
     }
   });
   
@@ -5643,28 +5659,39 @@ async function renderStopsView() {
         (group.routeCount % 10 >= 2 && group.routeCount % 10 <= 4 && (group.routeCount % 100 < 10 || group.routeCount % 100 >= 20)) 
         ? 'linie' : 'linii';
       
-      // Poziom 1: Grupa przystanków
-      html += `
-        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}" data-group-id="${escapeHtml(group.id)}">
-          <div class="font-semibold">${escapeHtml(group.name)}</div>
-          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
-        </div>
-      `;
-      
-      // Poziom 2: Konkretne przystanki w grupie (tylko jeśli rozwinięta)
-      if (isExpanded) {
-        group.stops.forEach(stop => {
-          const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
-            (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
-            ? 'linie' : 'linii';
-          
-          html += `
-            <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
-              <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
-              <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
-            </div>
-          `;
-        });
+      // For single-stop groups, make them directly clickable
+      if (group.isSingleStop) {
+        const stop = group.stops[0];
+        html += `
+          <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer" data-stop-id="${stop.stop_id}">
+            <div class="font-semibold">${escapeHtml(group.name)}</div>
+            <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+          </div>
+        `;
+      } else {
+        // Multi-stop groups: show as expandable
+        html += `
+          <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}" data-group-id="${escapeHtml(group.id)}">
+            <div class="font-semibold">${escapeHtml(group.name)}</div>
+            <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+          </div>
+        `;
+        
+        // Poziom 2: Konkretne przystanki w grupie (tylko jeśli rozwinięta)
+        if (isExpanded) {
+          group.stops.forEach(stop => {
+            const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
+              (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
+              ? 'linie' : 'linii';
+            
+            html += `
+              <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
+                <div class="font-medium text-sm">${escapeHtml(stop.stop_name)}</div>
+                <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
+              </div>
+            `;
+          });
+        }
       }
     });
 
