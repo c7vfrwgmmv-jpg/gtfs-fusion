@@ -6215,38 +6215,21 @@ const processedTrips = trips.map(trip => {
     let isStopTech = false;
     let isOnDemand = false;
 
-    if (meta) {
-      const nodeType = nodeTypes[sId];
-      
-      if (nodeType === 'tail') {
+    // Primary: Trust profile classification if available
+    if (profileNodeType) {
+      if (profileNodeType === 'tail') {
         // Depot/technical stop
         isStopTech = true;
-      } else if (nodeType === 'passenger' || nodeType === 'core') {
-        // Passenger stop (including branches between core)
+      } else {
+        // 'passenger' or 'core' → show as passenger stop
         isStopTech = false;
         const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
         const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
         isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
-      } else {
-        // Fallback for unclassified stops (noncore, branch, etc.)
-        const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-        const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
-        const isStrictlyTechnical = (pType === "1" && dType === "1");
-        
-        if (isStrictlyTechnical) {
-          isStopTech = true;
-        } else if (i === 0 && pType === "1") {
-          isStopTech = true;
-        } else if (i === stops.length - 1 && dType === "1") {
-          isStopTech = true;
-        } else {
-          // Default to passenger for backward compatibility
-          isStopTech = false;
-          isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
-        }
       }
-      
     } else {
+      // Fallback: Use edgeCount only when profile is unavailable
+      // (This maintains backward compatibility for routes without profiles)
       const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
       const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
 
@@ -6277,13 +6260,6 @@ const processedTrips = trips.map(trip => {
         if (i === 0) isStopTech = isRareAfter;
         else if (i === stops.length - 1) isStopTech = isRareBefore;
         else isStopTech = (isRareBefore && isRareAfter);
-      }
-
-      const isProfiledAsTail = (profileNodeType === 'tail');
-      if (isProfiledAsTail) {
-        isStopTech = true;
-      } else if (isOnDemand) {
-        isStopTech = false;
       }
     }
 
