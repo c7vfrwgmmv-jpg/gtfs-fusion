@@ -6384,7 +6384,15 @@ sortedTrips = sortedTrips.map(t => {
 
 const newTripStopMaps = {};
 sortedTrips.forEach(t => {
-  newTripStopMaps[t.trip_id] = t.pStops;
+  // When showAllTrips is true, use ALL stops from the trip (including depot/technical stops)
+  // When showAllTrips is false, use only passenger stops (pStops)
+  if (state.showAllTrips) {
+    // Use all stops from the original tripStopMaps
+    newTripStopMaps[t.trip_id] = tripStopMaps[t.trip_id] || [];
+  } else {
+    // Use only passenger stops
+    newTripStopMaps[t.trip_id] = t.pStops;
+  }
 });
 
 // === STEP 5: Get master list (canonical or fallback) ===
