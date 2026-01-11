@@ -6290,29 +6290,22 @@ function renderTimetable() {
   }
   
   if (variantSelect) {
-    variantSelect.onchange = (e) => {
-      const tableRoot = $('schedule-table-root');
-      const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
-      const savedScrollLeft = scrollContainer?.scrollLeft || 0;
-      const savedScrollTop = scrollContainer?.scrollTop || 0;
-      
+    variantSelect.onchange = async (e) => {
       state.selectedVariantFilter = parseInt(e.target.value, 10);
       
       // Auto-enable showAllTrips when variant is selected
       if (state.selectedVariantFilter > 0) {
         state.showAllTrips = true;
+        // Update map to show the selected variant
+        state.selectedVariant = state.selectedVariantFilter;
       }
       
       renderTimetable();
       
-      // Restore scroll position
-      setTimeout(() => {
-        const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
-        if (newScrollContainer) {
-          newScrollContainer.scrollLeft = savedScrollLeft;
-          newScrollContainer.scrollTop = savedScrollTop;
-        }
-      }, 0);
+      // Update map to show the selected variant
+      if (typeof updateMap === 'function') {
+        await updateMap();
+      }
     };
   }
 
