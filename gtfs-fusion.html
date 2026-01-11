@@ -892,6 +892,7 @@ let state = {
   availableDates: [],
   selectedDirection: '0',
   selectedVariant: 1,
+  selectedVariantFilter: 0,  // 0 = wszystkie, 1+ = specific variant
   mapLoaded: false,
   showAllTrips: false,
   threshold: 10,
@@ -6201,42 +6202,114 @@ function updateDeparturesTable() {
 function renderTimetable() {
   const container = $('timetable-container'); 
   if (!container) return;
+  
+  // Get variants data early to build dropdown
+  const trips = getAllTripsForRoute();
+  if (trips.length === 0) {
+    container.innerHTML = "<div class='p-4 text-gray-500'>No schedule available.</div>";
+    return;
+  }
+  
+  const variantsData = computeVariantsForRoute();
+  const tripToVariantGlobal = variantsData ? variantsData.tripToVariant : {};
+  
+  // Build variant dropdown options
+  let variantOptionsHtml = '<option value="0">Wszystko</option>';
+  if (variantsData && variantsData.variantDetails) {
+    const variantNumbers = Object.keys(variantsData.variantDetails).map(k => parseInt(k, 10)).filter(n => !isNaN(n)).sort((a, b) => a - b);
+    variantNumbers.forEach(vNum => {
+      const tripsInVariant = Object.keys(tripToVariantGlobal).filter(tripId => tripToVariantGlobal[tripId] === vNum).length;
+      variantOptionsHtml += `<option value="${vNum}">Wariant #${vNum} (${tripsInVariant} tripów)</option>`;
+    });
+  }
+  
+  // Calculate variant range label
+  let variantRangeLabel = '';
+  if (state.selectedVariantFilter > 0 && variantsData && variantsData.variantDetails) {
+    const variant = variantsData.variantDetails[state.selectedVariantFilter];
+    if (variant && variant.stopDetails && variant.stopDetails.length > 0) {
+      const firstStop = variant.stopDetails[0]?.stop_name || '?';
+      const lastStop = variant.stopDetails[variant.stopDetails.length - 1]?.stop_name || '?';
+      variantRangeLabel = `${firstStop} - ${lastStop}`;
+    }
+  }
+  
+  // Determine depot button state
+  const isVariantMode = state.selectedVariantFilter > 0;
+  const depotButtonDisabled = isVariantMode ? 'disabled' : '';
+  const depotButtonClasses = isVariantMode 
+    ? 'bg-blue-500 text-white px-4 py-2 rounded opacity-50 cursor-not-allowed'
+    : 'bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600';
+  const depotButtonText = isVariantMode 
+    ? 'Zjazdy widoczne (tryb wariantu)'
+    : (state.showAllTrips ? 'Ukryj zjazdy i wyjazdy' : 'Pokaż zjazdy i wyjazdy');
+  
   container.innerHTML = `
     <div class="flex gap-4 items-center mb-4">
-      <button id="toggle-depot-trips-main" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
-        ${state.showAllTrips ? 'Ukryj zjazdy i wyjazdy' : 'Pokaż zjazdy i wyjazdy'}
+      <button id="toggle-depot-trips-main" class="${depotButtonClasses}" ${depotButtonDisabled}>
+        ${depotButtonText}
       </button>
+      <select id="variant-filter-select" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 cursor-pointer font-medium" style="appearance: none; background-image: url('data:image/svg+xml;charset=UTF-8,%3csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27%3e%3cpolyline points=%276 9 12 15 18 9%27%3e%3c/polyline%3e%3c/svg%3e'); background-repeat: no-repeat; background-position: right 0.5rem center; background-size: 1.5em 1.5em; padding-right: 2.5rem;">
+        ${variantOptionsHtml}
+      </select>
+      <div class="flex-1 text-right text-gray-700 font-medium" id="variant-range-label">
+        ${variantRangeLabel}
+      </div>
     </div>
     <div id="schedule-table-root"></div>
 `;
-      $('toggle-depot-trips-main').onclick = () => { 
-        const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
-        const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
-        const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
-        
-        state.showAllTrips = !state.showAllTrips; 
-        renderTimetable(); 
-        
-        // Restore scroll position after render
-        setTimeout(() => {
-          const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
-          if (newScrollContainer) {
-            newScrollContainer.scrollLeft = savedScrollLeft;
-            newScrollContainer.scrollTop = savedScrollTop;
-          }
-        }, 0);
-      };
+  
+  // Set selected value for dropdown
+  const variantSelect = $('variant-filter-select');
+  if (variantSelect) {
+    variantSelect.value = state.selectedVariantFilter.toString();
+  }
+  
+  $('toggle-depot-trips-main').onclick = () => { 
+    if (state.selectedVariantFilter > 0) return; // Disabled in variant mode
+    
+    const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
+    const savedScrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
+    const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+    
+    state.showAllTrips = !state.showAllTrips; 
+    renderTimetable(); 
+    
+    // Restore scroll position after render
+    setTimeout(() => {
+      const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
+      if (newScrollContainer) {
+        newScrollContainer.scrollLeft = savedScrollLeft;
+        newScrollContainer.scrollTop = savedScrollTop;
+      }
+    }, 0);
+  };
+  
+  $('variant-filter-select').onchange = (e) => {
+    const scrollContainer = tableRoot?.querySelector('.overflow-x-auto');
+    const savedScrollLeft = scrollContainer?.scrollLeft || 0;
+    const savedScrollTop = scrollContainer?.scrollTop || 0;
+    
+    state.selectedVariantFilter = parseInt(e.target.value, 10);
+    
+    // Auto-enable showAllTrips when variant is selected
+    if (state.selectedVariantFilter > 0) {
+      state.showAllTrips = true;
+    }
+    
+    renderTimetable();
+    
+    // Restore scroll position
+    setTimeout(() => {
+      const newScrollContainer = $('schedule-table-root')?.querySelector('.overflow-x-auto');
+      if (newScrollContainer) {
+        newScrollContainer.scrollLeft = savedScrollLeft;
+        newScrollContainer.scrollTop = savedScrollTop;
+      }
+    }, 0);
+  };
 
-      const tableRoot = $('schedule-table-root'); if (!tableRoot) return;
-
-const trips = getAllTripsForRoute();
-if (trips.length === 0) {
-  tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No schedule available.</div>";
-  return;
-}
-
-const variantsData = computeVariantsForRoute();
-const tripToVariantGlobal = variantsData ? variantsData.tripToVariant : {};
+  const tableRoot = $('schedule-table-root'); if (!tableRoot) return;
 
 if (variantsData && variantsData.variantDetails) {
   const available = Object.keys(variantsData.variantDetails).map(k=>parseInt(k,10)).filter(n=>!isNaN(n));
@@ -6287,12 +6360,21 @@ const processedTrips = trips.map(trip => {
   };
 }).filter(t => t.pStops.length > 0 && (state.showAllTrips || t.isServiceTrip));
 
-if (processedTrips.length === 0) { 
+// Filter trips by selected variant
+let filteredTrips = processedTrips;
+if (state.selectedVariantFilter > 0) {
+  filteredTrips = processedTrips.filter(trip => {
+    const variantNum = tripToVariantGlobal[trip.trip_id] || 1;
+    return variantNum === state.selectedVariantFilter;
+  });
+}
+
+if (filteredTrips.length === 0) { 
   tableRoot.innerHTML = "<div class='p-4 text-gray-500'>No trips for this threshold.</div>"; 
   return; 
 }
 
-let sortedTrips = sortTripsByMostFrequentStop(processedTrips, tripStopMaps, state.gtfsData.stopsIndex);
+let sortedTrips = sortTripsByMostFrequentStop(filteredTrips, tripStopMaps, state.gtfsData.stopsIndex);
 sortedTrips = sortedTrips.map(t => {
   const firstStop = t.pStops[0];
   let start = firstStop?.departure_time || "00:00:00";
