@@ -5673,6 +5673,34 @@ async function renderStopsView() {
       e.stopPropagation();
       
       const groupId = stopGroup.getAttribute('data-group-id');
+      const stopId = stopGroup.getAttribute('data-stop-id');
+      
+      // Handle single-stop groups (they have data-stop-id instead of data-group-id)
+      if (!groupId && stopId) {
+        const groupsArray = getOrBuildGroupsArray(stopsData);
+        let stop = null;
+        
+        for (const group of groupsArray) {
+          stop = group.stops.find(s => s.stop_id === stopId);
+          if (stop) break;
+        }
+        
+        if (stop) {
+          // Set map to selected stop
+          if (window.stopsListMap && stop.stop_lat && stop.stop_lon) {
+            window.stopsListMap.setView(
+              [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+              17
+            );
+          }
+          
+          state.selectedStop = stop;
+          state.stopViewFilteredRoutes = [];
+          render();
+        }
+        return;
+      }
+      
       const groupsArray = getOrBuildGroupsArray(stopsData);
       const group = groupsArray.find(g => g.id === groupId);
       
