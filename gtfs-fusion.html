@@ -7872,6 +7872,47 @@ if (state.gtfsData && state.selectedRoute) {
         const wouldBeFiltered = !state.showAllTrips && !hasPassenger;
         const wouldBeDepot = !hasPassenger || (firstCoreIdx !== -1 && lastCoreIdx !== -1 && !hasPassengerBetweenCore);
         
+        // Build classification reasons
+        const reasons = [];
+        
+        if (!hasPassenger) {
+          reasons.push('❌ NO PASSENGER STOPS (all stops are technical/depot)');
+        } else {
+          reasons.push('✓ Has passenger stops');
+        }
+        
+        if (firstCoreIdx === -1 || lastCoreIdx === -1) {
+          reasons.push('⚠ No core stops found');
+        } else if (firstCoreIdx === lastCoreIdx) {
+          reasons.push('⚠ Only one core stop');
+        } else {
+          reasons.push(`✓ Core stops: ${firstCoreIdx} to ${lastCoreIdx}`);
+        }
+        
+        if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
+          if (!hasPassengerBetweenCore) {
+            reasons.push('❌ NO PASSENGER STOPS BETWEEN CORE (likely depot/positioning trip)');
+          } else {
+            reasons.push('✓ Has passenger stops between core');
+          }
+        }
+        
+        if (!isActive) {
+          reasons.push(`⚠ Not active on ${state.selectedDate}`);
+        } else {
+          reasons.push(`✓ Active on ${state.selectedDate}`);
+        }
+        
+        if (wouldBeFiltered) {
+          reasons.push('🚫 WOULD BE FILTERED (showAllTrips=false hides this trip)');
+        }
+        
+        if (wouldBeDepot) {
+          reasons.push('🔧 CLASSIFIED AS DEPOT TRIP');
+        } else {
+          reasons.push('🚌 CLASSIFIED AS SERVICE TRIP');
+        }
+        
         return {
           trip_id: trip.trip_id,
           variant: variant,
@@ -7885,6 +7926,7 @@ if (state.gtfsData && state.selectedRoute) {
           active_on_date: isActive,
           would_be_filtered: wouldBeFiltered,
           would_be_depot: wouldBeDepot,
+          classification_reason: reasons.join(' | '),
           stop_sequence: stopSequence
         };
       });
@@ -7959,6 +8001,7 @@ if (state.gtfsData && state.selectedRoute) {
         <th>Active on Date</th>
         <th>Would Be Filtered</th>
         <th>Would Be Depot</th>
+        <th>Classification Reason</th>
         <th>Stop Sequence</th>
       </tr>
     </thead>
@@ -8001,6 +8044,7 @@ if (state.gtfsData && state.selectedRoute) {
         <td>${trip.active_on_date ? check : cross}</td>
         <td>${trip.would_be_filtered ? check : cross}</td>
         <td>${trip.would_be_depot ? check : cross}</td>
+        <td style="font-size:9px;">${escapeHtml(trip.classification_reason)}</td>
         <td>${stopSeqHtml}</td>
       </tr>
 `;
