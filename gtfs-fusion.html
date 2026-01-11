@@ -6176,17 +6176,9 @@ const profile = getCurrentRouteProfile();
 const nodeTypes = profile && profile.nodeTypes ? profile.nodeTypes : null;
 const stopMetadata = profile && profile.stopMetadata ? profile.stopMetadata : null;
 
-// === STEP 3: Process trips (detect tail stops, filter if needed) ===
-const thresh = state.threshold/100;
-const totalTrips = trips.length;
-const edgeCount = {};
-trips.forEach(trip => {
-  const stops = tripStopMaps[trip.trip_id] || [];
-  for (let i=0;i<stops.length-1;i++){
-    const edge = stops[i].stop_id + '->' + stops[i+1].stop_id;
-    edgeCount[edge] = (edgeCount[edge]||0) + 1;
-  }
-});
+// === STEP 3: Process trips (use profile classification) ===
+// Profile nodeTypes is the single source of truth for stop classification
+// No need for duplicate edgeCount calculation - profile already did station-level aggregation
 
 const processedTrips = trips.map(trip => {
   const stops = tripStopMaps[trip.trip_id] || [];
@@ -6215,77 +6207,21 @@ const processedTrips = trips.map(trip => {
     let isStopTech = false;
     let isOnDemand = false;
 
-    if (meta) {
-      const nodeType = nodeTypes[sId];
-      
-      if (nodeType === 'tail') {
-        // Depot/technical stop
-        isStopTech = true;
-      } else if (nodeType === 'passenger' || nodeType === 'core') {
-        // Passenger stop (including branches between core)
-        isStopTech = false;
-        const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-        const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
-        isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
-      } else {
-        // Fallback for unclassified stops (noncore, branch, etc.)
-        const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-        const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
-        const isStrictlyTechnical = (pType === "1" && dType === "1");
-        
-        if (isStrictlyTechnical) {
-          isStopTech = true;
-        } else if (i === 0 && pType === "1") {
-          isStopTech = true;
-        } else if (i === stops.length - 1 && dType === "1") {
-          isStopTech = true;
-        } else {
-          // Default to passenger for backward compatibility
-          isStopTech = false;
-          isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
-        }
-      }
-      
+    // Profile is the single source of truth for stop classification
+    if (!profileNodeType) {
+      // This should rarely happen - profile should always classify stops
+      console.warn('Missing nodeType for stop (profile not built?):', sId);
+      // Safe fallback: show as passenger stop to avoid hiding valid stops
+      isStopTech = false;
     } else {
-      const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
-      const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
-
-      isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
-      const isStrictlyTechnical = (pType === "1" && dType === "1");
-
-      let isLikelyDepot = isStrictlyTechnical;
-      if (!isLikelyDepot) {
-        if (i === 0 && pType === "1") {
-          isLikelyDepot = true;
-        } else if (i === stops.length - 1 && dType === "1") {
-          isLikelyDepot = true;
-        }
-      }
-
-      let isRareBefore = false, isRareAfter = false;
-      if (i > 0) {
-        const eB = stops[i - 1].stop_id + '->' + sId;
-        if ((edgeCount[eB] || 0) / totalTrips < thresh) isRareBefore = true;
-      }
-      if (i < stops.length - 1) {
-        const eA = sId + '->' + stops[i + 1].stop_id;
-        if ((edgeCount[eA] || 0) / totalTrips < thresh) isRareAfter = true;
-      }
-
-      isStopTech = isLikelyDepot;
-      if (!isStopTech) {
-        if (i === 0) isStopTech = isRareAfter;
-        else if (i === stops.length - 1) isStopTech = isRareBefore;
-        else isStopTech = (isRareBefore && isRareAfter);
-      }
-
-      const isProfiledAsTail = (profileNodeType === 'tail');
-      if (isProfiledAsTail) {
-        isStopTech = true;
-      } else if (isOnDemand) {
-        isStopTech = false;
-      }
+      // Use profile classification
+      isStopTech = (profileNodeType === 'tail');
     }
+    
+    // Check for on-demand stops (independent of technical classification)
+    const pType = s.pickup_type ? String(s.pickup_type).trim() : "0";
+    const dType = s.drop_off_type ? String(s.drop_off_type).trim() : "0";
+    isOnDemand = (pType === "2" || pType === "3" || dType === "2" || dType === "3");
 
     if (!isStopTech || state.showAllTrips) {
       pStops.push({ ...s, isTech: isStopTech, isOnDemand: isOnDemand });
