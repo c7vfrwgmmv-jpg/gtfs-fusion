@@ -3633,6 +3633,49 @@ function getCanonicalKeyForCurrentSelection() {
   }
   return key;
 }
+
+/**
+ * Helper function to extract stops between two core stations in a trip
+ * @param {Array} sortedStops - Sorted stop times for the trip
+ * @param {Object} coreStationA - Start core station with stopIds array
+ * @param {Object} coreStationB - End core station with stopIds array
+ * @param {Object} stopsIndex - Index of all stops
+ * @param {Set} allowedSet - Allowed stations for merging
+ * @param {Function} getStationIdWithPolicy - Function to get station ID
+ * @returns {Array} Array of stop objects between the two cores
+ */
+function getStopsBetween(sortedStops, coreStationA, coreStationB, stopsIndex, allowedSet, getStationIdWithPolicy) {
+  if (!sortedStops || sortedStops.length === 0) return [];
+  
+  // Find positions of core stations
+  let posA = -1, posB = -1;
+  sortedStops.forEach((st, idx) => {
+    if (!st || !st.stop_id) return;
+    const stationId = getStationIdWithPolicy(st.stop_id, stopsIndex, allowedSet);
+    
+    // Check if this stop matches coreStationA
+    if (coreStationA.stopIds.includes(st.stop_id) || stationId === coreStationA.stationId) {
+      posA = idx;
+    }
+    // Check if this stop matches coreStationB
+    if (coreStationB.stopIds.includes(st.stop_id) || stationId === coreStationB.stationId) {
+      posB = idx;
+    }
+  });
+  
+  // No stops between if cores not found or adjacent
+  if (posA === -1 || posB === -1 || posB <= posA + 1) return [];
+  
+  // Extract stops between (exclusive of cores)
+  return sortedStops.slice(posA + 1, posB).map((st, relIdx) => ({
+    stop_id: st.stop_id,
+    stop_sequence: st.stop_sequence,
+    position: posA + 1 + relIdx, // absolute position in trip
+    stationId: getStationIdWithPolicy(st.stop_id, stopsIndex, allowedSet),
+    name: (stopsIndex[st.stop_id] || {}).stop_name || st.stop_id
+  }));
+}
+
 function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex) {
   if (!profile || !profile.coreStops || profile.coreStops.length === 0) {
     return null; // Fallback to old behavior
@@ -3676,12 +3719,12 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     windows.push({
       startCore: coreStationGroups[i],
       endCore: coreStationGroups[i + 1],
-      branches: new Map() // stationId -> { stopIds: [], positions: [] }
+      chunks: new Map() // signature -> { stops: [], positions: [] }
     });
   }
 
-  const preCore = new Map(); // stationId -> { stopIds: [], positions: [] }
-  const postCore = new Map(); // stationId -> { stopIds: [], positions: [] }
+  const preCore = new Map(); // signature -> { stops: [], positions: [] }
+  const postCore = new Map(); // signature -> { stops: [], positions: [] }
 
   // Step 3: Process all trips to collect branch stations and their positions
   allTrips.forEach(trip => {
@@ -3714,6 +3757,8 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       : -1;
 
     if (firstCorePos > 0) {
+      // Collect stops before first core as a chunk
+      const preCoreStops = [];
       for (let pos = 0; pos < firstCorePos; pos++) {
         const stopTime = sortedStops[pos];
         const stopId = stopTime.stop_id;
@@ -3722,25 +3767,50 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
         
-        const normalizedPos = pos / firstCorePos;
+        preCoreStops.push({
+          stop_id: stopId,
+          stationId: stationId,
+          name: (stopsIndex[stopId] || {}).stop_name || stopId,
+          position: pos
+        });
+      }
+      
+      if (preCoreStops.length > 0) {
+        // Create signature for this sub-path
+        const signature = preCoreStops.map(st => st.stationId).join('|');
         
-        if (!preCore.has(stationId)) {
-          preCore.set(stationId, {
-            stopIds: [stopId],
+        // Calculate normalized position of first stop
+        const firstStopPos = preCoreStops[0].position;
+        const normalizedPos = firstStopPos / firstCorePos;
+        
+        if (!preCore.has(signature)) {
+          // Store stops with arrays for stop_ids (to handle multiple platforms)
+          preCore.set(signature, {
+            stops: preCoreStops.map(st => ({
+              stationId: st.stationId,
+              name: st.name,
+              stopIds: [st.stop_id]
+            })),
             positions: [normalizedPos]
           });
         } else {
-          const branch = preCore.get(stationId);
-          if (!branch.stopIds.includes(stopId)) {
-            branch.stopIds.push(stopId);
-          }
-          branch.positions.push(normalizedPos);
+          const chunk = preCore.get(signature);
+          // Merge stop_ids for each station in the chunk
+          preCoreStops.forEach((st, idx) => {
+            if (idx < chunk.stops.length && !chunk.stops[idx].stopIds.includes(st.stop_id)) {
+              chunk.stops[idx].stopIds.push(st.stop_id);
+            }
+          });
+          chunk.positions.push(normalizedPos);
         }
       }
     }
 
     if (lastCorePos >= 0 && lastCorePos < sortedStops.length - 1) {
       const tripLength = sortedStops.length;
+      
+      // Collect stops after last core as a chunk
+      const postCoreStops = [];
       for (let pos = lastCorePos + 1; pos < tripLength; pos++) {
         const stopTime = sortedStops[pos];
         const stopId = stopTime.stop_id;
@@ -3749,24 +3819,46 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
         
-        const normalizedPos = (pos - lastCorePos) / (tripLength - lastCorePos);
+        postCoreStops.push({
+          stop_id: stopId,
+          stationId: stationId,
+          name: (stopsIndex[stopId] || {}).stop_name || stopId,
+          position: pos
+        });
+      }
+      
+      if (postCoreStops.length > 0) {
+        // Create signature for this sub-path
+        const signature = postCoreStops.map(st => st.stationId).join('|');
         
-        if (!postCore.has(stationId)) {
-          postCore.set(stationId, {
-            stopIds: [stopId],
+        // Calculate normalized position of first stop
+        const firstStopPos = postCoreStops[0].position;
+        const normalizedPos = (firstStopPos - lastCorePos) / (tripLength - lastCorePos);
+        
+        if (!postCore.has(signature)) {
+          // Store stops with arrays for stop_ids (to handle multiple platforms)
+          postCore.set(signature, {
+            stops: postCoreStops.map(st => ({
+              stationId: st.stationId,
+              name: st.name,
+              stopIds: [st.stop_id]
+            })),
             positions: [normalizedPos]
           });
         } else {
-          const branch = postCore.get(stationId);
-          if (!branch.stopIds.includes(stopId)) {
-            branch.stopIds.push(stopId);
-          }
-          branch.positions.push(normalizedPos);
+          const chunk = postCore.get(signature);
+          // Merge stop_ids for each station in the chunk
+          postCoreStops.forEach((st, idx) => {
+            if (idx < chunk.stops.length && !chunk.stops[idx].stopIds.includes(st.stop_id)) {
+              chunk.stops[idx].stopIds.push(st.stop_id);
+            }
+          });
+          chunk.positions.push(normalizedPos);
         }
       }
     }
 
-    // For each window, collect branches
+    // For each window, collect branches as chunks
     for (let winIdx = 0; winIdx < windows.length; winIdx++) {
       const window = windows[winIdx];
       
@@ -3779,6 +3871,8 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
       const windowLength = endPos.position - startPos.position;
       
+      // Collect stops between cores as a chunk
+      const windowStops = [];
       for (let pos = startPos.position + 1; pos < endPos.position; pos++) {
         const stopTime = sortedStops[pos];
         const stopId = stopTime.stop_id;
@@ -3787,19 +3881,41 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Skip if this is a core station
         if (seenStations.has(stationId)) continue;
         
-        const normalizedPos = (pos - startPos.position) / windowLength;
+        windowStops.push({
+          stop_id: stopId,
+          stationId: stationId,
+          name: (stopsIndex[stopId] || {}).stop_name || stopId,
+          position: pos
+        });
+      }
+      
+      if (windowStops.length > 0) {
+        // Create signature for this sub-path
+        const signature = windowStops.map(st => st.stationId).join('|');
         
-        if (!window.branches.has(stationId)) {
-          window.branches.set(stationId, {
-            stopIds: [stopId],
+        // Calculate normalized position of first stop
+        const firstStopPos = windowStops[0].position;
+        const normalizedPos = (firstStopPos - startPos.position) / windowLength;
+        
+        if (!window.chunks.has(signature)) {
+          // Store stops with arrays for stop_ids (to handle multiple platforms)
+          window.chunks.set(signature, {
+            stops: windowStops.map(st => ({
+              stationId: st.stationId,
+              name: st.name,
+              stopIds: [st.stop_id]
+            })),
             positions: [normalizedPos]
           });
         } else {
-          const branch = window.branches.get(stationId);
-          if (!branch.stopIds.includes(stopId)) {
-            branch.stopIds.push(stopId);
-          }
-          branch.positions.push(normalizedPos);
+          const chunk = window.chunks.get(signature);
+          // Merge stop_ids for each station in the chunk
+          windowStops.forEach((st, idx) => {
+            if (idx < chunk.stops.length && !chunk.stops[idx].stopIds.includes(st.stop_id)) {
+              chunk.stops[idx].stopIds.push(st.stop_id);
+            }
+          });
+          chunk.positions.push(normalizedPos);
         }
       }
     }
@@ -3807,42 +3923,45 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
   const finalRows = [];
   
-  const createSortedBranchEntries = (branchMap) => {
-    const branchEntries = Array.from(branchMap.entries()).map(([stationId, data]) => {
+  const createSortedChunkEntries = (chunkMap) => {
+    const chunkEntries = Array.from(chunkMap.entries()).map(([signature, data]) => {
       const sorted = data.positions.slice().sort((a, b) => a - b);
       const mid = Math.floor(sorted.length / 2);
       const median = sorted.length % 2 === 0
         ? (sorted[mid - 1] + sorted[mid]) / 2
         : sorted[mid];
       
-      const stopName = getStationDisplayName(stationId, data.stopIds);
+      // Get the name of the first stop in the chunk for tie-breaking
+      const firstStopName = data.stops[0].name;
       
       return {
-        stationId,
-        stopIds: data.stopIds,
+        signature,
+        stops: data.stops,
         median,
-        name: stopName,
-        primaryStopId: data.stopIds[0]
+        name: firstStopName
       };
     });
 
-    // Sort by median, then by name, then by stop_id (stable)
-    branchEntries.sort((a, b) => {
+    // Sort chunks by median, then by name, then by signature (stable)
+    chunkEntries.sort((a, b) => {
       if (a.median !== b.median) return a.median - b.median;
       if (a.name !== b.name) return a.name.localeCompare(b.name);
-      return a.primaryStopId.localeCompare(b.primaryStopId);
+      return a.signature.localeCompare(b.signature);
     });
 
-    return branchEntries;
+    return chunkEntries;
   };
 
-  const preCoreBranches = createSortedBranchEntries(preCore);
-  preCoreBranches.forEach(branch => {
-    finalRows.push({
-      id: branch.primaryStopId,
-      name: branch.name,
-      stopIds: branch.stopIds,
-      nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+  const preCoreBranches = createSortedChunkEntries(preCore);
+  preCoreBranches.forEach(chunk => {
+    // Insert all stops from the chunk in order
+    chunk.stops.forEach(stop => {
+      finalRows.push({
+        id: stop.stopIds[0],
+        name: stop.name,
+        stopIds: stop.stopIds,
+        nodeType: nodeTypes[stop.stopIds[0]] || 'passenger'
+      });
     });
   });
   
@@ -3854,17 +3973,19 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
   });
 
-  // For each window, add sorted branches, then the next core station
+  // For each window, add sorted chunks, then the next core station
   windows.forEach((window, winIdx) => {
-    const branchEntries = createSortedBranchEntries(window.branches);
+    const chunkEntries = createSortedChunkEntries(window.chunks);
 
-    // Add branches to final list
-    branchEntries.forEach(branch => {
-      finalRows.push({
-        id: branch.primaryStopId,
-        name: branch.name,
-        stopIds: branch.stopIds,
-        nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+    // Add chunks to final list (each chunk contains multiple stops in order)
+    chunkEntries.forEach(chunk => {
+      chunk.stops.forEach(stop => {
+        finalRows.push({
+          id: stop.stopIds[0],
+          name: stop.name,
+          stopIds: stop.stopIds,
+          nodeType: nodeTypes[stop.stopIds[0]] || 'passenger'
+        });
       });
     });
 
@@ -3877,13 +3998,16 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     });
   });
 
-  const postCoreBranches = createSortedBranchEntries(postCore);
-  postCoreBranches.forEach(branch => {
-    finalRows.push({
-      id: branch.primaryStopId,
-      name: branch.name,
-      stopIds: branch.stopIds,
-      nodeType: nodeTypes[branch.primaryStopId] || 'passenger'
+  const postCoreBranches = createSortedChunkEntries(postCore);
+  postCoreBranches.forEach(chunk => {
+    // Insert all stops from the chunk in order
+    chunk.stops.forEach(stop => {
+      finalRows.push({
+        id: stop.stopIds[0],
+        name: stop.name,
+        stopIds: stop.stopIds,
+        nodeType: nodeTypes[stop.stopIds[0]] || 'passenger'
+      });
     });
   });
 
