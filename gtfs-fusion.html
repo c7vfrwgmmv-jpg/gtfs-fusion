@@ -3759,10 +3759,10 @@ calendarDatesByDate.forEach((exceptions, dateStr) => {
   if (!dateServiceCounts.has(dateStr)) {
     const services = new Set();
     exceptions.forEach(cd => {
-      if (cd. exception_type === '1') services.add(cd.service_id);
+      if (cd.exception_type === '1') services.add(cd.service_id);
     });
     if (services.size > 0) {
-      dateServiceCounts.set(dateStr, services.size);
+      dateServiceCounts. set(dateStr, services.size);
     }
   }
 });
