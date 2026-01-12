@@ -1784,17 +1784,10 @@ async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stop
     state.currentWorker = null;
     return;
   } catch (err) {
-    // fallback
-    try {
-      if (typeof enrichTripsWithDirectionIdAsync === 'function') {
-        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress);
-        return;
-      }
-      throw err;
-    } finally {
-      if (worker) try { worker.terminate(); } catch(e){}
-      state.currentWorker = null;
-    }
+    // Worker failed - no fallback available
+    if (worker) try { worker.terminate(); } catch(e){}
+    state.currentWorker = null;
+    throw err;
   }
 }	  
 // ═══════════════════════════════════════════════════════════════
@@ -7857,7 +7850,7 @@ switch(currentView) {
         try {
           localStorage.setItem('gtfs_skip_direction_enrichment', JSON.stringify(state.skipDirectionIdEnrichment));
         } catch (err) {
-          // Failed to save preference
+          // Failed to save skip direction enrichment preference
         }
       });
       
@@ -8151,7 +8144,7 @@ if (state.gtfsData && state.selectedRoute) {
         state.skipDirectionIdEnrichment = JSON.parse(savedSkipPref);
       }
     } catch (err) {
-      // Failed to load preference
+      // Failed to load skip direction enrichment preference
     }
     
     // global delegated handlers (one-time) ---------------------------------------------------------
