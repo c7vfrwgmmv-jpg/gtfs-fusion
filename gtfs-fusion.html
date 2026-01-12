@@ -3790,21 +3790,22 @@ function getServicesForDate(dateStr) {
   const dayOfWeek = DAY_NAMES[getDayOfWeek(dateStr)];
   const services = new Set();
   
-  // ✅ String comparison instead of Date
+  // Bazowe serwisy z calendar. txt
   state.gtfsData.calendar.forEach(cal => {
     if (dateStr >= cal.start_date && dateStr <= cal.end_date && cal[dayOfWeek] === '1') {
       services.add(cal.service_id);
     }
   });
   
-  // ✅ String equality check
-  if (state.gtfsData.calendarDates) {
-    state.gtfsData.calendarDates.forEach(cd => {
-      if (cd.date === dateStr) {
+  // ✅ FIXED: Use indexed lookup (requires calendarDatesByDateIndex in state)
+  if (state.gtfsData.calendarDatesByDateIndex) {
+    const exceptionsForDate = state.gtfsData.calendarDatesByDateIndex. get(dateStr);
+    if (exceptionsForDate) {
+      exceptionsForDate.forEach(cd => {
         if (cd.exception_type === '1') services.add(cd.service_id);
         else if (cd.exception_type === '2') services.delete(cd.service_id);
-      }
-    });
+      });
+    }
   }
   
   return Array.from(services);
