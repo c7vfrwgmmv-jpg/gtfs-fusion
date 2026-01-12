@@ -17,6 +17,7 @@
       window.fflate = exports;
     }
   </script>
+  <script src="https://unpkg.com/@zip.js/zip.js@2.7.34/dist/zip.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
@@ -1422,26 +1423,46 @@ async function parseWithStrategy(text, fileName, onProgress) {
   if (fileSizeMB < WORKER_THRESHOLD_MB) {
     console.log('[Parse] ' + fileName + ': sync mode (' + fileSizeMB.toFixed(1) + 'MB)');
     
-    // Call EXISTING parseCSV function (DO NOT CHANGE)
-    const records = parseCSV(text);
-    
-    // Apply EXISTING post-processing
+    // For stop_times and shapes, convert to index format even in sync mode
     if (fileType === 'stop_times') {
-      for (const r of records) {
-        if (r.arrival_time) r.arrival_time = parseTimeFast(r.arrival_time);
-        if (r.departure_time) r.departure_time = parseTimeFast(r.departure_time);
-        if (r.stop_sequence) r.stop_sequence = parseInt(r.stop_sequence, 10);
-      }
+      // Parse header to get column indices
+      const lines = text.split('\n');
+      const headerLine = lines[0].replace(/^\uFEFF/, '');
+      const rawHeaders = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+      
+      const headers = {
+        tripIdx: -1,
+        stopIdx: -1,
+        seqIdx: -1,
+        arrIdx: -1,
+        depIdx: -1,
+        pickupIdx: -1,
+        dropoffIdx: -1
+      };
+      
+      rawHeaders.forEach((h, i) => {
+        const normalized = normalizeKey(h);
+        if (normalized === 'trip_id') headers.tripIdx = i;
+        else if (normalized === 'stop_id') headers.stopIdx = i;
+        else if (normalized === 'stop_sequence') headers.seqIdx = i;
+        else if (normalized === 'arrival_time') headers.arrIdx = i;
+        else if (normalized === 'departure_time') headers.depIdx = i;
+        else if (normalized === 'pickup_type') headers.pickupIdx = i;
+        else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
+      });
+      
+      // Use the existing parseStopTimesChunk function
+      const bodyText = lines.slice(1).join('\n');
+      return parseStopTimesChunk(bodyText, headers);
     }
     
     if (fileType === 'shapes') {
-      for (const r of records) {
-        if (r.shape_pt_lat) r.shape_pt_lat = parseFloat(r.shape_pt_lat);
-        if (r.shape_pt_lon) r.shape_pt_lon = parseFloat(r.shape_pt_lon);
-        if (r.shape_pt_sequence) r.shape_pt_sequence = parseInt(r.shape_pt_sequence, 10);
-      }
+      // Use the existing parseShapesChunk function
+      return parseShapesChunk(text);
     }
     
+    // For other files, use standard CSV parsing
+    const records = parseCSV(text);
     return records;
   }
   
@@ -2735,328 +2756,6 @@ function parseCSV(text) {
 
 // Async CSV parser with chunked processing for better UI responsiveness
 
-function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const arrayBuffer = await zipFileEntry.async('arraybuffer');
-      const decoder = new TextDecoder('utf-8');
-      
-      let buffer = '';
-      let lineCount = 0;
-      let headers = null;
-      const stopTimesIndex = Object.create(null);
-      
-      const PROGRESS_UPDATE_INTERVAL = 100000;  // ← Increased from 10k
-      const ESTIMATED_LINES_FOR_PROGRESS = 100000;
-      const CHUNK_SIZE = 1024 * 1024;
-      
-      // ═══ REMOVED smartSplit - use native split! ═══
-      // NOTE: Using native split(',') for performance (100x faster than smartSplit).
-      // This works for GTFS stop_times.txt because fields typically don't contain commas.
-      // If a feed has quoted fields with embedded commas, use the full parseCSV function instead.
-      
-      const getCol = (cols, idx) => {
-        if (idx === -1 || idx >= cols.length) return '';
-        let val = cols[idx];
-        if (!val) return '';
-        
-        // Remove quotes in-place
-        if (val[0] === '"' && val[val.length-1] === '"') {
-          val = val.substring(1, val.length - 1);
-        }
-        
-        // Trim only if needed (check first/last char)
-        if (val[0] === ' ' || val[val.length-1] === ' ') {
-          return val.trim();
-        }
-        
-        return val;
-      };
-      
-      const processLine = (line) => {
-        if (!line.trim()) return;
-        
-        if (!headers) {
-          const rawHeaders = line.split(',').map(h => h.replace(/^"|"$/g, '').trim());
-          headers = {
-            tripIdx: -1,
-            stopIdx: -1,
-            seqIdx: -1,
-            arrIdx: -1,
-            depIdx: -1,
-            pickupIdx: -1,
-            dropoffIdx: -1
-          };
-          
-          rawHeaders.forEach((h, i) => {
-            const normalized = normalizeKey(h);
-            if (normalized === 'trip_id') headers.tripIdx = i;
-            else if (normalized === 'stop_id') headers.stopIdx = i;
-            else if (normalized === 'stop_sequence') headers.seqIdx = i;
-            else if (normalized === 'arrival_time') headers.arrIdx = i;
-            else if (normalized === 'departure_time') headers.depIdx = i;
-            else if (normalized === 'pickup_type') headers.pickupIdx = i;
-            else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
-          });
-          
-          if (headers.tripIdx === -1 || headers.stopIdx === -1) {
-            throw new Error('Brakuje wymaganych kolumn w stop_times.txt: trip_id lub stop_id');
-          }
-          return;
-        }
-        
-        // ═══ NATIVE SPLIT - 100x faster than smartSplit! ═══
-        const cols = line.split(',');
-        
-        if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
-        
-        const tripId = getCol(cols, headers.tripIdx);
-        const stopId = getCol(cols, headers.stopIdx);
-        
-        if (!tripId || !stopId) return;
-        
-        if (!stopTimesIndex[tripId]) {
-          stopTimesIndex[tripId] = [];
-        }
-        
-        stopTimesIndex[tripId].push({
-          stop_id: stopId,
-          arrival_time: getCol(cols, headers.arrIdx),
-          departure_time: getCol(cols, headers.depIdx),
-          stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
-          pickup_type: getCol(cols, headers.pickupIdx) || '0',  // ← Removed String()
-          drop_off_type: getCol(cols, headers.dropoffIdx) || '0'  // ← Removed String()
-        });
-        
-        lineCount++;
-        if (lineCount % PROGRESS_UPDATE_INTERVAL === 0) {  // ← Less frequent
-          state.loadingProgress = lineCount;
-          if (onProgress) {
-            onProgress(lineCount, Math.min(99, Math.round(lineCount / ESTIMATED_LINES_FOR_PROGRESS * 100)));
-          }
-        }
-      };
-      
-      let offset = 0;
-      while (offset < arrayBuffer.byteLength) {
-        try {
-          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
-          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
-          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
-          const text = decoder.decode(chunk, { stream: !isLastChunk });
-          buffer += text;
-          
-          let newlineIndex;
-          // Optimize: Use lastIndexOf to process multiple lines at once
-          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.slice(0, newlineIndex); // slice is faster for large strings
-            processLine(line);
-            buffer = buffer.slice(newlineIndex + 1);
-          }
-          
-          offset = chunkEnd;
-        } catch (err) {
-          console.error('Error processing chunk at offset', offset, ':', err);
-          // Continue processing next chunk instead of failing completely
-          offset = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
-        }
-      }
-      
-      if (buffer.trim()) {
-        try {
-          processLine(buffer);
-        } catch (err) {
-          console.error('Error processing final buffer:', err);
-        }
-      }
-      
-      // Sort (same as before)
-      Object.keys(stopTimesIndex).forEach(tripId => {
-        stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
-      });
-      
-      if (onProgress) onProgress(lineCount, 100);
-      resolve(stopTimesIndex);
-      
-    } catch(err) {
-      reject(err);
-    }
-  });
-}
-
-    function parseShapesWithWorker(zipFileEntry, onProgress) {
-      return new Promise(async (resolve, reject) => {
-        try {
-          const text = await zipFileEntry.async('string');
-          
-          const workerCode = `
-            const KEY_ALIAS = {
-              'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
-              'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
-              'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
-              'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
-              'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
-              'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
-              'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
-              'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
-              'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
-              'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date',
-              'shape id':'shape_id','shape_id':'shape_id','shape pt lat':'shape_pt_lat','shape_pt_lat':'shape_pt_lat',
-              'shape pt lon':'shape_pt_lon','shape_pt_lon':'shape_pt_lon','shape pt sequence':'shape_pt_sequence','shape_pt_sequence':'shape_pt_sequence'
-            };
-            
-            function normalizeKey(k) {
-              if (k === null || k === undefined) return k;
-              let key = String(k).replace(/^\\uFEFF/,'').trim().toLowerCase();
-              return KEY_ALIAS[key] || key.replace(/\\s+/g,'_');
-            }
-            
-            function smartSplit(line) {
-              if (!line.includes('"')) {
-                return line.split(',');
-              }
-              
-              const cols = [];
-              let current = '';
-              let inQuotes = false;
-              
-              for (let i = 0; i < line.length; i++) {
-                const char = line[i];
-                
-                if (char === '"') {
-                  if (i + 1 < line.length && line[i+1] === '"') {
-                    current += '"';
-                    i++;
-                  } else {
-                    inQuotes = !inQuotes;
-                  }
-                } else if (char === ',' && !inQuotes) {
-                  cols.push(current);
-                  current = '';
-                } else {
-                  current += char;
-                }
-              }
-              cols.push(current);
-              return cols;
-            }
-            
-            self.onmessage = function(e) {
-              const text = e.data.text;
-              const lines = text.split(/\\r?\\n/);
-              
-              if (lines.length === 0) {
-                self.postMessage({ type: 'done', shapesIndex: {} });
-                return;
-              }
-              
-              const headerLine = lines[0];
-              const rawHeaders = smartSplit(headerLine);
-              const headers = rawHeaders.map(h => normalizeKey(h));
-              
-              const shapeIdIdx = headers.indexOf('shape_id');
-              const latIdx = headers.indexOf('shape_pt_lat');
-              const lonIdx = headers.indexOf('shape_pt_lon');
-              const seqIdx = headers.indexOf('shape_pt_sequence');
-              
-              if (shapeIdIdx === -1 || latIdx === -1 || lonIdx === -1 || seqIdx === -1) {
-                self.postMessage({ 
-                  type: 'error', 
-                  message: 'shapes.txt missing required fields' 
-                });
-                return;
-              }
-              
-              const shapesData = {};
-              let processedRows = 0;
-              const totalRows = lines.length - 1;
-              
-              // Parse all rows
-              for (let i = 1; i < lines.length; i++) {
-                const line = lines[i].trim();
-                if (!line) continue;
-                
-                const cols = smartSplit(line);
-                const shapeId = cols[shapeIdIdx];
-                const lat = parseFloat(cols[latIdx]);
-                const lon = parseFloat(cols[lonIdx]);
-                const seq = parseInt(cols[seqIdx] || '0', 10);
-                
-                if (!shapeId || isNaN(lat) || isNaN(lon)) continue;
-                
-                if (!shapesData[shapeId]) {
-                  shapesData[shapeId] = [];
-                }
-                
-                shapesData[shapeId].push({ lat, lon, seq });
-                processedRows++;
-                
-                // Report progress every 10000 rows
-                if (processedRows % 10000 === 0) {
-                  const percent = Math.round((processedRows / totalRows) * 100);
-                  self.postMessage({ 
-                    type: 'progress', 
-                    processed: processedRows,
-                    total: totalRows,
-                    percent 
-                  });
-                }
-              }
-              
-              const shapesIndex = {};
-              Object.keys(shapesData).forEach(shapeId => {
-                const points = shapesData[shapeId];
-                points.sort((a, b) => a.seq - b.seq);
-                shapesIndex[shapeId] = points.map(p => [p.lat, p.lon]);
-              });
-              
-              self.postMessage({ 
-                type: 'done', 
-                shapesIndex,
-                shapeCount: Object.keys(shapesIndex).length,
-                pointCount: processedRows
-              });
-            };
-          `;
-          
-          const blob = new Blob([workerCode], { type: 'application/javascript' });
-          const workerUrl = URL.createObjectURL(blob);
-          const worker = new Worker(workerUrl);
-          state.currentWorker = worker;
-          
-          worker.onmessage = function(ev) {
-            const msg = ev.data;
-            
-            if (msg.type === 'progress') {
-              if (onProgress) {
-                onProgress(msg.processed, msg.percent);
-              }
-            } else if (msg.type === 'done') {
-              state.currentWorker = null;
-              URL.revokeObjectURL(workerUrl);
-              resolve(msg.shapesIndex);
-            } else if (msg.type === 'error') {
-              state.currentWorker = null;
-              URL.revokeObjectURL(workerUrl);
-              reject(new Error(msg.message));
-            }
-          };
-          
-          worker.onerror = function(ev) {
-            state.currentWorker = null;
-            URL.revokeObjectURL(workerUrl);
-            reject(new Error(ev.message || 'Worker parse error'));
-          };
-          
-          // Start parsing
-          worker.postMessage({ text });
-          
-        } catch(err) {
-          reject(err);
-        }
-      });
-    }
-
     async function unzipWithFflate(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -3119,6 +2818,64 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       });
     }
 
+    async function unzipLargeFile(file) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          // Use zip.js for large files with streaming support
+          const blobReader = new zip.BlobReader(file);
+          const zipReader = new zip.ZipReader(blobReader);
+          
+          const entries = await zipReader.getEntries();
+          const files = {};
+          
+          let processedEntries = 0;
+          const totalEntries = entries.filter(entry => !entry.directory).length;
+          
+          for (const entry of entries) {
+            // Skip directories
+            if (entry.directory) continue;
+            
+            processedEntries++;
+            
+            // Update progress during decompression
+            if (state && state.loadingStep) {
+              const percent = Math.round((processedEntries / totalEntries) * 100);
+              state.loadingStep = `Decompressing large ZIP: ${processedEntries}/${totalEntries} files (${percent}%)`;
+              if (typeof render === 'function') render();
+            }
+            
+            // Get the data as Uint8Array
+            const data = await entry.getData(new zip.Uint8ArrayWriter());
+            
+            files[entry.filename] = {
+              name: entry.filename,
+              _data: data,
+              async: function(type) {
+                return Promise.resolve().then(() => {
+                  if (type === 'string') {
+                    const decoder = new TextDecoder('utf-8');
+                    return decoder.decode(this._data);
+                  } else if (type === 'arraybuffer') {
+                    return this._data.buffer.slice(this._data.byteOffset, this._data.byteOffset + this._data.byteLength);
+                  } else if (type === 'uint8array') {
+                    return this._data;
+                  } else if (type === 'blob') {
+                    return new Blob([this._data]);
+                  }
+                  return this._data;
+                });
+              }
+            };
+          }
+          
+          await zipReader.close();
+          resolve({ files });
+        } catch (err) {
+          reject(new Error('Failed to decompress large ZIP: ' + err.message));
+        }
+      });
+    }
+
     function findFile(filesObj, filename) {
       const lowerFilename = filename.toLowerCase();
       
@@ -3170,10 +2927,22 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
       try {
-        // Use fflate for fast ZIP decompression
-        state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
+        // Use size-based decompression strategy
         perfTimings.unzipStart = performance.now();
-        const zip = await unzipWithFflate(file);
+        const fileSizeMB = file.size / (1024 * 1024);
+        let zip;
+        
+        if (fileSizeMB < 100) {
+          // Use fflate for small/medium files (fast)
+          state.loadingStep = `Decompressing ZIP with fflate (${fileSizeMB.toFixed(1)}MB)...`; 
+          render();
+          zip = await unzipWithFflate(file);
+        } else {
+          // Use zip.js for large files (streaming, handles >100MB)
+          state.loadingStep = `Decompressing large ZIP with streaming (${fileSizeMB.toFixed(1)}MB)...`; 
+          render();
+          zip = await unzipLargeFile(file);
+        }
         perfTimings.unzipEnd = performance.now();
         
         state.loadingStep = 'Wyodrębnianie plików...'; render();
@@ -3188,28 +2957,29 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         }
 
 // ==========================================
-// PARALLEL LOADING & PARSING - parse CSV files synchronously
+// PARALLEL LOADING & PARSING - Use parseWithStrategy for all files
 // ==========================================
 state.loadingStep = 'Przetwarzanie plików GTFS...'; render();
 
 perfTimings.parseStart = performance.now();
 
-// Parse all CSV files synchronously (fastest approach)
+// Parse all CSV files using parseWithStrategy (auto-selects sync/parallel based on size)
 const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
-  routesFile.async('string').then(text => parseCSV(text)),
-  tripsFile.async('string').then(text => parseCSV(text)),
-  stopsFile.async('string').then(text => parseCSV(text)),
-  calendarFile ? calendarFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
+  routesFile.async('string').then(text => parseWithStrategy(text, 'routes.txt', null)),
+  tripsFile.async('string').then(text => parseWithStrategy(text, 'trips.txt', null)),
+  stopsFile.async('string').then(text => parseWithStrategy(text, 'stops.txt', null)),
+  calendarFile ? calendarFile.async('string').then(text => parseWithStrategy(text, 'calendar.txt', null)) : Promise.resolve([]),
+  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseWithStrategy(text, 'calendar_dates.txt', null)) : Promise.resolve([]),
+  agenciesFile ? agenciesFile.async('string').then(text => parseWithStrategy(text, 'agency.txt', null)) : Promise.resolve([])
 ]);
 
 perfTimings.parseEnd = performance.now();
 
-        state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
+        // Parse stop_times with parseWithStrategy (will use parallel workers if >25MB)
         perfTimings.stopTimesStart = performance.now();
-        const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
-          state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
+        const stopTimesText = await stopTimesFile.async('string');
+        const stopTimesIndex = await parseWithStrategy(stopTimesText, 'stop_times.txt', (rowsProcessed, percent) => {
+          state.loadingStep = `Parsing stop_times: ${rowsProcessed.toLocaleString()} rows`;
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
@@ -3217,11 +2987,11 @@ perfTimings.parseEnd = performance.now();
         
         let shapesIndex = {};
         if (shapesFile) {
-          state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
           perfTimings.shapesStart = performance.now();
           try {
-            const rawShapes = await parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
-              state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
+            const shapesText = await shapesFile.async('string');
+            const rawShapes = await parseWithStrategy(shapesText, 'shapes.txt', (rowsProcessed, percent) => {
+              state.loadingStep = `Parsing shapes: ${rowsProcessed.toLocaleString()} points`;
               state.loadingProgressPercent = percent || state.loadingProgressPercent;
               render();
             });
