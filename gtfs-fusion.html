@@ -1277,7 +1277,7 @@ async function parseWithStrategy(text, fileName, onProgress) {
   
   // Use sync parser for small files (no worker overhead)
   if (fileSizeMB < WORKER_THRESHOLD_MB) {
-    console.log(\`[Parse] \${fileName}: sync mode (\${fileSizeMB.toFixed(1)}MB)\`);
+    console.log('[Parse] ' + fileName + ': sync mode (' + fileSizeMB.toFixed(1) + 'MB)');
     
     // Call EXISTING parseCSV function (DO NOT CHANGE)
     const records = parseCSV(text);
@@ -1303,7 +1303,7 @@ async function parseWithStrategy(text, fileName, onProgress) {
   }
   
   // Use workers for large files
-  console.log(\`[Parse] \${fileName}: worker mode (\${fileSizeMB.toFixed(1)}MB)\`);
+  console.log('[Parse] ' + fileName + ': worker mode (' + fileSizeMB.toFixed(1) + 'MB)');
   
   if (!globalWorkerPool) {
     globalWorkerPool = new WorkerPool(WORKER_POOL_SIZE);
@@ -1316,10 +1316,10 @@ async function parseWithStrategy(text, fileName, onProgress) {
       fileType: fileType
     });
     
-    console.log(\`[Parse] \${fileName}: \${result.length.toLocaleString()} records\`);
+    console.log('[Parse] ' + fileName + ': ' + result.length.toLocaleString() + ' records');
     return result;
   } catch (error) {
-    console.error(\`[Parse] \${fileName}: worker failed, falling back to sync\`, error);
+    console.error('[Parse] ' + fileName + ': worker failed, falling back to sync', error);
     // Fallback to existing sync parser
     return parseCSV(text);
   }
@@ -1329,7 +1329,6 @@ async function parseWithStrategy(text, fileName, onProgress) {
 // THROTTLED RENDERING (prevents UI thrashing)
 // ═══════════════════════════════════════════════════════════════
 
-let lastRenderTime = 0;
 let renderPending = false;
 
 function throttledRender() {
@@ -1367,7 +1366,7 @@ function getVariantCacheKey() {
     ? getLogicalRouteKeyFromGroup(state.selectedRouteGroup)
     : state.selectedRoute.route_id;
   
-  return \`\${routeKey}_\${state.selectedDirection}_\${state.selectedDate}\`;
+  return routeKey + '_' + state.selectedDirection + '_' + state.selectedDate;
 }
 
 async function getVariantsDataAsync() {
@@ -1399,7 +1398,7 @@ async function getVariantsDataAsync() {
   const variantsData = computeVariantsForRoute();
   
   const duration = performance.now() - startTime;
-  console.log(\`[Variant] Computed in \${duration.toFixed(0)}ms\`);
+  console.log('[Variant] Computed in ' + duration.toFixed(0) + 'ms');
   
   variantCache.set(cacheKey, variantsData);
   variantInProgress.delete(cacheKey);
