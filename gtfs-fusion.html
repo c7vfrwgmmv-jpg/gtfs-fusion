@@ -2107,7 +2107,8 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             // Use fflate.unzip to decompress
             fflate.unzip(uint8Array, (err, unzipped) => {
               if (err) {
-                reject(new Error('Failed to decompress ZIP: ' + (err.message || err || 'Unknown error')));
+                reject(new Error('Failed to decompress ZIP: ' + (err.message || String(err) || 'Unknown error') + 
+                  '. File might be corrupted, not a valid ZIP, or too large. Try a different GTFS file.'));
                 return;
               }
               
@@ -2451,6 +2452,7 @@ function createAgenciesIndexProxy() {
         state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; 
         render();
         perfTimings.unzipStart = performance.now();
+        console.log('Attempting to unzip file:', file.name, 'Size:', file.size, 'bytes');
         const zip = await unzipWithFflate(file);
         perfTimings.unzipEnd = performance.now();
         
