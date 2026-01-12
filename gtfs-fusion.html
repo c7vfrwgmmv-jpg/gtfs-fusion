@@ -2437,6 +2437,101 @@ function convertSQLResultToObjects(sqlResult) {
   });
 }
 
+// SQL-backed data accessors (replaces old indexes)
+function getRoutesFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM routes');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+function getTripsFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM trips');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+function getStopsFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM stops');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+function getAgenciesFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM agencies');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+// Create lazy-loading proxy for indexes that queries SQL on demand
+function createTripsIndexProxy() {
+  return new Proxy({}, {
+    get(target, routeId) {
+      if (!db) return [];
+      const result = db.exec('SELECT * FROM trips WHERE route_id = ?', [routeId]);
+      return result[0] ? convertSQLResultToObjects(result[0]) : [];
+    }
+  });
+}
+
+function createStopsIndexProxy() {
+  return new Proxy({}, {
+    get(target, stopId) {
+      if (!db) return null;
+      const result = db.exec('SELECT * FROM stops WHERE stop_id = ? LIMIT 1', [stopId]);
+      return result[0] && result[0].values[0] ? convertSQLResultToObjects(result[0])[0] : null;
+    }
+  });
+}
+
+function createStopTimesIndexProxy() {
+  return new Proxy({}, {
+    get(target, tripId) {
+      if (!db) return [];
+      const result = db.exec(\`
+        SELECT * FROM stop_times 
+        WHERE trip_id = ? 
+        ORDER BY stop_sequence
+      \`, [tripId]);
+      return result[0] ? convertSQLResultToObjects(result[0]) : [];
+    }
+  });
+}
+
+function createShapesIndexProxy() {
+  // Cache shapes in memory after first query (they're used frequently)
+  const cache = {};
+  return new Proxy({}, {
+    get(target, shapeId) {
+      if (cache[shapeId]) return cache[shapeId];
+      if (!db) return null;
+      
+      const result = db.exec(\`
+        SELECT shape_pt_lat, shape_pt_lon, shape_pt_sequence 
+        FROM shapes 
+        WHERE shape_id = ? 
+        ORDER BY shape_pt_sequence
+      \`, [shapeId]);
+      
+      if (result[0] && result[0].values.length > 0) {
+        const coords = result[0].values.map(row => [row[0], row[1]]);
+        cache[shapeId] = coords;
+        return coords;
+      }
+      return null;
+    }
+  });
+}
+
+function createAgenciesIndexProxy() {
+  return new Proxy({}, {
+    get(target, agencyId) {
+      if (!db) return null;
+      const result = db.exec('SELECT * FROM agencies WHERE agency_id = ? LIMIT 1', [agencyId]);
+      return result[0] && result[0].values[0] ? convertSQLResultToObjects(result[0])[0] : null;
+    }
+  });
+}
+
     async function handleFileUpload(e) {
       const file = e.target.files[0]; if (!file) return;
       
@@ -2545,19 +2640,36 @@ function convertSQLResultToObjects(sqlResult) {
         lastStopsDataHash = null;
         
         // Temporary: Maintain minimal compatibility structure
+        // Populate state.gtfsData with SQL-backed proxies
+        const routes = getRoutesFromDB();
+        const trips = getTripsFromDB();
+        const stops = getStopsFromDB();
+        const agencies = getAgenciesFromDB();
+        
+        // Build agencies index
+        const agenciesIndex = {};
+        agencies.forEach(a => {
+          if (a && (a.agency_id || a.agency_name)) {
+            agenciesIndex[a.agency_id || a.agency_name] = a;
+          }
+        });
+        
+        const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
+        
         state.gtfsData = {
-          routes: [], // Will be queried from SQL as needed
-          agencies: [],
-          agenciesIndex: {},
+          routes,
+          agencies,
+          agenciesIndex,
           calendar,
           calendarDates,
-          stopTimesIndex: {}, // Deprecated - use SQL queries
-          stopsIndex: {}, // Deprecated - use SQL queries
-          tripsIndex: {}, // Deprecated - use SQL queries
-          logicalRoutes: [],
-          trips: [],
-          stops: [],
-          shapesIndex: {}
+          stopTimesIndex: createStopTimesIndexProxy(), // SQL-backed proxy
+          stopsIndex: createStopsIndexProxy(), // SQL-backed proxy
+          tripsIndex: createTripsIndexProxy(), // SQL-backed proxy
+          logicalRoutes,
+          trips,
+          stops,
+          shapesIndex: createShapesIndexProxy() // SQL-backed proxy
+        };
         };
         
         state.selectedRouteGroup = null;
