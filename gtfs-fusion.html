@@ -2768,6 +2768,7 @@ async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stop
   const headsignSuccess = tryAssignDirectionByHeadsign(trips);
   if (headsignSuccess) {
     // Headsign method worked - skip geometry analysis
+    // Report 100% progress (processed=1, total=1, percent=100)
     if (onProgress) onProgress(1, 1, 100);
     return;
   }
