@@ -3773,56 +3773,6 @@ function buildRouteProfileForCurrentSelection() {
     });
   });
 
-  // Build stationMergeAllowed based on consecutive PASSENGER stop check
-  // Simple rule: If ANY consecutive passenger stops at same station → don't merge
-  console.log(`[DEBUG] Checking consecutive PASSENGER stops for merge policy...`);
-  
-  const stationsWithConsecutiveStops = new Set();
-  const allStations = new Set();
-  
-  allTripStationData.forEach(({ stationIds, stopIds, tripId }) => {
-    // Filter to only passenger stops (exclude tail/depot stops)
-    const passengerStationIds = [];
-    const passengerStopIds = [];
-    
-    for (let i = 0; i < stopIds.length; i++) {
-      const stopId = stopIds[i];
-      const nodeType = nodeTypes[stopId];
-      
-      // Only include passenger and core stops (exclude tail)
-      if (nodeType !== 'tail') {
-        passengerStationIds.push(stationIds[i]);
-        passengerStopIds.push(stopId);
-        allStations.add(stationIds[i]);
-      }
-    }
-    
-    // Check for ANY consecutive stops (among passenger stops only)
-    for (let i = 0; i < passengerStationIds.length - 1; i++) {
-      if (passengerStationIds[i] === passengerStationIds[i + 1]) {
-        stationsWithConsecutiveStops.add(passengerStationIds[i]);
-        console.log(`[DEBUG] Station "${passengerStationIds[i]}" has consecutive PASSENGER stops in trip ${tripId}`);
-        console.log(`  stopIds: ${passengerStopIds[i]} → ${passengerStopIds[i + 1]}`);
-        console.log(`  → Will NOT merge (consecutive stops detected)`);
-      }
-    }
-  });
-  
-  // Only allow merging for stations without consecutive stops
-  const stationMergeAllowed = new Set();
-  allStations.forEach(stationId => {
-    if (!stationsWithConsecutiveStops.has(stationId)) {
-      stationMergeAllowed.add(stationId);
-    }
-  });
-  
-  // Debug: Log merge policy for all stations
-  console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir}:`);
-  allStations.forEach(stationId => {
-    const allowed = stationMergeAllowed.has(stationId);
-    console.log(`  "${stationId}": ${allowed ? 'MERGE allowed' : 'NO MERGE (consecutive stops)'}`);
-  });
-
   // 8. Collect detailed stop metadata (pickup/drop_off types, positions in routes)
   const stopMetadata = {}; // stop_id → { hasPickup1: bool, hasDropOff1: bool, isOnDemand: bool, isFirstWithNoPickup: bool, isLastWithNoDropOff: bool }
   
@@ -3948,6 +3898,48 @@ function buildRouteProfileForCurrentSelection() {
       firstCoreIdx: firstCoreIdx,
       lastCoreIdx: lastCoreIdx
     };
+  });
+
+  // Build stationMergeAllowed based on ACTUAL displayed stops (pStops)
+  // Rule: If ANY consecutive stops at same station in the displayed sequence → don't merge
+  console.log(`[DEBUG] Checking consecutive stops in DISPLAYED sequences (pStops) for merge policy...`);
+  
+  const stationsWithConsecutiveStops = new Set();
+  const allStations = new Set();
+  
+  Object.entries(processedTrips).forEach(([tripId, tripData]) => {
+    const pStops = tripData.pStops || [];
+    
+    // Get station IDs for the displayed stops
+    const displayedStationIds = pStops.map(st => getStationId(st.stop_id, stopsIndex));
+    
+    // Collect all stations
+    displayedStationIds.forEach(stationId => allStations.add(stationId));
+    
+    // Check for consecutive stops in the DISPLAYED sequence
+    for (let i = 0; i < displayedStationIds.length - 1; i++) {
+      if (displayedStationIds[i] === displayedStationIds[i + 1]) {
+        stationsWithConsecutiveStops.add(displayedStationIds[i]);
+        console.log(`[DEBUG] Station "${displayedStationIds[i]}" has consecutive stops in DISPLAYED trip ${tripId}`);
+        console.log(`  stopIds: ${pStops[i].stop_id} → ${pStops[i + 1].stop_id}`);
+        console.log(`  → Will NOT merge (consecutive in displayed table)`);
+      }
+    }
+  });
+  
+  // Only allow merging for stations without consecutive stops in displayed sequences
+  const stationMergeAllowed = new Set();
+  allStations.forEach(stationId => {
+    if (!stationsWithConsecutiveStops.has(stationId)) {
+      stationMergeAllowed.add(stationId);
+    }
+  });
+  
+  // Debug: Log merge policy for all stations
+  console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir} (based on DISPLAYED stops):`);
+  allStations.forEach(stationId => {
+    const allowed = stationMergeAllowed.has(stationId);
+    console.log(`  "${stationId}": ${allowed ? 'MERGE allowed' : 'NO MERGE (consecutive in table)'}`);
   });
 
   // 11. Save profile to state
