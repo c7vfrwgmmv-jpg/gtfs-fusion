@@ -2870,7 +2870,7 @@ function generateAvailableDates(calendar, calendarDates) {
 }
 	  
 function getServicesForDate(dateStr) {
-  if (!state.gtfsData) return [];
+  if (!db) return [];
   
   // Helper: get day of week from GTFS date string (YYYYMMDD)
   const getDayOfWeek = (gtfsDate) => {
@@ -2883,19 +2883,36 @@ function getServicesForDate(dateStr) {
   const dayOfWeek = DAY_NAMES[getDayOfWeek(dateStr)];
   const services = new Set();
   
-  // ✅ String comparison instead of Date
-  state.gtfsData.calendar.forEach(cal => {
-    if (dateStr >= cal.start_date && dateStr <= cal.end_date && cal[dayOfWeek] === '1') {
-      services.add(cal.service_id);
-    }
-  });
+  // Query calendar for regular service
+  const calendarResult = db.exec(`
+    SELECT service_id 
+    FROM calendar 
+    WHERE start_date <= ? 
+      AND end_date >= ? 
+      AND ${dayOfWeek} = '1'
+  `, [dateStr, dateStr]);
   
-  // ✅ String equality check
-  if (state.gtfsData.calendarDates) {
-    state.gtfsData.calendarDates.forEach(cd => {
-      if (cd.date === dateStr) {
-        if (cd.exception_type === '1') services.add(cd.service_id);
-        else if (cd.exception_type === '2') services.delete(cd.service_id);
+  if (calendarResult[0]) {
+    calendarResult[0].values.forEach(row => {
+      services.add(row[0]);
+    });
+  }
+  
+  // Query calendar_dates for exceptions
+  const exceptionsResult = db.exec(`
+    SELECT service_id, exception_type 
+    FROM calendar_dates 
+    WHERE date = ?
+  `, [dateStr]);
+  
+  if (exceptionsResult[0]) {
+    exceptionsResult[0].values.forEach(row => {
+      const serviceId = row[0];
+      const exceptionType = row[1];
+      if (exceptionType === 1 || exceptionType === '1') {
+        services.add(serviceId);
+      } else if (exceptionType === 2 || exceptionType === '2') {
+        services.delete(serviceId);
       }
     });
   }
