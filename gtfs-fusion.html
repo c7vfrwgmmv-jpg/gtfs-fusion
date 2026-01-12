@@ -3421,12 +3421,23 @@ lastStopsDataHash = null;
 state.routeProfiles = {};  // Clear cached route profiles
 state.canonicalMasterLists = {};  // Clear cached master lists
 
+// Build calendar_dates index ONCE during load (performance optimization)
+const calendarDatesByDateIndex = new Map();
+calendarDates.forEach(cd => {
+  if (!cd.date) return;
+  if (!calendarDatesByDateIndex. has(cd.date)) {
+    calendarDatesByDateIndex. set(cd.date, []);
+  }
+  calendarDatesByDateIndex.get(cd. date).push(cd);
+});
+	  
 state.gtfsData = {
   routes,
   agencies,
   agenciesIndex,
   calendar,
   calendarDates,
+	calendarDatesByDateIndex
   stopTimesIndex,
   stopTimesDB,
   stopTimesDbName,
