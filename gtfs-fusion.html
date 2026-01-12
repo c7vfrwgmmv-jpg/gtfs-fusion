@@ -4026,32 +4026,30 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   const stationToAllStopIds = new Map(); // Will store Arrays, not Sets
   
   sortedTrips.forEach(trip => {
-    const stationStopsInTrip = new Map(); // stationId → Set(stop_id)
     const stops = tripStopMaps[trip.trip_id] || [];
     
-    stops.forEach(stopTime => {
-      const stopId = stopTime.stop_id;
+    // Check for consecutive stops at the same station
+    for (let i = 0; i < stops.length; i++) {
+      const stopId = stops[i].stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-      
-      // Track stops per station in this trip
-      if (!stationStopsInTrip.has(stationId)) {
-        stationStopsInTrip.set(stationId, new Set());
-      }
-      stationStopsInTrip.get(stationId).add(stopId);
       
       // Collect all platforms globally
       if (!stationToAllStopIds.has(stationId)) {
         stationToAllStopIds.set(stationId, new Set());
       }
       stationToAllStopIds.get(stationId).add(stopId);
-    });
-    
-    // If trip has >1 stop_id for a station → mark for splitting
-    stationStopsInTrip.forEach((stopIds, stationId) => {
-      if (stopIds.size > 1) {
-        stationRequiresSplit.add(stationId);
+      
+      // Check if next stop is at the same station (consecutive stops)
+      if (i + 1 < stops.length) {
+        const nextStopId = stops[i + 1].stop_id;
+        const nextStationId = getStationIdWithPolicy(nextStopId, stopsIndex, allowedSet);
+        
+        // If consecutive stops are at the same station, mark for splitting
+        if (stationId === nextStationId) {
+          stationRequiresSplit.add(stationId);
+        }
       }
-    });
+    }
   });
   
   // Convert Sets to Arrays once for efficiency
