@@ -1431,9 +1431,34 @@ function getTripStopSequence(tripId, stopTimesIndex) {
   if (!stopTimes || stopTimes.length === 0) return [];
   return stopTimes.map(st => st.stop_id);
 }
-function isCircularRoute(stopSequence) {
-  if (!stopSequence || stopSequence.length < 2) return false;
-  return stopSequence[0] === stopSequence[stopSequence.length - 1];
+function isCircularRoute(sequence) {
+  if (sequence.length === 0) return false;
+  
+  // Sprawdź czy pierwszy == ostatni
+  if (sequence[0] !== sequence[sequence.length - 1]) {
+    return false; // Nie zaczyna i kończy w tym samym miejscu
+  }
+  
+  // ✅ NOWE: Sprawdź czy to prawdziwa pętla, czy wahadło
+  // Prawdziwa pętla: A→B→C→D→A (bez backtracking)
+  // Wahadło: A→B→C→B→A (wraca tą samą drogą)
+  
+  // Jeśli długość < 4, to nie może być pętlą
+  if (sequence.length < 4) {
+    return false; // Za krótka na pętlę
+  }
+  
+  // Sprawdź czy sekwencja jest palindromem (A→B→C→B→A)
+  const halfLen = Math.floor(sequence. length / 2);
+  for (let i = 1; i <= halfLen; i++) {
+    if (sequence[i] === sequence[sequence.length - 1 - i]) {
+      // Znaleziono matching - prawdopodobnie wahadło
+      return false;
+    }
+  }
+  
+  // Jeśli pierwszy == ostatni, ale NIE jest palindromem → prawdziwa pętla
+  return true;
 }
 // Helper function to process a single route's direction enrichment
 function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
