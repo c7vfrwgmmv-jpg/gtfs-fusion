@@ -3425,10 +3425,10 @@ state.canonicalMasterLists = {};  // Clear cached master lists
 const calendarDatesByDateIndex = new Map();
 calendarDates.forEach(cd => {
   if (!cd.date) return;
-  if (!calendarDatesByDateIndex. has(cd.date)) {
-    calendarDatesByDateIndex. set(cd.date, []);
+  if (!calendarDatesByDateIndex.has(cd.date)) {
+    calendarDatesByDateIndex.set(cd.date, []);
   }
-  calendarDatesByDateIndex.get(cd. date).push(cd);
+  calendarDatesByDateIndex.get(cd.date).push(cd);
 });
 	  
 state.gtfsData = {
@@ -3437,7 +3437,7 @@ state.gtfsData = {
   agenciesIndex,
   calendar,
   calendarDates,
-	calendarDatesByDateIndex
+  calendarDatesByDateIndex,
   stopTimesIndex,
   stopTimesDB,
   stopTimesDbName,
@@ -3754,19 +3754,19 @@ function generateAvailableDates(calendar, calendarDates) {
   });
   
   // 🆕 KROK 3: Dodaj daty z calendar_dates.txt (exception_type=1)
-  calendarDates.forEach(cd => {
-    if (cd.exception_type === '1' && !dateServiceCounts.has(cd.date)) {
-      // Nowa data nie w calendar.txt - policz serwisy (using indexed lookup)
+  // ✅ OPTIMIZED: Iterate only through unique dates (~few thousand) instead of all records (3.8M)
+  calendarDatesByDate.forEach((exceptions, dateStr) => {
+    if (!dateServiceCounts.has(dateStr)) {
+      // Nowa data nie w calendar.txt - policz serwisy
       const services = new Set();
       
-      const exceptionsForDate = calendarDatesByDate.get(cd.date);
-      if (exceptionsForDate) {
-        exceptionsForDate.forEach(cd2 => {
-          if (cd2.exception_type === '1') services.add(cd2.service_id);
-        });
-      }
+      exceptions.forEach(cd => {
+        if (cd.exception_type === '1') services.add(cd.service_id);
+      });
       
-      dateServiceCounts.set(cd.date, services.size);
+      if (services.size > 0) {
+        dateServiceCounts.set(dateStr, services.size);
+      }
     }
   });
   
@@ -3810,7 +3810,7 @@ function getServicesForDate(dateStr) {
   
   // ✅ FIXED: Use indexed lookup (requires calendarDatesByDateIndex in state)
   if (state.gtfsData.calendarDatesByDateIndex) {
-    const exceptionsForDate = state.gtfsData.calendarDatesByDateIndex. get(dateStr);
+    const exceptionsForDate = state.gtfsData.calendarDatesByDateIndex.get(dateStr);
     if (exceptionsForDate) {
       exceptionsForDate.forEach(cd => {
         if (cd.exception_type === '1') services.add(cd.service_id);
