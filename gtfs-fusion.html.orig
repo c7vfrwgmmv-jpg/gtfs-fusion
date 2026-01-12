@@ -1208,12 +1208,8 @@ function getWorkerPool() {
 }
 
 // Smart parsing strategy
-// NOTE: This function provides worker-based parsing infrastructure for future use.
-// Current code uses parseStopTimesStreamWithWorker and parseShapesWithWorker which
-// are optimized for streaming large files. This function can be used for other CSV
-// files (routes, trips, stops, etc.) if they become large enough to benefit from
-// worker-based parallelization (>5MB threshold).
 async function parseFileWithStrategy(fileText, fileName, fileSize, onProgress) {
+  const fileType = fileName.replace('.txt', '');
   const shouldUseWorker = fileSize > (5 * 1024 * 1024); // 5MB threshold per file
   
   if (!shouldUseWorker) {
@@ -1326,9 +1322,6 @@ function invalidateAllCaches() {
 
 let renderScheduled = false;
 
-  // NOTE: This throttled rendering function can be used during file uploads
-  // or other long-running operations to provide smooth progress updates.
-  // Currently, the existing render() function has its own throttling (RENDER_THROTTLE_MS).
 function throttledRender() {
   const now = performance.now();
   
@@ -6596,8 +6589,8 @@ async function renderTimetable() {
   
   // Show loading state for variants
   container.innerHTML = `
-    <div class="p-4 text-gray-500 flex items-center gap-2" role="status" aria-live="polite">
-      <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" aria-label="Loading variants"></div>
+    <div class="p-4 text-gray-500 flex items-center gap-2">
+      <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
       Loading variants...
     </div>
   `;
