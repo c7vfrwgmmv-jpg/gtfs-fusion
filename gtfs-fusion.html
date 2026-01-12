@@ -963,6 +963,386 @@ const simplifiedShapesCache = {};
 const TIME_PARSE_CACHE = new Map();
 
 // ═══════════════════════════════════════════════════════════════
+// WORKER-BASED PARSING SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+const PARSE_THRESHOLD_MB = 25; // Use workers if stop_times + shapes > 25MB
+const WORKER_POOL_SIZE = 4;
+const PROGRESS_THROTTLE_MS = 100; // 10 FPS max for progress updates
+
+// Worker code as string (will be converted to Blob URL)
+const CSV_PARSER_WORKER_CODE = `
+// Worker-side CSV parser
+const TO_RAD = Math.PI / 180;
+const TO_DEG = 180 / Math.PI;
+
+// Fast time parser (no allocations)
+const TIME_CACHE = new Map();
+function parseTimeFast(timeStr) {
+  if (!timeStr) return 0;
+  
+  if (TIME_CACHE.has(timeStr)) {
+    return TIME_CACHE.get(timeStr);
+  }
+  
+  // Fast parse: "08:30:00" → 8*60 + 30 = 510
+  const h = (timeStr.charCodeAt(0) - 48) * 10 + (timeStr.charCodeAt(1) - 48);
+  const m = (timeStr.charCodeAt(3) - 48) * 10 + (timeStr.charCodeAt(4) - 48);
+  const result = h * 60 + m;
+  
+  TIME_CACHE.set(timeStr, result);
+  return result;
+}
+
+// CSV parsing function
+function parseCSVInWorker(text, fileType) {
+  const lines = text.split('\\n');
+  if (lines.length === 0) return [];
+  
+  // Parse header
+  const headerLine = lines[0].replace(/^\\uFEFF/, '').trim();
+  const headers = headerLine.split(',').map(h => {
+    const key = h.trim().toLowerCase().replace(/\\s+/g, '_');
+    // Apply KEY_ALIAS mapping
+    const aliases = {
+      'stop_id': 'stop_id', 'stopid': 'stop_id',
+      'trip_id': 'trip_id', 'tripid': 'trip_id',
+      'route_id': 'route_id', 'routeid': 'route_id',
+      'shape_id': 'shape_id', 'shapeid': 'shape_id',
+      'stop_sequence': 'stop_sequence',
+      'arrival_time': 'arrival_time',
+      'departure_time': 'departure_time',
+      'shape_pt_lat': 'shape_pt_lat',
+      'shape_pt_lon': 'shape_pt_lon',
+      'shape_pt_sequence': 'shape_pt_sequence'
+    };
+    return aliases[key] || key;
+  });
+  
+  const records = [];
+  
+  // Parse data rows
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    const values = line.split(',');
+    const record = {};
+    
+    for (let j = 0; j < headers.length; j++) {
+      let value = values[j] || '';
+      value = value.replace(/^["']|["']$/g, '').trim();
+      record[headers[j]] = value;
+    }
+    
+    // Special handling for stop_times
+    if (fileType === 'stop_times') {
+      if (record.arrival_time) {
+        record.arrival_time = parseTimeFast(record.arrival_time);
+      }
+      if (record.departure_time) {
+        record.departure_time = parseTimeFast(record.departure_time);
+      }
+      if (record.stop_sequence) {
+        record.stop_sequence = parseInt(record.stop_sequence, 10);
+      }
+    }
+    
+    // Special handling for shapes
+    if (fileType === 'shapes') {
+      if (record.shape_pt_lat) {
+        record.shape_pt_lat = parseFloat(record.shape_pt_lat);
+      }
+      if (record.shape_pt_lon) {
+        record.shape_pt_lon = parseFloat(record.shape_pt_lon);
+      }
+      if (record.shape_pt_sequence) {
+        record.shape_pt_sequence = parseInt(record.shape_pt_sequence, 10);
+      }
+    }
+    
+    records.push(record);
+  }
+  
+  return records;
+}
+
+// Worker message handler
+self.onmessage = function(e) {
+  const { type, buffer, fileType, workerId } = e.data;
+  
+  if (type === 'parse') {
+    try {
+      const text = new TextDecoder().decode(buffer);
+      const parsed = parseCSVInWorker(text, fileType);
+      
+      self.postMessage({
+        type: 'result',
+        workerId,
+        fileType,
+        data: parsed,
+        recordCount: parsed.length
+      });
+    } catch (error) {
+      self.postMessage({
+        type: 'error',
+        workerId,
+        fileType,
+        error: error.message
+      });
+    }
+  }
+};
+`;
+
+// Create Blob URL for worker
+let workerBlobUrl = null;
+function getWorkerUrl() {
+  if (!workerBlobUrl) {
+    const blob = new Blob([CSV_PARSER_WORKER_CODE], { type: 'application/javascript' });
+    workerBlobUrl = URL.createObjectURL(blob);
+  }
+  return workerBlobUrl;
+}
+
+// Worker Pool Manager
+class WorkerPool {
+  constructor(size = WORKER_POOL_SIZE) {
+    this.size = size;
+    this.workers = [];
+    this.queue = [];
+    this.activeJobs = 0;
+    
+    // Initialize workers
+    const url = getWorkerUrl();
+    for (let i = 0; i < size; i++) {
+      this.workers.push({
+        id: i,
+        worker: new Worker(url),
+        busy: false
+      });
+    }
+  }
+  
+  async execute(task) {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject };
+      
+      const availableWorker = this.workers.find(w => !w.busy);
+      if (availableWorker) {
+        this.runJob(availableWorker, job);
+      } else {
+        this.queue.push(job);
+      }
+    });
+  }
+  
+  runJob(workerSlot, job) {
+    workerSlot.busy = true;
+    this.activeJobs++;
+    
+    const { task } = job;
+    const { buffer, fileType } = task;
+    
+    const messageHandler = (e) => {
+      const { type, data, error } = e.data;
+      
+      if (type === 'result') {
+        workerSlot.busy = false;
+        this.activeJobs--;
+        workerSlot.worker.removeEventListener('message', messageHandler);
+        
+        job.resolve(data);
+        
+        // Process queue
+        if (this.queue.length > 0) {
+          const nextJob = this.queue.shift();
+          this.runJob(workerSlot, nextJob);
+        }
+      } else if (type === 'error') {
+        workerSlot.busy = false;
+        this.activeJobs--;
+        workerSlot.worker.removeEventListener('message', messageHandler);
+        
+        job.reject(new Error(error));
+      }
+    };
+    
+    workerSlot.worker.addEventListener('message', messageHandler);
+    
+    // Transfer buffer (zero-copy)
+    workerSlot.worker.postMessage(
+      {
+        type: 'parse',
+        buffer: buffer,
+        fileType: fileType,
+        workerId: workerSlot.id
+      },
+      [buffer] // Transfer ownership
+    );
+  }
+  
+  terminate() {
+    this.workers.forEach(w => w.worker.terminate());
+    this.workers = [];
+    this.queue = [];
+  }
+  
+  getStats() {
+    return {
+      totalWorkers: this.size,
+      busyWorkers: this.workers.filter(w => w.busy).length,
+      queuedJobs: this.queue.length,
+      activeJobs: this.activeJobs
+    };
+  }
+}
+
+// Global worker pool instance
+let globalWorkerPool = null;
+function getWorkerPool() {
+  if (!globalWorkerPool) {
+    globalWorkerPool = new WorkerPool(WORKER_POOL_SIZE);
+  }
+  return globalWorkerPool;
+}
+
+// Smart parsing strategy
+async function parseFileWithStrategy(fileText, fileName, fileSize, onProgress) {
+  const fileType = fileName.replace('.txt', '');
+  const shouldUseWorker = fileSize > (5 * 1024 * 1024); // 5MB threshold per file
+  
+  if (!shouldUseWorker) {
+    // Small file: use synchronous parser (faster due to no overhead)
+    console.log(`[Parse] ${fileName}: Using sync mode (${(fileSize / 1024).toFixed(0)} KB)`);
+    return parseCSV(fileText);
+  }
+  
+  // Large file: use worker with transferable
+  console.log(`[Parse] ${fileName}: Using worker mode (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+  
+  const buffer = new TextEncoder().encode(fileText);
+  const pool = getWorkerPool();
+  
+  try {
+    const result = await pool.execute({
+      buffer: buffer.buffer,
+      fileType: fileType
+    });
+    
+    console.log(`[Parse] ${fileName}: Parsed ${result.length.toLocaleString()} records`);
+    return result;
+  } catch (error) {
+    console.error(`[Parse] ${fileName}: Worker error, falling back to sync`, error);
+    // Fallback to synchronous parsing
+    return parseCSV(fileText);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LAZY VARIANT COMPUTATION SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+const variantCache = new Map();
+const variantComputeQueue = new Set();
+
+// Utility sleep function
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getVariantCacheKey() {
+  if (!state.selectedRoute || !state.selectedDate) return null;
+  
+  const routeKey = state.selectedRouteGroup 
+    ? getLogicalRouteKeyFromGroup(state.selectedRouteGroup)
+    : state.selectedRoute.route_id;
+  
+  return `${routeKey}_${state.selectedDirection}_${state.selectedDate}`;
+}
+
+async function getVariantsDataAsync() {
+  const cacheKey = getVariantCacheKey();
+  if (!cacheKey) return null;
+  
+  // Check cache
+  if (variantCache.has(cacheKey)) {
+    console.log('[Variant] Cache HIT:', cacheKey);
+    return variantCache.get(cacheKey);
+  }
+  
+  // Check if already computing
+  if (variantComputeQueue.has(cacheKey)) {
+    console.log('[Variant] Already computing, waiting...');
+    // Wait for computation to finish
+    while (variantComputeQueue.has(cacheKey)) {
+      await sleep(50);
+    }
+    return variantCache.get(cacheKey);
+  }
+  
+  // Mark as computing
+  variantComputeQueue.add(cacheKey);
+  console.log('[Variant] Cache MISS, computing:', cacheKey);
+  
+  // Yield to browser to update UI
+  await sleep(0);
+  
+  const startTime = performance.now();
+  const variantsData = computeVariantsForRoute();
+  const duration = performance.now() - startTime;
+  
+  console.log(`[Variant] Computed in ${duration.toFixed(0)}ms`, {
+    trips: variantsData?.trips?.length || 0,
+    variants: Object.keys(variantsData?.variantDetails || {}).length
+  });
+  
+  // Cache result
+  variantCache.set(cacheKey, variantsData);
+  variantComputeQueue.delete(cacheKey);
+  
+  return variantsData;
+}
+
+function invalidateVariantCache() {
+  variantCache.clear();
+  variantComputeQueue.clear();
+  console.log('[Variant] Cache invalidated');
+}
+
+// Invalidate cache when data changes
+function invalidateAllCaches() {
+  invalidateVariantCache();
+  invalidateCanonicalCacheForCurrentSelection();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// THROTTLED RENDERING
+// ═══════════════════════════════════════════════════════════════
+
+let renderScheduled = false;
+
+function throttledRender() {
+  const now = performance.now();
+  
+  if (now - lastRenderTime < PROGRESS_THROTTLE_MS) {
+    // Too soon, schedule for later
+    if (!renderScheduled) {
+      renderScheduled = true;
+      setTimeout(() => {
+        renderScheduled = false;
+        lastRenderTime = performance.now();
+        render();
+      }, PROGRESS_THROTTLE_MS);
+    }
+    return;
+  }
+  
+  lastRenderTime = now;
+  render();
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
 
@@ -2426,6 +2806,20 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         enrichStart: 0,
         enrichEnd: 0
       };
+      
+      // Cleanup workers and caches from previous upload
+      if (globalWorkerPool) {
+        console.log('[Cleanup] Terminating worker pool');
+        globalWorkerPool.terminate();
+        globalWorkerPool = null;
+      }
+      
+      invalidateAllCaches();
+      
+      // Clear timing cache
+      if (TIME_PARSE_CACHE) {
+        TIME_PARSE_CACHE.clear();
+      }
       
       state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
       render();
@@ -5286,6 +5680,11 @@ function selectRoute(route) {
   // Invalidate canonical cache when route changes
   invalidateCanonicalCacheForCurrentSelection();
 
+  // Pre-compute variants in background (don't await)
+  getVariantsDataAsync().catch(err => {
+    console.error('[Variant] Pre-compute failed:', err);
+  });
+
   resetMap();
   render();
 }
@@ -6167,18 +6566,27 @@ function updateDeparturesTable() {
 // ═══════════════════════════════════════════════════════════════
 // 13. UI RENDERING - TIMETABLE
 // ═══════════════════════════════════════════════════════════════
-function renderTimetable() {
+async function renderTimetable() {
   const container = $('timetable-container'); 
   if (!container) return;
   
-  // Get variants data early to build dropdown
+  // Get trips first
   const trips = getAllTripsForRoute();
   if (trips.length === 0) {
     container.innerHTML = "<div class='p-4 text-gray-500'>No schedule available.</div>";
     return;
   }
   
-  const variantsData = computeVariantsForRoute();
+  // Show loading state for variants
+  container.innerHTML = `
+    <div class="p-4 text-gray-500 flex items-center gap-2">
+      <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+      Loading variants...
+    </div>
+  `;
+  
+  // Compute variants asynchronously
+  const variantsData = await getVariantsDataAsync();
   const tripToVariantGlobal = variantsData ? variantsData.tripToVariant : {};
   
   // Build variant dropdown options
@@ -6243,7 +6651,7 @@ function renderTimetable() {
       const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
       
       state.showAllTrips = !state.showAllTrips; 
-      renderTimetable(); 
+      renderTimetable().catch(err => console.error('renderTimetable error:', err)); 
       
       // Restore scroll position after render
       setTimeout(() => {
@@ -6267,7 +6675,7 @@ function renderTimetable() {
         state.selectedVariant = state.selectedVariantFilter;
       }
       
-      renderTimetable();
+      renderTimetable().catch(err => console.error('renderTimetable error:', err));
       
       // Update map to show the selected variant
       if (typeof updateMap === 'function') {
@@ -7900,7 +8308,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
 if (state.gtfsData && !state.selectedRoute && state.showStopsView && !state.selectedStop) renderStopsView();
 if (state.gtfsData && state.selectedRoute) { 
   try {
-    renderTimetable(); 
+    renderTimetable().catch(err => console.error('renderTimetable error:', err)); 
   } catch (err) {
     console.error('renderTimetable error:', err);
   }
