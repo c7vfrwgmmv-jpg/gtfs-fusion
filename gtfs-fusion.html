@@ -2452,6 +2452,8 @@ clearStopsSearchIndex();
 clearStopToRoutesCache();
 cachedGroupsArray = null;
 lastStopsDataHash = null;
+state.routeProfiles = {};  // Clear cached route profiles
+state.canonicalMasterLists = {};  // Clear cached master lists
 
 state.gtfsData = {
   routes,
