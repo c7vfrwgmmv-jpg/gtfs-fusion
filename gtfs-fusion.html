@@ -1847,12 +1847,15 @@ async function parseCSVStream(input, config) {
       }
       
       if (config.normalizeKeys) row = normalizeRecord(row);
+      
+      // Extract index key BEFORE rowProcessor (in case rowProcessor removes it)
+      const indexKey = (config.returnFormat === 'index' && config.indexBy) ? row[config.indexBy] : null;
+      
       if (config.rowProcessor) row = config.rowProcessor(row);
       
-      if (config.returnFormat === 'index' && config.indexBy) {
-        const key = row[config.indexBy];
-        if (!result[key]) result[key] = [];
-        result[key].push(row);
+      if (config.returnFormat === 'index' && indexKey) {
+        if (!result[indexKey]) result[indexKey] = [];
+        result[indexKey].push(row);
       } else {
         result.push(row);
       }
@@ -1910,8 +1913,9 @@ function buildIndex(rows, indexBy) {
  */
 async function parseCSV(input, options = {}) {
   const config = {
-    mode: options.mode || 'auto', // 'sync', 'stream', 'auto'
+    mode: options.mode || 'auto', // 'sync', 'stream', 'worker', 'auto'
     streamThreshold: options.streamThreshold || 50 * 1024, // 50KB
+    workerThreshold: options.workerThreshold || 500 * 1024, // 500KB - use worker for larger files
     onProgress: options.onProgress || null,
     normalizeKeys: options.normalizeKeys !== false,
     rowProcessor: options.rowProcessor || null, // Custom row transform
@@ -1923,15 +1927,202 @@ async function parseCSV(input, options = {}) {
   // Auto-detect mode based on input size
   if (config.mode === 'auto') {
     const size = getInputSize(input);
-    config.mode = size > config.streamThreshold ? 'stream' : 'sync';
+    if (size > config.workerThreshold) {
+      config.mode = 'worker';
+    } else if (size > config.streamThreshold) {
+      config.mode = 'stream';
+    } else {
+      config.mode = 'sync';
+    }
   }
   
   // Dispatch to implementation
   if (config.mode === 'sync') {
     return parseCSVSync(input, config);
+  } else if (config.mode === 'worker') {
+    return await parseCSVWorker(input, config);
   } else {
     return await parseCSVStream(input, config);
   }
+}
+
+// Worker implementation for large files
+async function parseCSVWorker(input, config) {
+  const arrayBuffer = await toArrayBuffer(input);
+  
+  const workerCode = `
+    // Simplified CSV line parser (handles quotes)
+    function parseCSVLine(line) {
+      if (!line) return [];
+      if (!line.includes('"')) return line.split(',');
+      
+      const result = [];
+      const chars = [];
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            chars.push('"');
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === ',' && !inQuotes) {
+          result.push(chars.join(''));
+          chars.length = 0;
+        } else {
+          chars.push(char);
+        }
+      }
+      result.push(chars.join(''));
+      return result;
+    }
+    
+    self.onmessage = function(e) {
+      try {
+        const { arrayBuffer, config } = e.data;
+        const decoder = new TextDecoder('utf-8');
+        
+        let buffer = '';
+        let headers = null;
+        const result = config.returnFormat === 'index' ? {} : [];
+        let rowCount = 0;
+        const CHUNK_SIZE = config.chunkSize || (1024 * 1024);
+        
+        for (let offset = 0; offset < arrayBuffer.byteLength; offset += CHUNK_SIZE) {
+          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
+          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
+          
+          buffer += decoder.decode(chunk, { stream: !isLastChunk });
+          
+          let newlineIdx;
+          while ((newlineIdx = buffer.indexOf('\\n')) !== -1) {
+            const line = buffer.slice(0, newlineIdx);
+            buffer = buffer.slice(newlineIdx + 1);
+            
+            if (!line.trim()) continue;
+            
+            if (!headers) {
+              headers = parseCSVLine(line.replace(/^\\uFEFF/, '')).map(h => h.trim());
+              continue;
+            }
+            
+            const values = parseCSVLine(line);
+            let row = {};
+            for (let j = 0; j < headers.length; j++) {
+              row[headers[j]] = (values[j] || '').trim();
+            }
+            
+            // Extract index key before processing
+            const indexKey = (config.returnFormat === 'index' && config.indexBy) ? row[config.indexBy] : null;
+            
+            // Apply row processor if provided (sent as string, needs eval)
+            if (config.rowProcessorStr) {
+              const rowProcessor = eval('(' + config.rowProcessorStr + ')');
+              row = rowProcessor(row);
+            }
+            
+            if (config.returnFormat === 'index' && indexKey) {
+              if (!result[indexKey]) result[indexKey] = [];
+              result[indexKey].push(row);
+            } else {
+              result.push(row);
+            }
+            
+            rowCount++;
+            if (rowCount % 10000 === 0) {
+              const percent = Math.round((offset / arrayBuffer.byteLength) * 100);
+              self.postMessage({ type: 'progress', rowCount, percent });
+            }
+          }
+        }
+        
+        // Process final buffer
+        if (buffer.trim() && headers) {
+          const values = parseCSVLine(buffer);
+          let row = {};
+          for (let j = 0; j < headers.length; j++) {
+            row[headers[j]] = (values[j] || '').trim();
+          }
+          
+          const indexKey = (config.returnFormat === 'index' && config.indexBy) ? row[config.indexBy] : null;
+          
+          if (config.rowProcessorStr) {
+            const rowProcessor = eval('(' + config.rowProcessorStr + ')');
+            row = rowProcessor(row);
+          }
+          
+          if (config.returnFormat === 'index' && indexKey) {
+            if (!result[indexKey]) result[indexKey] = [];
+            result[indexKey].push(row);
+          } else {
+            result.push(row);
+          }
+        }
+        
+        self.postMessage({ type: 'done', result, rowCount });
+      } catch (err) {
+        self.postMessage({ type: 'error', message: err.message || String(err) });
+      }
+    };
+  `;
+  
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const workerUrl = URL.createObjectURL(blob);
+  const worker = new Worker(workerUrl);
+  state.currentWorker = worker;
+  
+  return new Promise((resolve, reject) => {
+    worker.onmessage = (ev) => {
+      const msg = ev.data;
+      
+      if (msg.type === 'progress') {
+        if (config.onProgress) {
+          config.onProgress(msg.rowCount, msg.percent);
+        }
+      } else if (msg.type === 'done') {
+        state.currentWorker = null;
+        URL.revokeObjectURL(workerUrl);
+        worker.terminate();
+        
+        // Sort indexed results if needed
+        if (config.returnFormat === 'index') {
+          Object.values(msg.result).forEach(rows => {
+            if (rows.length > 1 && rows[0].stop_sequence !== undefined) {
+              rows.sort((a, b) => a.stop_sequence - b.stop_sequence);
+            }
+          });
+        }
+        
+        resolve(msg.result);
+      } else if (msg.type === 'error') {
+        state.currentWorker = null;
+        URL.revokeObjectURL(workerUrl);
+        worker.terminate();
+        reject(new Error(msg.message));
+      }
+    };
+    
+    worker.onerror = (err) => {
+      state.currentWorker = null;
+      URL.revokeObjectURL(workerUrl);
+      worker.terminate();
+      reject(new Error(err.message || 'Worker error'));
+    };
+    
+    // Serialize rowProcessor function if provided
+    const workerConfig = { ...config };
+    if (config.rowProcessor) {
+      workerConfig.rowProcessorStr = config.rowProcessor.toString();
+      delete workerConfig.rowProcessor;
+    }
+    delete workerConfig.onProgress; // Can't send functions
+    
+    worker.postMessage({ arrayBuffer, config: workerConfig }, [arrayBuffer]);
+  });
 }
 
 // Legacy sync parser - kept for backward compatibility
@@ -2281,7 +2472,7 @@ perfTimings.parseEnd = performance.now();
         perfTimings.stopTimesStart = performance.now();
         
         const stopTimesIndex = await parseCSV(stopTimesFile, {
-          mode: 'stream',
+          mode: 'worker', // Use worker for large files
           returnFormat: 'index',
           indexBy: 'trip_id',
           rowProcessor: (row) => ({
@@ -2297,11 +2488,6 @@ perfTimings.parseEnd = performance.now();
             state.loadingProgressPercent = percent;
             render();
           }
-        });
-        
-        // Sort stop times by sequence
-        Object.values(stopTimesIndex).forEach(stops => {
-          stops.sort((a, b) => a.stop_sequence - b.stop_sequence);
         });
         
         perfTimings.stopTimesEnd = performance.now();
