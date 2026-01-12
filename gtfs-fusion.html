@@ -2107,7 +2107,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             // Use fflate.unzip to decompress
             fflate.unzip(uint8Array, (err, unzipped) => {
               if (err) {
-                reject(new Error('Failed to decompress ZIP: ' + err.message));
+                reject(new Error('Failed to decompress ZIP: ' + (err.message || err || 'Unknown error')));
                 return;
               }
               
@@ -2145,7 +2145,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
               resolve({ files });
             });
           } catch (err) {
-            reject(new Error('Error reading ZIP file: ' + err.message));
+            reject(new Error('Error reading ZIP file: ' + (err.message || err || 'Unknown error')));
           }
         };
         
