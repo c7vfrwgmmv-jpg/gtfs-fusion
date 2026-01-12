@@ -1499,23 +1499,20 @@ function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
   }
 
   // 3. FAST PATH: Exact match assignment for perfect forward/reverse sequences
+  const needsFallback = [];
   for (const {trip, seq} of tripPatterns) {
     if (arrayEquals(seq, pattern)) {
       trip.direction_id = '0';
-      continue;
-    }
-    if (arrayEquals(seq, reversePattern)) {
+    } else if (arrayEquals(seq, reversePattern)) {
       trip.direction_id = '1';
-      continue;
+    } else {
+      // Mark for fallback processing
+      needsFallback.push({trip, seq});
     }
-    // Mark for fallback processing
-    trip.__needs_scoring = true;
   }
 
   // 4. FALLBACK: Subsequence matching for variants/shortcuts
-  for (const {trip, seq} of tripPatterns) {
-    if (!trip.__needs_scoring) continue;
-    
+  for (const {trip, seq} of needsFallback) {
     // Check if trip is a subsequence of pattern/reversePattern
     if (isSubsequence(seq, pattern)) {
       trip.direction_id = '0';
@@ -1525,7 +1522,6 @@ function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
       // Default fallback
       trip.direction_id = '0';
     }
-    delete trip.__needs_scoring;
   }
 }
 
