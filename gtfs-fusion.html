@@ -1778,7 +1778,7 @@ async function toArrayBuffer(input) {
   if (typeof input === 'string') return new TextEncoder().encode(input).buffer;
   if (input.async) return await input.async('arraybuffer'); // ZIP entry
   if (input instanceof Blob) return await input.arrayBuffer();
-  throw new Error('Unsupported input type');
+  throw new Error('Unsupported input type. Expected string, ArrayBuffer, Blob, or ZIP entry object.');
 }
 
 // Sync implementation
@@ -1910,7 +1910,7 @@ function buildIndex(rows, indexBy) {
  */
 async function parseCSV(input, options = {}) {
   const config = {
-    mode: options.mode || 'auto', // 'sync', 'stream', 'worker'
+    mode: options.mode || 'auto', // 'sync', 'stream', 'auto'
     streamThreshold: options.streamThreshold || 50 * 1024, // 50KB
     onProgress: options.onProgress || null,
     normalizeKeys: options.normalizeKeys !== false,
@@ -2006,7 +2006,7 @@ const TimeUtils = {
     const parts = String(timeStr).split(':');
     let hours = parseInt(parts[0] || '0', 10);
     const minutes = parts[1] || '00';
-    if (hours >= 24) hours = hours % 24;
+    if (hours >= 24) hours = hours - 24;
     return `${String(hours).padStart(2, '0')}:${minutes}`;
   },
   
@@ -2351,7 +2351,7 @@ perfTimings.parseEnd = performance.now();
             perfTimings.shapesEnd = performance.now();
           } catch (err) {
             perfTimings.shapesEnd = performance.now();
-            console.warn('Shapes parsing failed:', err);
+            console.warn('Failed to parse shapes.txt:', err);
             // Continue without shapes - they're optional
           }
         }
