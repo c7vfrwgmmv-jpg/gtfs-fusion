@@ -2186,15 +2186,30 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
 async function initDatabase() {
   try {
     console.log('Initializing SQL.js...');
-    const SQL = await initSqlJs({
-      locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
+    console.log('Loading WASM from CDN (this may take 10-30 seconds)...');
+    
+    // Add timeout to prevent infinite hang
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('SQL.js initialization timeout after 60 seconds. WASM file may be blocked or too slow to load.')), 60000);
     });
-    console.log('SQL.js loaded, creating database...');
+    
+    const initPromise = initSqlJs({
+      locateFile: file => {
+        const url = `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`;
+        console.log('Loading:', url);
+        return url;
+      }
+    });
+    
+    const SQL = await Promise.race([initPromise, timeoutPromise]);
+    console.log('SQL.js WASM loaded successfully!');
+    console.log('Creating database...');
     db = new SQL.Database();
     console.log('Database created successfully');
   } catch (err) {
     console.error('Failed to initialize SQL.js:', err);
-    throw new Error('Failed to initialize database: ' + (err.message || err));
+    throw new Error('Failed to initialize database: ' + (err.message || err) + 
+      '. This may be due to slow network, CORS issues, or browser WASM limitations. Try a different browser or check your internet connection.');
   }
   
   db.run(`
