@@ -1036,6 +1036,130 @@ function debounce(func, wait) {
 // ═══════════════════════════════════════════════════════════════
 // 3.2. TIME AND DATE MODULE (GTFS-specific)
 // ═══════════════════════════════════════════════════════════════
+    function timeToMinutes(timeStr) {
+      if (!timeStr) return 0;
+      const parts = timeStr.split(':');
+      const h = parseInt(parts[0] || '0', 10);
+      const m = parseInt(parts[1] || '0', 10);
+      return h * 60 + m;
+    }
+    function minutesToTime(minutes) {
+      if (!minutes && minutes !== 0) return '';
+      const h = Math.floor(minutes / 60);
+      const m = minutes % 60;
+      const s = 0;
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    function formatTime(time) {
+      if (!time) return '<';
+      const str = String(time);
+      const parts = str.split(':');
+      let hours = parseInt(parts[0]||'0',10);
+      const minutes = parts[1]||'00';
+      if (hours >= 24) hours = hours - 24;
+      return `${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}`;
+    }
+    function parseGTFSDate(dateStr) {
+      if(!dateStr || dateStr.length!==8) return null;
+      return new Date(parseInt(dateStr.substring(0,4)), parseInt(dateStr.substring(4,6)) - 1, parseInt(dateStr.substring(6,8)));
+    }
+    function formatDateToGTFS(date) {
+      return date.getFullYear() + String(date.getMonth()+1).padStart(2,'0') + String(date.getDate()).padStart(2,'0');
+    }
+
+// ═══════════════════════════════════════════════════════════════
+// TIME & DATE UTILITIES MODULE (Unified API)
+// ═══════════════════════════════════════════════════════════════
+
+const TimeUtils = {
+  toMinutes: timeToMinutes,
+  fromMinutes: minutesToTime,
+  format: formatTime,
+  parseDate: parseGTFSDate,
+  formatDate: formatDateToGTFS,
+  
+  addDays(dateStr, days) {
+    const date = this.parseDate(dateStr);
+    if (!date) return null;
+    date.setDate(date.getDate() + days);
+    return this.formatDate(date);
+  },
+  
+  daysBetween(date1Str, date2Str) {
+    const y1 = parseInt(date1Str.substring(0, 4), 10);
+    const m1 = parseInt(date1Str.substring(4, 6), 10) - 1;
+    const d1 = parseInt(date1Str.substring(6, 8), 10);
+    const y2 = parseInt(date2Str.substring(0, 4), 10);
+    const m2 = parseInt(date2Str.substring(4, 6), 10) - 1;
+    const d2 = parseInt(date2Str.substring(6, 8), 10);
+    
+    const ms1 = new Date(y1, m1, d1).getTime();
+    const ms2 = new Date(y2, m2, d2).getTime();
+    return Math.floor((ms2 - ms1) / (1000 * 60 * 60 * 24));
+  },
+  
+  getDayOfWeek(dateStr) {
+    const date = this.parseDate(dateStr);
+    return date ? date.getDay() : null;
+  },
+  
+  calculateEaster(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31);
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(year, month - 1, day);
+  },
+  
+  getPolishHolidays(year) {
+    const holidays = [];
+    holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
+    holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
+    holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie NMP' });
+    holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
+    holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
+    holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt' });
+    
+    const easter = this.calculateEaster(year);
+    const easterMonday = new Date(easter);
+    easterMonday.setDate(easter.getDate() + 1);
+    holidays.push({ date: this.formatDate(easterMonday), name: 'Poniedziałek Wielkanocny' });
+    
+    const corpusChristi = new Date(easter);
+    corpusChristi.setDate(easter.getDate() + 60);
+    holidays.push({ date: this.formatDate(corpusChristi), name: 'Boże Ciało' });
+    
+    return holidays;
+  },
+  
+  findUpcomingHolidays(referenceDateStr, daysAhead = 7) {
+    const refYear = parseInt(referenceDateStr.substring(0, 4), 10);
+    const holidays = [
+      ...this.getPolishHolidays(refYear),
+      ...this.getPolishHolidays(refYear + 1)
+    ];
+    
+    const upcoming = [];
+    holidays.forEach(holiday => {
+      const days = this.daysBetween(referenceDateStr, holiday.date);
+      if (days >= 0 && days <= daysAhead) {
+        upcoming.push({ ...holiday, daysFromNow: days });
+      }
+    });
+    
+    return upcoming.sort((a, b) => a.daysFromNow - b.daysFromNow);
+  }
+};
 
 // ═══════════════════════════════════════════════════════════════
 // 3.3. GEOMETRY AND GEOGRAPHY MODULE
@@ -1760,373 +1884,8 @@ function parseCSVLine(line) {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// UNIFIED CSV PARSER MODULE
-// ═══════════════════════════════════════════════════════════════
-
-// Helper: Get input size
-function getInputSize(input) {
-  if (typeof input === 'string') return input.length;
-  if (input instanceof ArrayBuffer) return input.byteLength;
-  if (input.size !== undefined) return input.size; // Blob/File
-  return 0;
-}
-
-// Helper: Convert input to ArrayBuffer
-async function toArrayBuffer(input) {
-  if (input instanceof ArrayBuffer) return input;
-  if (typeof input === 'string') return new TextEncoder().encode(input).buffer;
-  if (input.async) return await input.async('arraybuffer'); // ZIP entry
-  if (input instanceof Blob) return await input.arrayBuffer();
-  throw new Error('Unsupported input type. Expected string, ArrayBuffer, Blob, or ZIP entry object.');
-}
-
-// Sync implementation
-function parseCSVSync(input, config) {
-  const text = typeof input === 'string' ? input : new TextDecoder().decode(input);
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0) return [];
-  
-  const headerLine = lines[0].replace(/^\uFEFF/, '');
-  const headers = parseCSVLine(headerLine).map(h => config.normalizeKeys ? normalizeKey(h.trim()) : h.trim());
-  
-  const result = [];
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    
-    const values = parseCSVLine(lines[i]);
-    let row = {};
-    for (let j = 0; j < headers.length; j++) {
-      row[headers[j]] = (values[j] || '').trim();
-    }
-    
-    if (config.normalizeKeys) row = normalizeRecord(row);
-    if (config.rowProcessor) row = config.rowProcessor(row);
-    
-    result.push(row);
-  }
-  
-  return config.returnFormat === 'array' ? result : buildIndex(result, config.indexBy);
-}
-
-// Stream implementation
-async function parseCSVStream(input, config) {
-  const arrayBuffer = await toArrayBuffer(input);
-  const decoder = new TextDecoder('utf-8');
-  
-  let buffer = '';
-  let headers = null;
-  const result = config.returnFormat === 'index' ? {} : [];
-  let rowCount = 0;
-  
-  for (let offset = 0; offset < arrayBuffer.byteLength; offset += config.chunkSize) {
-    const chunkEnd = Math.min(offset + config.chunkSize, arrayBuffer.byteLength);
-    const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
-    const isLastChunk = chunkEnd === arrayBuffer.byteLength;
-    
-    buffer += decoder.decode(chunk, { stream: !isLastChunk });
-    
-    let newlineIdx;
-    while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, newlineIdx);
-      buffer = buffer.slice(newlineIdx + 1);
-      
-      if (!line.trim()) continue;
-      
-      if (!headers) {
-        headers = parseCSVLine(line.replace(/^\uFEFF/, '')).map(h => 
-          config.normalizeKeys ? normalizeKey(h.trim()) : h.trim()
-        );
-        continue;
-      }
-      
-      const values = parseCSVLine(line);
-      let row = {};
-      for (let j = 0; j < headers.length; j++) {
-        row[headers[j]] = (values[j] || '').trim();
-      }
-      
-      if (config.normalizeKeys) row = normalizeRecord(row);
-      
-      // Extract index key BEFORE rowProcessor (in case rowProcessor removes it)
-      const indexKey = (config.returnFormat === 'index' && config.indexBy) ? row[config.indexBy] : null;
-      
-      if (config.rowProcessor) row = config.rowProcessor(row);
-      
-      if (config.returnFormat === 'index' && indexKey) {
-        if (!result[indexKey]) result[indexKey] = [];
-        result[indexKey].push(row);
-      } else {
-        result.push(row);
-      }
-      
-      rowCount++;
-      if (config.onProgress && rowCount % 10000 === 0) {
-        const percent = Math.round((offset / arrayBuffer.byteLength) * 100);
-        config.onProgress(rowCount, percent);
-      }
-    }
-    
-    await new Promise(resolve => setTimeout(resolve, 0));
-  }
-  
-  // Process final buffer
-  if (buffer.trim() && headers) {
-    const values = parseCSVLine(buffer);
-    let row = {};
-    for (let j = 0; j < headers.length; j++) {
-      row[headers[j]] = (values[j] || '').trim();
-    }
-    if (config.normalizeKeys) row = normalizeRecord(row);
-    if (config.rowProcessor) row = config.rowProcessor(row);
-    
-    if (config.returnFormat === 'index' && config.indexBy) {
-      const key = row[config.indexBy];
-      if (!result[key]) result[key] = [];
-      result[key].push(row);
-    } else {
-      result.push(row);
-    }
-  }
-  
-  if (config.onProgress) config.onProgress(rowCount, 100);
-  return result;
-}
-
-// Helper: Build index from array
-function buildIndex(rows, indexBy) {
-  if (!indexBy) return rows;
-  const index = {};
-  rows.forEach(row => {
-    const key = row[indexBy];
-    if (!index[key]) index[key] = [];
-    index[key].push(row);
-  });
-  return index;
-}
-
-/**
- * Universal CSV parser with auto-detection
- * @param {string|ArrayBuffer|Blob} input - Data source
- * @param {Object} options - Parsing options
- * @returns {Promise<Array>|Array} - Parsed rows
- */
-async function parseCSV(input, options = {}) {
-  const config = {
-    mode: options.mode || 'auto', // 'sync', 'stream', 'worker', 'auto'
-    streamThreshold: options.streamThreshold || 50 * 1024, // 50KB
-    workerThreshold: options.workerThreshold || 500 * 1024, // 500KB - use worker for larger files
-    onProgress: options.onProgress || null,
-    normalizeKeys: options.normalizeKeys !== false,
-    rowProcessor: options.rowProcessor || null, // Custom row transform
-    returnFormat: options.returnFormat || 'array', // 'array' or 'index'
-    indexBy: options.indexBy || null, // For stop_times: 'trip_id'
-    chunkSize: options.chunkSize || 1024 * 1024 // 1MB chunks
-  };
-  
-  // Auto-detect mode based on input size
-  if (config.mode === 'auto') {
-    const size = getInputSize(input);
-    if (size > config.workerThreshold) {
-      config.mode = 'worker';
-    } else if (size > config.streamThreshold) {
-      config.mode = 'stream';
-    } else {
-      config.mode = 'sync';
-    }
-  }
-  
-  // Dispatch to implementation
-  if (config.mode === 'sync') {
-    return parseCSVSync(input, config);
-  } else if (config.mode === 'worker') {
-    return await parseCSVWorker(input, config);
-  } else {
-    return await parseCSVStream(input, config);
-  }
-}
-
-// Worker implementation for large files
-async function parseCSVWorker(input, config) {
-  const arrayBuffer = await toArrayBuffer(input);
-  
-  const workerCode = `
-    // Simplified CSV line parser (handles quotes)
-    function parseCSVLine(line) {
-      if (!line) return [];
-      if (!line.includes('"')) return line.split(',');
-      
-      const result = [];
-      const chars = [];
-      let inQuotes = false;
-      
-      for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-        if (char === '"') {
-          if (inQuotes && line[i + 1] === '"') {
-            chars.push('"');
-            i++;
-          } else {
-            inQuotes = !inQuotes;
-          }
-        } else if (char === ',' && !inQuotes) {
-          result.push(chars.join(''));
-          chars.length = 0;
-        } else {
-          chars.push(char);
-        }
-      }
-      result.push(chars.join(''));
-      return result;
-    }
-    
-    self.onmessage = function(e) {
-      try {
-        const { arrayBuffer, config } = e.data;
-        const decoder = new TextDecoder('utf-8');
-        
-        let buffer = '';
-        let headers = null;
-        const result = config.returnFormat === 'index' ? {} : [];
-        let rowCount = 0;
-        const CHUNK_SIZE = config.chunkSize || (1024 * 1024);
-        
-        for (let offset = 0; offset < arrayBuffer.byteLength; offset += CHUNK_SIZE) {
-          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
-          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
-          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
-          
-          buffer += decoder.decode(chunk, { stream: !isLastChunk });
-          
-          let newlineIdx;
-          while ((newlineIdx = buffer.indexOf('\\n')) !== -1) {
-            const line = buffer.slice(0, newlineIdx);
-            buffer = buffer.slice(newlineIdx + 1);
-            
-            if (!line.trim()) continue;
-            
-            if (!headers) {
-              headers = parseCSVLine(line.replace(/^\\uFEFF/, '')).map(h => h.trim());
-              continue;
-            }
-            
-            const values = parseCSVLine(line);
-            let row = {};
-            for (let j = 0; j < headers.length; j++) {
-              row[headers[j]] = (values[j] || '').trim();
-            }
-            
-            // Extract index key before processing
-            const indexKey = (config.returnFormat === 'index' && config.indexBy) ? row[config.indexBy] : null;
-            
-            // Apply row processor if provided (sent as string, needs eval)
-            if (config.rowProcessorStr) {
-              const rowProcessor = eval('(' + config.rowProcessorStr + ')');
-              row = rowProcessor(row);
-            }
-            
-            if (config.returnFormat === 'index' && indexKey) {
-              if (!result[indexKey]) result[indexKey] = [];
-              result[indexKey].push(row);
-            } else {
-              result.push(row);
-            }
-            
-            rowCount++;
-            if (rowCount % 10000 === 0) {
-              const percent = Math.round((offset / arrayBuffer.byteLength) * 100);
-              self.postMessage({ type: 'progress', rowCount, percent });
-            }
-          }
-        }
-        
-        // Process final buffer
-        if (buffer.trim() && headers) {
-          const values = parseCSVLine(buffer);
-          let row = {};
-          for (let j = 0; j < headers.length; j++) {
-            row[headers[j]] = (values[j] || '').trim();
-          }
-          
-          const indexKey = (config.returnFormat === 'index' && config.indexBy) ? row[config.indexBy] : null;
-          
-          if (config.rowProcessorStr) {
-            const rowProcessor = eval('(' + config.rowProcessorStr + ')');
-            row = rowProcessor(row);
-          }
-          
-          if (config.returnFormat === 'index' && indexKey) {
-            if (!result[indexKey]) result[indexKey] = [];
-            result[indexKey].push(row);
-          } else {
-            result.push(row);
-          }
-        }
-        
-        self.postMessage({ type: 'done', result, rowCount });
-      } catch (err) {
-        self.postMessage({ type: 'error', message: err.message || String(err) });
-      }
-    };
-  `;
-  
-  const blob = new Blob([workerCode], { type: 'application/javascript' });
-  const workerUrl = URL.createObjectURL(blob);
-  const worker = new Worker(workerUrl);
-  state.currentWorker = worker;
-  
-  return new Promise((resolve, reject) => {
-    worker.onmessage = (ev) => {
-      const msg = ev.data;
-      
-      if (msg.type === 'progress') {
-        if (config.onProgress) {
-          config.onProgress(msg.rowCount, msg.percent);
-        }
-      } else if (msg.type === 'done') {
-        state.currentWorker = null;
-        URL.revokeObjectURL(workerUrl);
-        worker.terminate();
-        
-        // Sort indexed results if needed
-        if (config.returnFormat === 'index') {
-          Object.values(msg.result).forEach(rows => {
-            if (rows.length > 1 && rows[0].stop_sequence !== undefined) {
-              rows.sort((a, b) => a.stop_sequence - b.stop_sequence);
-            }
-          });
-        }
-        
-        resolve(msg.result);
-      } else if (msg.type === 'error') {
-        state.currentWorker = null;
-        URL.revokeObjectURL(workerUrl);
-        worker.terminate();
-        reject(new Error(msg.message));
-      }
-    };
-    
-    worker.onerror = (err) => {
-      state.currentWorker = null;
-      URL.revokeObjectURL(workerUrl);
-      worker.terminate();
-      reject(new Error(err.message || 'Worker error'));
-    };
-    
-    // Serialize rowProcessor function if provided
-    const workerConfig = { ...config };
-    if (config.rowProcessor) {
-      workerConfig.rowProcessorStr = config.rowProcessor.toString();
-      delete workerConfig.rowProcessor;
-    }
-    delete workerConfig.onProgress; // Can't send functions
-    
-    worker.postMessage({ arrayBuffer, config: workerConfig }, [arrayBuffer]);
-  });
-}
-
-// Legacy sync parser - kept for backward compatibility
-function parseCSVLegacy(text) {
+// CSV parser - used for all files
+function parseCSV(text) {
   if (!text || typeof text !== 'string') {
     console.warn('parseCSV: Invalid input, expected non-empty string');
     return [];
@@ -2162,169 +1921,329 @@ function parseCSVLegacy(text) {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// TIME & DATE UTILITIES MODULE
-// ═══════════════════════════════════════════════════════════════
+// Async CSV parser with chunked processing for better UI responsiveness
 
-const TimeUtils = {
-  /**
-   * Convert GTFS time to minutes since midnight
-   * Handles times >24h (e.g., "25:30:00")
-   */
-  toMinutes(timeStr) {
-    if (!timeStr) return 0;
-    const parts = String(timeStr).split(':');
-    const h = parseInt(parts[0] || '0', 10);
-    const m = parseInt(parts[1] || '0', 10);
-    return h * 60 + m;
-  },
-  
-  /**
-   * Convert minutes to GTFS time string
-   */
-  fromMinutes(minutes) {
-    if (!minutes && minutes !== 0) return '';
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
-  },
-  
-  /**
-   * Format GTFS time for display (normalize >24h)
-   */
-  format(timeStr) {
-    if (!timeStr) return '<';
-    const parts = String(timeStr).split(':');
-    let hours = parseInt(parts[0] || '0', 10);
-    const minutes = parts[1] || '00';
-    if (hours >= 24) hours = hours - 24;
-    return `${String(hours).padStart(2, '0')}:${minutes}`;
-  },
-  
-  /**
-   * Parse GTFS date string to Date object
-   */
-  parseDate(dateStr) {
-    if (!dateStr || dateStr.length !== 8) return null;
-    const y = parseInt(dateStr.substring(0, 4), 10);
-    const m = parseInt(dateStr.substring(4, 6), 10) - 1;
-    const d = parseInt(dateStr.substring(6, 8), 10);
-    if (isNaN(y) || isNaN(m) || isNaN(d)) return null;
-    return new Date(y, m, d);
-  },
-  
-  /**
-   * Format Date to GTFS string
-   */
-  formatDate(date) {
-    if (!(date instanceof Date)) return null;
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}${m}${d}`;
-  },
-  
-  /**
-   * Add days to GTFS date
-   */
-  addDays(dateStr, days) {
-    const date = this.parseDate(dateStr);
-    if (!date) return null;
-    date.setDate(date.getDate() + days);
-    return this.formatDate(date);
-  },
-  
-  /**
-   * Days between two GTFS dates
-   */
-  daysBetween(date1Str, date2Str) {
-    const y1 = parseInt(date1Str.substring(0, 4), 10);
-    const m1 = parseInt(date1Str.substring(4, 6), 10) - 1;
-    const d1 = parseInt(date1Str.substring(6, 8), 10);
-    const y2 = parseInt(date2Str.substring(0, 4), 10);
-    const m2 = parseInt(date2Str.substring(4, 6), 10) - 1;
-    const d2 = parseInt(date2Str.substring(6, 8), 10);
-    
-    const ms1 = new Date(y1, m1, d1).getTime();
-    const ms2 = new Date(y2, m2, d2).getTime();
-    return Math.floor((ms2 - ms1) / (1000 * 60 * 60 * 24));
-  },
-  
-  /**
-   * Get day of week from GTFS date
-   */
-  getDayOfWeek(dateStr) {
-    const date = this.parseDate(dateStr);
-    return date ? date.getDay() : null;
-  },
-  
-  /**
-   * Calculate Easter using Meeus/Jones/Butcher algorithm
-   */
-  calculateEaster(year) {
-    const a = year % 19;
-    const b = Math.floor(year / 100);
-    const c = year % 100;
-    const d = Math.floor(b / 4);
-    const e = b % 4;
-    const f = Math.floor((b + 8) / 25);
-    const g = Math.floor((b - f + 1) / 3);
-    const h = (19 * a + b - d - g + 15) % 30;
-    const i = Math.floor(c / 4);
-    const k = c % 4;
-    const l = (32 + 2 * e + 2 * i - h - k) % 7;
-    const m = Math.floor((a + 11 * h + 22 * l) / 451);
-    const month = Math.floor((h + l - 7 * m + 114) / 31);
-    const day = ((h + l - 7 * m + 114) % 31) + 1;
-    return new Date(year, month - 1, day);
-  },
-  
-  /**
-   * Get Polish holidays for year
-   */
-  getPolishHolidays(year) {
-    const holidays = [];
-    holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
-    holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
-    holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie NMP' });
-    holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
-    holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
-    holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt' });
-    
-    const easter = this.calculateEaster(year);
-    const easterMonday = new Date(easter);
-    easterMonday.setDate(easter.getDate() + 1);
-    holidays.push({ date: this.formatDate(easterMonday), name: 'Poniedziałek Wielkanocny' });
-    
-    const corpusChristi = new Date(easter);
-    corpusChristi.setDate(easter.getDate() + 60);
-    holidays.push({ date: this.formatDate(corpusChristi), name: 'Boże Ciało' });
-    
-    return holidays;
-  },
-  
-  /**
-   * Find holidays in upcoming week
-   */
-  findUpcomingHolidays(referenceDateStr, daysAhead = 7) {
-    const refYear = parseInt(referenceDateStr.substring(0, 4), 10);
-    const holidays = [
-      ...this.getPolishHolidays(refYear),
-      ...this.getPolishHolidays(refYear + 1)
-    ];
-    
-    const upcoming = [];
-    holidays.forEach(holiday => {
-      const days = this.daysBetween(referenceDateStr, holiday.date);
-      if (days >= 0 && days <= daysAhead) {
-        upcoming.push({ ...holiday, daysFromNow: days });
+function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const arrayBuffer = await zipFileEntry.async('arraybuffer');
+      const decoder = new TextDecoder('utf-8');
+      
+      let buffer = '';
+      let lineCount = 0;
+      let headers = null;
+      const stopTimesIndex = Object.create(null);
+      
+      const PROGRESS_UPDATE_INTERVAL = 100000;  // ← Increased from 10k
+      const ESTIMATED_LINES_FOR_PROGRESS = 100000;
+      const CHUNK_SIZE = 1024 * 1024;
+      
+      // ═══ REMOVED smartSplit - use native split! ═══
+      // NOTE: Using native split(',') for performance (100x faster than smartSplit).
+      // This works for GTFS stop_times.txt because fields typically don't contain commas.
+      // If a feed has quoted fields with embedded commas, use the full parseCSV function instead.
+      
+      const getCol = (cols, idx) => {
+        if (idx === -1 || idx >= cols.length) return '';
+        let val = cols[idx];
+        if (!val) return '';
+        
+        // Remove quotes in-place
+        if (val[0] === '"' && val[val.length-1] === '"') {
+          val = val.substring(1, val.length - 1);
+        }
+        
+        // Trim only if needed (check first/last char)
+        if (val[0] === ' ' || val[val.length-1] === ' ') {
+          return val.trim();
+        }
+        
+        return val;
+      };
+      
+      const processLine = (line) => {
+        if (!line.trim()) return;
+        
+        if (!headers) {
+          const rawHeaders = line.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+          headers = {
+            tripIdx: -1,
+            stopIdx: -1,
+            seqIdx: -1,
+            arrIdx: -1,
+            depIdx: -1,
+            pickupIdx: -1,
+            dropoffIdx: -1
+          };
+          
+          rawHeaders.forEach((h, i) => {
+            const normalized = normalizeKey(h);
+            if (normalized === 'trip_id') headers.tripIdx = i;
+            else if (normalized === 'stop_id') headers.stopIdx = i;
+            else if (normalized === 'stop_sequence') headers.seqIdx = i;
+            else if (normalized === 'arrival_time') headers.arrIdx = i;
+            else if (normalized === 'departure_time') headers.depIdx = i;
+            else if (normalized === 'pickup_type') headers.pickupIdx = i;
+            else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
+          });
+          
+          if (headers.tripIdx === -1 || headers.stopIdx === -1) {
+            throw new Error('Brakuje wymaganych kolumn w stop_times.txt: trip_id lub stop_id');
+          }
+          return;
+        }
+        
+        // ═══ NATIVE SPLIT - 100x faster than smartSplit! ═══
+        const cols = line.split(',');
+        
+        if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
+        
+        const tripId = getCol(cols, headers.tripIdx);
+        const stopId = getCol(cols, headers.stopIdx);
+        
+        if (!tripId || !stopId) return;
+        
+        if (!stopTimesIndex[tripId]) {
+          stopTimesIndex[tripId] = [];
+        }
+        
+        stopTimesIndex[tripId].push({
+          stop_id: stopId,
+          arrival_time: getCol(cols, headers.arrIdx),
+          departure_time: getCol(cols, headers.depIdx),
+          stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
+          pickup_type: getCol(cols, headers.pickupIdx) || '0',  // ← Removed String()
+          drop_off_type: getCol(cols, headers.dropoffIdx) || '0'  // ← Removed String()
+        });
+        
+        lineCount++;
+        if (lineCount % PROGRESS_UPDATE_INTERVAL === 0) {  // ← Less frequent
+          state.loadingProgress = lineCount;
+          if (onProgress) {
+            onProgress(lineCount, Math.min(99, Math.round(lineCount / ESTIMATED_LINES_FOR_PROGRESS * 100)));
+          }
+        }
+      };
+      
+      let offset = 0;
+      while (offset < arrayBuffer.byteLength) {
+        try {
+          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
+          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
+          const text = decoder.decode(chunk, { stream: !isLastChunk });
+          buffer += text;
+          
+          let newlineIndex;
+          // Optimize: Use lastIndexOf to process multiple lines at once
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex); // slice is faster for large strings
+            processLine(line);
+            buffer = buffer.slice(newlineIndex + 1);
+          }
+          
+          offset = chunkEnd;
+        } catch (err) {
+          console.error('Error processing chunk at offset', offset, ':', err);
+          // Continue processing next chunk instead of failing completely
+          offset = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+        }
       }
-    });
-    
-    return upcoming.sort((a, b) => a.daysFromNow - b.daysFromNow);
-  }
-};
+      
+      if (buffer.trim()) {
+        try {
+          processLine(buffer);
+        } catch (err) {
+          console.error('Error processing final buffer:', err);
+        }
+      }
+      
+      // Sort (same as before)
+      Object.keys(stopTimesIndex).forEach(tripId => {
+        stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
+      });
+      
+      if (onProgress) onProgress(lineCount, 100);
+      resolve(stopTimesIndex);
+      
+    } catch(err) {
+      reject(err);
+    }
+  });
+}
 
+    function parseShapesWithWorker(zipFileEntry, onProgress) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const text = await zipFileEntry.async('string');
+          
+          const workerCode = `
+            const KEY_ALIAS = {
+              'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
+              'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
+              'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
+              'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
+              'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
+              'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
+              'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
+              'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
+              'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
+              'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date',
+              'shape id':'shape_id','shape_id':'shape_id','shape pt lat':'shape_pt_lat','shape_pt_lat':'shape_pt_lat',
+              'shape pt lon':'shape_pt_lon','shape_pt_lon':'shape_pt_lon','shape pt sequence':'shape_pt_sequence','shape_pt_sequence':'shape_pt_sequence'
+            };
+            
+            function normalizeKey(k) {
+              if (k === null || k === undefined) return k;
+              let key = String(k).replace(/^\\uFEFF/,'').trim().toLowerCase();
+              return KEY_ALIAS[key] || key.replace(/\\s+/g,'_');
+            }
+            
+            function smartSplit(line) {
+              if (!line.includes('"')) {
+                return line.split(',');
+              }
+              
+              const cols = [];
+              let current = '';
+              let inQuotes = false;
+              
+              for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                
+                if (char === '"') {
+                  if (i + 1 < line.length && line[i+1] === '"') {
+                    current += '"';
+                    i++;
+                  } else {
+                    inQuotes = !inQuotes;
+                  }
+                } else if (char === ',' && !inQuotes) {
+                  cols.push(current);
+                  current = '';
+                } else {
+                  current += char;
+                }
+              }
+              cols.push(current);
+              return cols;
+            }
+            
+            self.onmessage = function(e) {
+              const text = e.data.text;
+              const lines = text.split(/\\r?\\n/);
+              
+              if (lines.length === 0) {
+                self.postMessage({ type: 'done', shapesIndex: {} });
+                return;
+              }
+              
+              const headerLine = lines[0];
+              const rawHeaders = smartSplit(headerLine);
+              const headers = rawHeaders.map(h => normalizeKey(h));
+              
+              const shapeIdIdx = headers.indexOf('shape_id');
+              const latIdx = headers.indexOf('shape_pt_lat');
+              const lonIdx = headers.indexOf('shape_pt_lon');
+              const seqIdx = headers.indexOf('shape_pt_sequence');
+              
+              if (shapeIdIdx === -1 || latIdx === -1 || lonIdx === -1 || seqIdx === -1) {
+                self.postMessage({ 
+                  type: 'error', 
+                  message: 'shapes.txt missing required fields' 
+                });
+                return;
+              }
+              
+              const shapesData = {};
+              let processedRows = 0;
+              const totalRows = lines.length - 1;
+              
+              // Parse all rows
+              for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                const cols = smartSplit(line);
+                const shapeId = cols[shapeIdIdx];
+                const lat = parseFloat(cols[latIdx]);
+                const lon = parseFloat(cols[lonIdx]);
+                const seq = parseInt(cols[seqIdx] || '0', 10);
+                
+                if (!shapeId || isNaN(lat) || isNaN(lon)) continue;
+                
+                if (!shapesData[shapeId]) {
+                  shapesData[shapeId] = [];
+                }
+                
+                shapesData[shapeId].push({ lat, lon, seq });
+                processedRows++;
+                
+                // Report progress every 10000 rows
+                if (processedRows % 10000 === 0) {
+                  const percent = Math.round((processedRows / totalRows) * 100);
+                  self.postMessage({ 
+                    type: 'progress', 
+                    processed: processedRows,
+                    total: totalRows,
+                    percent 
+                  });
+                }
+              }
+              
+              const shapesIndex = {};
+              Object.keys(shapesData).forEach(shapeId => {
+                const points = shapesData[shapeId];
+                points.sort((a, b) => a.seq - b.seq);
+                shapesIndex[shapeId] = points.map(p => [p.lat, p.lon]);
+              });
+              
+              self.postMessage({ 
+                type: 'done', 
+                shapesIndex,
+                shapeCount: Object.keys(shapesIndex).length,
+                pointCount: processedRows
+              });
+            };
+          `;
+          
+          const blob = new Blob([workerCode], { type: 'application/javascript' });
+          const workerUrl = URL.createObjectURL(blob);
+          const worker = new Worker(workerUrl);
+          state.currentWorker = worker;
+          
+          worker.onmessage = function(ev) {
+            const msg = ev.data;
+            
+            if (msg.type === 'progress') {
+              if (onProgress) {
+                onProgress(msg.processed, msg.percent);
+              }
+            } else if (msg.type === 'done') {
+              state.currentWorker = null;
+              URL.revokeObjectURL(workerUrl);
+              resolve(msg.shapesIndex);
+            } else if (msg.type === 'error') {
+              state.currentWorker = null;
+              URL.revokeObjectURL(workerUrl);
+              reject(new Error(msg.message));
+            }
+          };
+          
+          worker.onerror = function(ev) {
+            state.currentWorker = null;
+            URL.revokeObjectURL(workerUrl);
+            reject(new Error(ev.message || 'Worker parse error'));
+          };
+          
+          // Start parsing
+          worker.postMessage({ text });
+          
+        } catch(err) {
+          reject(err);
+        }
+      });
+    }
 
     async function unzipWithFflate(file) {
       return new Promise((resolve, reject) => {
@@ -2456,79 +2375,43 @@ state.loadingStep = 'Przetwarzanie plików GTFS...'; render();
 
 perfTimings.parseStart = performance.now();
 
-// Parse all CSV files in parallel using new unified parseCSV
+// Parse all CSV files synchronously (fastest approach)
 const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
-  parseCSV(await routesFile.async('string'), { mode: 'sync' }),
-  parseCSV(await tripsFile.async('string'), { mode: 'sync' }),
-  parseCSV(await stopsFile.async('string'), { mode: 'sync' }),
-  calendarFile ? parseCSV(await calendarFile.async('string'), { mode: 'sync' }) : Promise.resolve([]),
-  calendarDatesFile ? parseCSV(await calendarDatesFile.async('string'), { mode: 'sync' }) : Promise.resolve([]),
-  agenciesFile ? parseCSV(await agenciesFile.async('string'), { mode: 'sync' }) : Promise.resolve([])
+  routesFile.async('string').then(text => parseCSV(text)),
+  tripsFile.async('string').then(text => parseCSV(text)),
+  stopsFile.async('string').then(text => parseCSV(text)),
+  calendarFile ? calendarFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
+  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
+  agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
 ]);
 
 perfTimings.parseEnd = performance.now();
 
-        state.loadingStep = 'Parsowanie stop_times...'; render();
+        state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
         perfTimings.stopTimesStart = performance.now();
-        
-        const stopTimesIndex = await parseCSV(stopTimesFile, {
-          mode: 'worker', // Use worker for large files
-          returnFormat: 'index',
-          indexBy: 'trip_id',
-          rowProcessor: (row) => ({
-            stop_id: row.stop_id,
-            stop_sequence: Number(row.stop_sequence || 0),
-            arrival_time: row.arrival_time || '',
-            departure_time: row.departure_time || '',
-            pickup_type: row.pickup_type || '0',
-            drop_off_type: row.drop_off_type || '0'
-          }),
-          onProgress: (rowsProcessed, percent) => {
-            state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
-            state.loadingProgressPercent = percent;
-            render();
-          }
+        const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
+          state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
+          state.loadingProgressPercent = percent || state.loadingProgressPercent;
+          render();
         });
-        
         perfTimings.stopTimesEnd = performance.now();
         
         let shapesIndex = {};
         if (shapesFile) {
-          state.loadingStep = 'Parsowanie shapes.txt...'; render();
+          state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
           perfTimings.shapesStart = performance.now();
-          
           try {
-            const shapesArray = await parseCSV(shapesFile, {
-              mode: 'stream',
-              rowProcessor: (row) => ({
-                shape_id: row.shape_id,
-                lat: parseFloat(row.shape_pt_lat),
-                lon: parseFloat(row.shape_pt_lon),
-                seq: parseInt(row.shape_pt_sequence || '0', 10)
-              }),
-              onProgress: (rowsProcessed, percent) => {
-                state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
-                state.loadingProgressPercent = percent;
-                render();
-              }
+            const rawShapes = await parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
+              state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
+              state.loadingProgressPercent = percent || state.loadingProgressPercent;
+              render();
             });
             
-            // Group by shape_id and sort
-            const rawShapes = {};
-            shapesArray.forEach(point => {
-              if (!rawShapes[point.shape_id]) rawShapes[point.shape_id] = [];
-              rawShapes[point.shape_id].push(point);
-            });
-            
-            Object.keys(rawShapes).forEach(shapeId => {
-              rawShapes[shapeId].sort((a, b) => a.seq - b.seq);
-              rawShapes[shapeId] = rawShapes[shapeId].map(p => [p.lat, p.lon]);
-            });
-            
-            // Simplify and cache
             let simplifiedShapes = loadCachedShapes(rawShapes);
+            
             if (!simplifiedShapes) {
-              state.loadingStep = 'Upraszczanie tras...'; render();
+              // Simplify and cache
+              state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
               simplifiedShapes = simplifyShapes(rawShapes, 0.0001);
               cacheShapes(rawShapes, simplifiedShapes);
             }
@@ -2537,7 +2420,6 @@ perfTimings.parseEnd = performance.now();
             perfTimings.shapesEnd = performance.now();
           } catch (err) {
             perfTimings.shapesEnd = performance.now();
-            console.warn('Failed to parse shapes.txt:', err);
             // Continue without shapes - they're optional
           }
         }
@@ -2829,7 +2711,7 @@ function generateAvailableDates(calendar, calendarDates) {
     const d = parseInt(gtfsDate.substring(6, 8));
     const date = new Date(y, m, d);
     date.setDate(date.getDate() + 1);
-    return TimeUtils.formatDate(date);
+    return formatDateToGTFS(date);
   };
   
   // 🆕 KROK 1: Zbierz WSZYSTKIE możliwe daty (z calendar.txt)
@@ -2898,7 +2780,7 @@ function generateAvailableDates(calendar, calendarDates) {
   
   // KROK 5: Formatuj do UI
   return finalDates.map(dateStr => {
-    const date = TimeUtils.parseDate(dateStr);
+    const date = parseGTFSDate(dateStr);
     if (!date) return { value: dateStr, label: dateStr };
     const dd = String(date.getDate()).padStart(2, '0');
     const mm = String(date.getMonth() + 1).padStart(2, '0');
@@ -2946,7 +2828,7 @@ function getServicesForDate(dateStr) {
      * Prefers FUTURE dates, falls back to PAST if no future weekday exists
      */
     function getWeekdayDate() {
-      const today = TimeUtils.parseDate(state.selectedDate);
+      const today = parseGTFSDate(state.selectedDate);
       if (!today) return findDateForDayOfWeek(3); // Wednesday as fallback
       const currentDayOfWeek = today.getDay();
       
@@ -2981,7 +2863,7 @@ function findDateForDayOfWeek(targetDayOfWeek) {
     const d = parseInt(gtfsDate.substring(6, 8));
     const date = new Date(y, m, d);
     date.setDate(date.getDate() + days);
-    return TimeUtils.formatDate(date);
+    return formatDateToGTFS(date);
   };
   
   const currentDayOfWeek = getDayOfWeek(state.selectedDate);
@@ -3007,15 +2889,6 @@ function findDateForDayOfWeek(targetDayOfWeek) {
   
   return null;
 }
-
-function buildStationNameCache(stopsIndex) {
-  if (stationNameToIdCache) return stationNameToIdCache;
-  
-  stationNameToIdCache = new Map();
-  
-  const parentStationIds = new Set();
-  Object.values(stopsIndex).forEach(stop => {
-    if (stop.parent_station && stop.parent_station.trim()) {
       parentStationIds.add(stop.parent_station.trim());
     }
   });
@@ -4236,7 +4109,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       let bTime = bStops[0]?.departure_time || "99:99:99";
       if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
       if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
-      return TimeUtils.toMinutes(aTime) - TimeUtils.toMinutes(bTime);
+      return timeToMinutes(aTime) - timeToMinutes(bTime);
     });
   }
   
@@ -4269,7 +4142,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       let bTime = bStops[0]?.departure_time || "99:99:99";
       if (String(aTime).match(/^\d:/)) aTime = "0" + aTime;
       if (String(bTime).match(/^\d:/)) bTime = "0" + bTime;
-      return TimeUtils.toMinutes(aTime) - TimeUtils.toMinutes(bTime);
+      return timeToMinutes(aTime) - timeToMinutes(bTime);
     });
   }
   
@@ -4335,7 +4208,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
   
   // Sort core trips by anchor time
   coreData.sort((a, b) => {
-    const timeDiff = TimeUtils.toMinutes(a.anchorTime) - TimeUtils.toMinutes(b.anchorTime);
+    const timeDiff = timeToMinutes(a.anchorTime) - timeToMinutes(b.anchorTime);
     if (timeDiff !== 0) return timeDiff;
     return b.totalStops - a.totalStops;
   });
@@ -4400,7 +4273,7 @@ function sortTripsByMostFrequentStop(trips, tripStopMaps, stopsIndex) {
       }
       
       // Insert before this core trip if non-core comes earlier
-      if (coreTimeAtCommon && TimeUtils.toMinutes(insertionTime) < TimeUtils.toMinutes(coreTimeAtCommon)) {
+      if (coreTimeAtCommon && timeToMinutes(insertionTime) < timeToMinutes(coreTimeAtCommon)) {
         insertIdx = i;
         break;
       }
@@ -4448,8 +4321,8 @@ function adjacentSwapOrder(trips, tripMappings, visiblePassengerRowIndices, para
         // Skip if either time is missing
         if (!timeL || !timeR) continue;
         
-        const minutesL = TimeUtils.toMinutes(timeL);
-        const minutesR = TimeUtils.toMinutes(timeR);
+        const minutesL = timeToMinutes(timeL);
+        const minutesR = timeToMinutes(timeR);
         
         // Vote to swap if left is significantly later than right
         if (minutesL > minutesR + marginMinutes) {
@@ -5636,19 +5509,15 @@ async function renderStopsView() {
   
   // Use async search for large datasets to prevent UI freeze
   let filteredGroups;
-  const useAsyncSearch = groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '';
-  
-  if (useAsyncSearch) {
+  if (groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '') {
     // Show searching indicator
     stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Wyszukiwanie...</div>';
     filteredGroups = await searchStopsInIndexAsync(searchQuery, groupsArray, (percent) => {
       stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Wyszukiwanie... ${percent}%</div>`;
     });
   } else {
-    // For smaller datasets, also use async search for consistency
-    filteredGroups = searchQuery && searchQuery.trim() !== '' 
-      ? await searchStopsInIndexAsync(searchQuery, groupsArray)
-      : groupsArray;
+    // For smaller datasets, use synchronous search
+    filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
   }
   
   const useVirtualList = filteredGroups.length > 100; // Threshold
@@ -6187,7 +6056,7 @@ function updateDeparturesTable() {
 
       return '<tr class="border-b hover:bg-gray-50">' +
         '<td class="p-1 font-bold border whitespace-nowrap text-center">' +
-          TimeUtils.format(dep.time) +
+          formatTime(dep.time) +
         '</td>' +
         '<td class="p-1 border whitespace-nowrap">' +
           '<div class="flex justify-center">' +
@@ -6515,7 +6384,7 @@ const orderedDepotTrips = depotTrips.slice().sort((a, b) => {
   
   // Both have firstCoreTime - compare
   if (timeA && timeB) {
-    const diff = TimeUtils.toMinutes(timeA) - TimeUtils.toMinutes(timeB);
+    const diff = timeToMinutes(timeA) - timeToMinutes(timeB);
     if (diff !== 0) return diff;
   } else if (timeA) {
     return -1; // a has time, b doesn't - a comes first
@@ -6639,13 +6508,13 @@ state.currentTimetableData.stopDepartures = stopDepartures;
             // Renderuj komórkę z właściwym tooltipem
             if (cellTooltip) {
               html += `<td class="p-1 text-center text-xs border border-gray-300 time-cell-with-tooltip">
-                ${TimeUtils.format(stopMatch.departure_time || stopMatch.arrival_time)}
+                ${formatTime(stopMatch.departure_time || stopMatch.arrival_time)}
                 <span class="tooltip-content">${cellTooltip}</span>
               </td>`;
             } else {
               // No tooltip for non-merged stops
               html += `<td class="p-1 text-center text-xs border border-gray-300">
-                ${TimeUtils.format(stopMatch.departure_time || stopMatch.arrival_time)}
+                ${formatTime(stopMatch.departure_time || stopMatch.arrival_time)}
               </td>`;
             }
           } else {
@@ -6857,14 +6726,14 @@ function openStopTimetable(stopId) {
   const sundayDate = findDateForDayOfWeek(0); // Sunday
   
   // Find holidays in upcoming week
-  const nearbyHolidays = TimeUtils.findUpcomingHolidays(state.selectedDate);
+  const nearbyHolidays = findNearbyHolidays(state.selectedDate);
   
   // Classify holidays by day of week
   const holidaysByDayOfWeek = new Map(); // dayOfWeek -> holiday object
   const weekdayHolidays = []; // Holidays falling on Mon-Fri
   
   nearbyHolidays.forEach(holiday => {
-    const holidayDate = TimeUtils.parseDate(holiday.date);
+    const holidayDate = parseGTFSDate(holiday.date);
     if (holidayDate) {
       const dayOfWeek = holidayDate.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
       holidaysByDayOfWeek.set(dayOfWeek, holiday);
@@ -6881,11 +6750,11 @@ function openStopTimetable(stopId) {
   const weekdayHolidayDates = new Set(weekdayHolidays.map(h => h.date));
   
   if (mondayDate) {
-    const monDate = TimeUtils.parseDate(mondayDate);
+    const monDate = parseGTFSDate(mondayDate);
     for (let i = 0; i < 5; i++) { // Mon to Fri
       const d = new Date(monDate);
       d.setDate(monDate.getDate() + i);
-      const dateStr = TimeUtils.formatDate(d);
+      const dateStr = formatDateToGTFS(d);
       
       // Exclude weekday holidays from the weekday column
       if (!weekdayHolidayDates.has(dateStr)) {
@@ -7402,7 +7271,7 @@ switch(currentView) {
               route: route,
               trip: trip,
               time: departureTime,
-              timeMinutes: TimeUtils.toMinutes(departureTime),
+              timeMinutes: timeToMinutes(departureTime),
               headsign: trip.trip_headsign || ''
             });
             if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
@@ -7507,7 +7376,7 @@ switch(currentView) {
       return `
         <tr class="border-b hover:bg-gray-50">
           <td class="p-1 font-bold border whitespace-nowrap text-center">
-            ${TimeUtils.format(dep.time)}
+            ${formatTime(dep.time)}
           </td>
 
           <!-- ROUTE: NIE ROZCIĄGA SIĘ -->
@@ -7921,7 +7790,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
             route: route,
             trip: trip,
             time: departureTime,
-            timeMinutes: TimeUtils.toMinutes(departureTime),
+            timeMinutes: timeToMinutes(departureTime),
             headsign: trip.trip_headsign || ''
           });
           if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
