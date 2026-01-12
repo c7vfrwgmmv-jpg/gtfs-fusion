@@ -2184,10 +2184,18 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
 // ═══════════════════════════════════════════════════════════════
 
 async function initDatabase() {
-  const SQL = await initSqlJs({
-    locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
-  });
-  db = new SQL.Database();
+  try {
+    console.log('Initializing SQL.js...');
+    const SQL = await initSqlJs({
+      locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
+    });
+    console.log('SQL.js loaded, creating database...');
+    db = new SQL.Database();
+    console.log('Database created successfully');
+  } catch (err) {
+    console.error('Failed to initialize SQL.js:', err);
+    throw new Error('Failed to initialize database: ' + (err.message || err));
+  }
   
   db.run(`
     CREATE TABLE routes (
@@ -2291,12 +2299,22 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
   const placeholders = columns.map(() => '?').join(', ');
   const stmt = db.prepare(`INSERT INTO ${tableName} VALUES (${placeholders})`);
   
-  db.run('BEGIN TRANSACTION');
+  try {
+    db.run('BEGIN TRANSACTION');
+  } catch (err) {
+    console.error(`Failed to begin transaction for ${tableName}:`, err);
+    throw new Error(`Database error in ${tableName}: ${err.message}`);
+  }
   
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const values = columns.map(col => row[col] || null);
-    stmt.run(values);
+    try {
+      stmt.run(values);
+    } catch (err) {
+      console.error(`Failed to insert row ${i} into ${tableName}:`, err, 'Row data:', row);
+      throw new Error(`Database insert error in ${tableName} at row ${i}: ${err.message}`);
+    }
     
     if (showProgress && i % 50000 === 0 && i > 0) {
       state.loadingStep = `${filename}: ${i.toLocaleString()} / ${rows.length.toLocaleString()}`;
