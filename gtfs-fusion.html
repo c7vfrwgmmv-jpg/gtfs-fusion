@@ -1393,38 +1393,6 @@ function looksLikeGarbageLabel(s, shortName) {
 // ═══════════════════════════════════════════════════════════════
 const TO_RAD = Math.PI / 180;
 const TO_DEG = 180 / Math.PI;
-function calculateBearing(lat1, lon1, lat2, lon2) {
-  const dLon = (lon2 - lon1) * TO_RAD;
-  const y = Math.sin(dLon) * Math.cos(lat2 * TO_RAD);
-  const x = Math.cos(lat1 * TO_RAD) * Math.sin(lat2 * TO_RAD) -
-            Math.sin(lat1 * TO_RAD) * Math.cos(lat2 * TO_RAD) * Math.cos(dLon);
-  
-  let bearing = Math.atan2(y, x) * TO_DEG;
-  return (bearing + 360) % 360; // Normalize to 0-360
-}
-function tripSequenceScore(tripSeq, pattern) {
-  // Count how many stops from tripSeq appear in correct order in pattern
-  const patternSet = new Set(pattern);
-  const relevantStops = tripSeq.filter(stop => patternSet.has(stop));
-  
-  if (relevantStops.length === 0) return 0;
-  
-  let matchCount = 0;
-  let idx = 0;
-  
-  for (let i = 0; i < relevantStops.length; i++) {
-    const val = relevantStops[i];
-    while (idx < pattern.length && pattern[idx] !== val) {
-      idx++;
-    }
-    if (idx < pattern.length) {
-      matchCount++;
-      idx++;
-    }
-  }
-  
-  return matchCount / relevantStops.length;
-}
 function getTripStopSequence(tripId, stopTimesIndex) {
   const stopTimes = stopTimesIndex[tripId];
   if (!stopTimes || stopTimes.length === 0) return [];
@@ -1526,41 +1494,6 @@ function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
 }
 
 // Async version with chunked processing to prevent UI freezes
-async function enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress) {
-  const tripsByRoute = {};
-  
-  for (const trip of trips) {
-    if (!trip || !trip.trip_id) continue;
-    
-    const routeId = trip.route_id || 'unknown';
-    if (!tripsByRoute[routeId]) {
-      tripsByRoute[routeId] = [];
-    }
-    tripsByRoute[routeId].push(trip);
-  }
-  
-  const routeIds = Object.keys(tripsByRoute);
-  const CHUNK_SIZE = 10; // Process 10 routes at a time
-  
-  for (let i = 0; i < routeIds.length; i += CHUNK_SIZE) {
-    const chunk = routeIds.slice(i, i + CHUNK_SIZE);
-    
-    chunk.forEach(routeId => {
-      enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
-    });
-    
-    // Update progress
-    if (onProgress) {
-      const percent = Math.round(((i + chunk.length) / routeIds.length) * 100);
-      onProgress(i + chunk.length, routeIds.length, percent);
-    }
-    
-    // Yield to browser to keep UI responsive
-    if (i + CHUNK_SIZE < routeIds.length) {
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
-  }
-}
 
 async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, onProgress) {
   // 1) trips do przetworzenia
@@ -1802,18 +1735,10 @@ async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stop
     state.currentWorker = null;
     return;
   } catch (err) {
-    // fallback
-    try {
-      console.warn('Worker failed; falling back to main-thread enrichment:', err && err.message ? err.message : err);
-      if (typeof enrichTripsWithDirectionIdAsync === 'function') {
-        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress);
-        return;
-      }
-      throw err;
-    } finally {
-      if (worker) try { worker.terminate(); } catch(e){}
-      state.currentWorker = null;
-    }
+    // No fallback - cleanup and propagate error
+    if (worker) try { worker.terminate(); } catch(e){}
+    state.currentWorker = null;
+    throw err; // Let caller handle error (same as parseStopTimesStreamWithWorker)
   }
 }	  
 // ═══════════════════════════════════════════════════════════════
