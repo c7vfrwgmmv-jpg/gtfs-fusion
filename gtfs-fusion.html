@@ -5450,15 +5450,19 @@ async function renderStopsView() {
   
   // Use async search for large datasets to prevent UI freeze
   let filteredGroups;
-  if (groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '') {
+  const useAsyncSearch = groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '';
+  
+  if (useAsyncSearch) {
     // Show searching indicator
     stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Wyszukiwanie...</div>';
     filteredGroups = await searchStopsInIndexAsync(searchQuery, groupsArray, (percent) => {
       stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Wyszukiwanie... ${percent}%</div>`;
     });
   } else {
-    // For smaller datasets, use synchronous search
-    filteredGroups = searchStopsInIndex(searchQuery, groupsArray);
+    // For smaller datasets, also use async search for consistency
+    filteredGroups = searchQuery && searchQuery.trim() !== '' 
+      ? await searchStopsInIndexAsync(searchQuery, groupsArray)
+      : groupsArray;
   }
   
   const useVirtualList = filteredGroups.length > 100; // Threshold
