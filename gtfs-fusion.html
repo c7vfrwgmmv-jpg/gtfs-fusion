@@ -1437,7 +1437,7 @@ function isCircularRoute(stopSequence) {
 // Helper: Exact array equality check
 function arrayEquals(a, b) {
   if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; ++i) {
+  for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return false;
   }
   return true;
@@ -1445,7 +1445,7 @@ function arrayEquals(a, b) {
 // Helper: Subsequence check (preserves order, allows missing stops)
 function isSubsequence(small, big) {
   let j = 0;
-  for (let i = 0; i < big.length && j < small.length; ++i) {
+  for (let i = 0; i < big.length && j < small.length; i++) {
     if (small[j] === big[i]) j++;
   }
   return j === small.length;
