@@ -1174,6 +1174,8 @@ const PARSER_WORKER_CODE = `
       
       const cols = line.split(',');
       
+      // Skip if required columns are missing or out of bounds
+      if (headers.tripIdx === -1 || headers.stopIdx === -1) continue;
       if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) continue;
       
       const tripId = getCol(cols, headers.tripIdx);
@@ -1427,7 +1429,7 @@ async function parseWithStrategy(text, fileName, onProgress) {
     if (fileType === 'stop_times') {
       // Parse header to get column indices
       const lines = text.split('\n');
-      if (lines.length === 0) {
+      if (lines.length === 0 || !lines[0] || !lines[0].trim()) {
         return Object.create(null); // Return empty index for empty file
       }
       
