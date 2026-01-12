@@ -4024,16 +4024,14 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     tripStopMaps[trip.trip_id] = sortedStops;
   });
 
-  // Step 0: Detect stations requiring split and collect all platforms (combined for efficiency)
-  const stationRequiresSplit = new Set();
-  const stationToAllStopIds = new Map(); // Will store Arrays, not Sets
+  // Step 0: Collect all platforms for each station
+  const stationToAllStopIds = new Map();
   
   sortedTrips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     
-    // Check for consecutive stops at the same station
-    for (let i = 0; i < stops.length; i++) {
-      const stopId = stops[i].stop_id;
+    stops.forEach(stopTime => {
+      const stopId = stopTime.stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
       
       // Collect all platforms globally
@@ -4041,18 +4039,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         stationToAllStopIds.set(stationId, new Set());
       }
       stationToAllStopIds.get(stationId).add(stopId);
-      
-      // Check if next stop is at the same station (consecutive stops)
-      if (i + 1 < stops.length) {
-        const nextStopId = stops[i + 1].stop_id;
-        const nextStationId = getStationIdWithPolicy(nextStopId, stopsIndex, allowedSet);
-        
-        // If consecutive stops are at the same station, mark for splitting
-        if (stationId === nextStationId) {
-          stationRequiresSplit.add(stationId);
-        }
-      }
-    }
+    });
   });
   
   // Convert Sets to Arrays once for efficiency
@@ -4085,8 +4072,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       return {
         stopId,
         stationId,
-        occurrence: occurrenceCount.get(stationId),
-        requiresSplit: stationRequiresSplit.has(stationId),
+        occurrence: occurrenceCount.get(stationId)
       };
     });
     
@@ -4107,10 +4093,8 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     if (!seenCoreStations.has(stationId)) {
       seenCoreStations.add(stationId);
       
-      // Determine stopIds based on split requirement
-      const stopIdsForStation = stationRequiresSplit.has(stationId)
-        ? [stopId]
-        : (stationToAllStopIds.get(stationId) || [stopId]);
+      // Get all stop IDs for this station
+      const stopIdsForStation = stationToAllStopIds.get(stationId) || [stopId];
       
       const coreEntry = {
         id: stopIdsForStation[0],
@@ -4123,16 +4107,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       
       masterList.push(coreEntry);
       
-      // Add to map with both possible keys (split/merge)
-      const mergedKey = `${stationId}::1`;
-      masterListMap.set(mergedKey, masterList.length - 1);
-      
-      // If split required, also add keys for each platform
-      if (stationRequiresSplit.has(stationId)) {
-        stopIdsForStation.forEach(sid => {
-          masterListMap.set(`${stationId}::1::${sid}`, masterList.length - 1);
-        });
-      }
+      // Add to map
+      const key = `${stationId}::1`;
+      masterListMap.set(key, masterList.length - 1);
     }
   });
 
@@ -4140,11 +4117,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   tripSequences.forEach((sequence, tripId) => {
     let lastMasterIdx = -1;
     
-    sequence.forEach(({stopId, stationId, occurrence, requiresSplit}) => {
-      // Create lookup key as string for Map efficiency
-      const lookupKey = requiresSplit 
-        ? `${stationId}::${occurrence}::${stopId}` // Key: (stationId, occurrence, stopId)
-        : `${stationId}::${occurrence}`; // Key: (stationId, occurrence) - merge platforms
+    sequence.forEach(({stopId, stationId, occurrence}) => {
+      // Create lookup key - just use stationId and occurrence
+      const lookupKey = `${stationId}::${occurrence}`;
       
       const existingIdx = masterListMap.get(lookupKey);
       
@@ -4155,12 +4130,8 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         const baseName = getStationDisplayName(stationId, [stopId]);
         const displayName = occurrence > 1 ? `${baseName} (${occurrence})` : baseName;
         
-        // Determine stopIds based on split requirement
-        // Split mode: Keep platforms separate (one stop_id per row) for trips using multiple platforms
-        // Merge mode: Combine all platforms (multiple stop_ids) when no trip uses multiple platforms
-        const stopIdsForEntry = requiresSplit 
-          ? [stopId]
-          : (stationToAllStopIds.get(stationId) || [stopId]);
+        // Get all stop IDs for this station
+        const stopIdsForEntry = stationToAllStopIds.get(stationId) || [stopId];
         
         const newEntry = {
           id: stopIdsForEntry[0],
