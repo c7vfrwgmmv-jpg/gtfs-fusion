@@ -963,6 +963,10 @@ const simplifiedShapesCache = {};
 // Performance optimization: Time parsing cache
 const TIME_PARSE_CACHE = new Map();
 
+// IndexedDB cache: preloaded stop_times for current route
+let stopTimesCache = {};
+let stopTimesCacheRouteKey = null;
+
 // ═══════════════════════════════════════════════════════════════
 // WORKER ORCHESTRATION LAYER (WRAPS EXISTING PARSERS)
 // ═══════════════════════════════════════════════════════════════
@@ -971,6 +975,10 @@ const WORKER_THRESHOLD_MB = 25; // Use workers if file > 25MB
 const WORKER_POOL_SIZE = 4;
 const PROGRESS_THROTTLE_MS = 100; // 10 FPS
 const PARALLEL_CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for parallel processing
+
+// IndexedDB configuration for large feeds
+const STOP_TIMES_DB_THRESHOLD = 12_000_000; // 12 million rows - switch to IndexedDB
+let currentDbName = null; // Global DB name for cleanup
 
 // Worker code - COPIES existing sophisticated parsing functions
 const PARSER_WORKER_CODE = `
@@ -1533,6 +1541,28 @@ async function parseStopTimesParallel(text, onProgress) {
     else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
   });
   
+  // Count total rows (excluding header and empty lines)
+  let estimatedRowCount = 0;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim()) estimatedRowCount++;
+  }
+  
+  console.log('[Parse] stop_times: estimated ' + estimatedRowCount.toLocaleString() + ' rows');
+  
+  // Decision: Use IndexedDB for large feeds (≥12M rows)
+  if (estimatedRowCount >= STOP_TIMES_DB_THRESHOLD) {
+    console.log('[Parse] Large feed detected (≥12M rows) - switching to IndexedDB mode');
+    try {
+      return await parseStopTimesToIndexedDB(text, onProgress);
+    } catch (error) {
+      console.error('[IndexedDB] Failed to use IndexedDB:', error);
+      throw new Error('Cache dysku niedostępny - spróbuj mniejszego feedu lub użyj przeglądarki desktopowej');
+    }
+  }
+  
+  // RAM mode for smaller feeds
+  console.log('[Parse] Using RAM mode (< 12M rows)');
+  
   // Split text into chunks for parallel processing
   const chunkSize = Math.ceil(lines.length / WORKER_POOL_SIZE);
   const chunks = [];
@@ -1635,6 +1665,255 @@ async function parseShapesParallel(text, onProgress) {
   
   return shapesIndex;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// INDEXEDDB SUPPORT FOR LARGE FEEDS (≥12M stop_times rows)
+// ═══════════════════════════════════════════════════════════════
+
+// Open or create IndexedDB for stop_times
+function openStopTimesDB(dbName) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, 1);
+    
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      
+      // Delete old object store if exists
+      if (db.objectStoreNames.contains('stop_times')) {
+        db.deleteObjectStore('stop_times');
+      }
+      
+      // Create object store with auto-increment key
+      const objectStore = db.createObjectStore('stop_times', { autoIncrement: true });
+      
+      // Create index on trip_id for fast lookups
+      objectStore.createIndex('trip_id', 'trip_id', { unique: false });
+    };
+  });
+}
+
+// Write stop_times batch to IndexedDB
+function writeStopTimesBatch(db, batch) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['stop_times'], 'readwrite');
+    const objectStore = transaction.objectStore('stop_times');
+    
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    
+    for (const record of batch) {
+      objectStore.add(record);
+    }
+  });
+}
+
+// Query stop_times from IndexedDB by trip_id
+function queryStopTimesFromDB(db, tripId) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['stop_times'], 'readonly');
+    const objectStore = transaction.objectStore('stop_times');
+    const index = objectStore.index('trip_id');
+    const request = index.getAll(tripId);
+    
+    request.onsuccess = () => {
+      const results = request.result || [];
+      // Sort by stop_sequence
+      results.sort((a, b) => a.stop_sequence - b.stop_sequence);
+      resolve(results);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+// Parse stop_times to IndexedDB for large feeds
+async function parseStopTimesToIndexedDB(text, onProgress) {
+  const startTime = performance.now();
+  
+  // Create unique DB name
+  const timestamp = Date.now();
+  const dbName = `gtfs_session_${timestamp}`;
+  currentDbName = dbName;
+  
+  console.log('[IndexedDB] Creating database: ' + dbName);
+  
+  const db = await openStopTimesDB(dbName);
+  
+  // Parse header
+  const lines = text.split('\n');
+  const headerLine = lines[0].replace(/^\uFEFF/, '');
+  const rawHeaders = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+  
+  const headers = {
+    tripIdx: -1,
+    stopIdx: -1,
+    seqIdx: -1,
+    arrIdx: -1,
+    depIdx: -1,
+    pickupIdx: -1,
+    dropoffIdx: -1
+  };
+  
+  rawHeaders.forEach((h, i) => {
+    const normalized = normalizeKey(h);
+    if (normalized === 'trip_id') headers.tripIdx = i;
+    else if (normalized === 'stop_id') headers.stopIdx = i;
+    else if (normalized === 'stop_sequence') headers.seqIdx = i;
+    else if (normalized === 'arrival_time') headers.arrIdx = i;
+    else if (normalized === 'departure_time') headers.depIdx = i;
+    else if (normalized === 'pickup_type') headers.pickupIdx = i;
+    else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
+  });
+  
+  const getCol = (cols, idx) => {
+    if (idx === -1 || idx >= cols.length) return '';
+    let val = cols[idx];
+    if (!val) return '';
+    if (val[0] === '"' && val[val.length-1] === '"') {
+      val = val.substring(1, val.length - 1);
+    }
+    if (val[0] === ' ' || val[val.length-1] === ' ') {
+      return val.trim();
+    }
+    return val;
+  };
+  
+  // Process in batches
+  const BATCH_SIZE = 1000;
+  const PROGRESS_INTERVAL = 100000; // Report every 100k rows
+  let batch = [];
+  let rowCount = 0;
+  
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    const cols = line.split(',');
+    
+    if (headers.tripIdx === -1 || headers.stopIdx === -1) continue;
+    if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) continue;
+    
+    const tripId = getCol(cols, headers.tripIdx);
+    const stopId = getCol(cols, headers.stopIdx);
+    
+    if (!tripId || !stopId) continue;
+    
+    batch.push({
+      trip_id: tripId,
+      stop_id: stopId,
+      arrival_time: getCol(cols, headers.arrIdx),
+      departure_time: getCol(cols, headers.depIdx),
+      stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
+      pickup_type: getCol(cols, headers.pickupIdx) || '0',
+      drop_off_type: getCol(cols, headers.dropoffIdx) || '0'
+    });
+    
+    rowCount++;
+    
+    // Write batch when full
+    if (batch.length >= BATCH_SIZE) {
+      await writeStopTimesBatch(db, batch);
+      batch = [];
+      
+      // Report progress
+      if (rowCount % PROGRESS_INTERVAL === 0 && onProgress) {
+        const percent = Math.floor((i / lines.length) * 100);
+        onProgress(rowCount, percent);
+      }
+    }
+  }
+  
+  // Write remaining batch
+  if (batch.length > 0) {
+    await writeStopTimesBatch(db, batch);
+  }
+  
+  const duration = performance.now() - startTime;
+  console.log('[IndexedDB] Stored ' + rowCount.toLocaleString() + ' stop_times records in ' + duration.toFixed(0) + 'ms');
+  
+  if (onProgress) {
+    onProgress(rowCount, 100);
+  }
+  
+  return { db, dbName, rowCount };
+}
+
+// Adapter function to get stop times - works with both RAM and DB modes
+async function getStopTimesForTrip(tripId) {
+  if (state.gtfsData.stopTimesIndex) {
+    // RAM mode (current)
+    return getStopTimesIndexOrCache()[tripId] || [];
+  } else if (state.gtfsData.stopTimesDB) {
+    // DB mode - check cache first
+    if (stopTimesCache[tripId]) {
+      return stopTimesCache[tripId];
+    }
+    // Query from DB and cache
+    const result = await queryStopTimesFromDB(state.gtfsData.stopTimesDB, tripId);
+    stopTimesCache[tripId] = result;
+    return result;
+  }
+  return [];
+}
+
+// Synchronous version for backward compatibility - returns empty if not in cache
+function getStopTimesForTripSync(tripId) {
+  if (state.gtfsData.stopTimesIndex) {
+    // RAM mode
+    return getStopTimesIndexOrCache()[tripId] || [];
+  } else if (state.gtfsData.stopTimesDB) {
+    // DB mode - return from cache only
+    return stopTimesCache[tripId] || [];
+  }
+  return [];
+}
+
+// Helper to get the stopTimesIndex or cache (for backward compatibility)
+function getStopTimesIndexOrCache() {
+  if (state.gtfsData.stopTimesIndex) {
+    return state.gtfsData.stopTimesIndex;
+  } else if (state.gtfsData.stopTimesDB) {
+    // Return the cache as if it were the index
+    return stopTimesCache;
+  }
+  return {};
+}
+
+// Preload stop_times for a list of trips into cache
+async function preloadStopTimesForTrips(tripIds, onProgress) {
+  if (!state.gtfsData.stopTimesDB) return; // RAM mode doesn't need preloading
+  
+  const toLoad = tripIds.filter(id => !stopTimesCache[id]);
+  if (toLoad.length === 0) return;
+  
+  console.log('[Cache] Preloading stop_times for ' + toLoad.length + ' trips...');
+  
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < toLoad.length; i += BATCH_SIZE) {
+    const batch = toLoad.slice(i, Math.min(i + BATCH_SIZE, toLoad.length));
+    await Promise.all(batch.map(async (tripId) => {
+      const result = await queryStopTimesFromDB(state.gtfsData.stopTimesDB, tripId);
+      stopTimesCache[tripId] = result;
+    }));
+    
+    if (onProgress) {
+      const percent = Math.floor(((i + batch.length) / toLoad.length) * 100);
+      onProgress(i + batch.length, toLoad.length, percent);
+    }
+  }
+  
+  console.log('[Cache] Preloaded ' + toLoad.length + ' trips');
+}
+
+// Cleanup IndexedDB on page unload
+window.addEventListener('beforeunload', () => {
+  if (currentDbName) {
+    console.log('[IndexedDB] Cleanup: deleting ' + currentDbName);
+    indexedDB.deleteDatabase(currentDbName);
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════
 // THROTTLED RENDERING (prevents UI thrashing)
@@ -2982,11 +3261,36 @@ perfTimings.parseEnd = performance.now();
         // Parse stop_times with parseWithStrategy (will use parallel workers if >25MB)
         perfTimings.stopTimesStart = performance.now();
         const stopTimesText = await stopTimesFile.async('string');
-        const stopTimesIndex = await parseWithStrategy(stopTimesText, 'stop_times.txt', (rowsProcessed, percent) => {
-          state.loadingStep = `Parsing stop_times: ${rowsProcessed.toLocaleString()} rows`;
+        const stopTimesResult = await parseWithStrategy(stopTimesText, 'stop_times.txt', (rowsProcessed, percent) => {
+          // Determine if using DB mode based on the message
+          const isDbMode = stopTimesResult && stopTimesResult.db;
+          if (isDbMode) {
+            state.loadingStep = `Ogromny feed wykryty - zapisywanie do cache dysku... (${rowsProcessed.toLocaleString()} wierszy)`;
+          } else {
+            state.loadingStep = `Przetwarzanie stop_times (${rowsProcessed.toLocaleString()} wierszy)`;
+          }
           state.loadingProgressPercent = percent || state.loadingProgressPercent;
           render();
         });
+        
+        // Handle both IndexedDB and RAM results
+        let stopTimesIndex = null;
+        let stopTimesDB = null;
+        let stopTimesDbName = null;
+        
+        if (stopTimesResult && stopTimesResult.db) {
+          // IndexedDB mode (large feed)
+          stopTimesDB = stopTimesResult.db;
+          stopTimesDbName = stopTimesResult.dbName;
+          console.log('[Load] Using IndexedDB mode - ' + stopTimesResult.rowCount.toLocaleString() + ' rows');
+          state.loadingStep = `💾 Cache dysku aktywny (${stopTimesResult.rowCount.toLocaleString()} wierszy)`;
+          render();
+        } else {
+          // RAM mode (normal feed)
+          stopTimesIndex = stopTimesResult;
+          console.log('[Load] Using RAM mode');
+        }
+        
         perfTimings.stopTimesEnd = performance.now();
         
         let shapesIndex = {};
@@ -3015,14 +3319,21 @@ perfTimings.parseEnd = performance.now();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         
         // Generate missing direction_id values with chunked processing
-        state.loadingStep = 'Generowanie brakujących direction_id...'; render();
-        perfTimings.enrichStart = performance.now();
-        await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
-          state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
-          state.loadingProgressPercent = percent;
+        // Skip for IndexedDB mode (would require loading all stop_times into RAM)
+        if (stopTimesIndex) {
+          state.loadingStep = 'Generowanie brakujących direction_id...'; render();
+          perfTimings.enrichStart = performance.now();
+          await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
+            state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
+            state.loadingProgressPercent = percent;
             render();
           });
           perfTimings.enrichEnd = performance.now();
+        } else {
+          console.log('[Load] Skipping direction_id enrichment in IndexedDB mode');
+          perfTimings.enrichStart = performance.now();
+          perfTimings.enrichEnd = performance.now();
+        }
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -3050,6 +3361,8 @@ state.gtfsData = {
   calendar,
   calendarDates,
   stopTimesIndex,
+  stopTimesDB,
+  stopTimesDbName,
   stopsIndex,
   tripsIndex,
   logicalRoutes,
@@ -3122,7 +3435,11 @@ if (dates.length > 0) {
         console.log(`  Routes: ${routes.length.toLocaleString()}`);
         console.log(`  Trips: ${trips.length.toLocaleString()}`);
         console.log(`  Stops: ${stops.length.toLocaleString()}`);
-        console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips`);
+        if (stopTimesIndex) {
+          console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips (RAM mode)`);
+        } else if (stopTimesDB) {
+          console.log(`  Stop times: ${stopTimesResult.rowCount.toLocaleString()} rows (IndexedDB mode)`);
+        }
         if (Object.keys(shapesIndex).length > 0) {
           console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
         }
@@ -3145,7 +3462,8 @@ if (dates.length > 0) {
             routes: routes.length,
             trips: trips.length,
             stops: stops.length,
-            stopTimes: Object.keys(stopTimesIndex).length,
+            stopTimes: stopTimesIndex ? Object.keys(stopTimesIndex).length : (stopTimesResult ? stopTimesResult.rowCount : 0),
+            stopTimesMode: stopTimesDB ? 'IndexedDB' : 'RAM',
             shapes: Object.keys(shapesIndex).length
           }
         };
@@ -3834,7 +4152,8 @@ function buildRouteProfileForCurrentSelection() {
     return state.routeProfiles[key][dir];
   }
 
-  const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData;
+  const { tripsIndex, stopsIndex } = state.gtfsData;
+  const stopTimesIndex = getStopTimesIndexOrCache();
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
   // 3. Zbierz trips tej logical linii + kierunku (bez filtra daty)
@@ -4605,7 +4924,8 @@ function ensureCanonicalMasterListForCurrentSelection() {
     return null; // Fallback
   }
 
-  const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData;
+  const { tripsIndex, stopsIndex } = state.gtfsData;
+  const stopTimesIndex = getStopTimesIndexOrCache();
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
   let routeIds = [];
@@ -4677,7 +4997,7 @@ function getAllTripsForRoute() {
       if (trips.length === 0) return null;
       const tripStopMaps = {};
       trips.forEach(trip => {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         stopTimes.sort((a,b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
         tripStopMaps[trip.trip_id] = stopTimes;
       });
@@ -5017,7 +5337,7 @@ function getAvailableDirections() {
     if (t.trip_id) dirs[dirId].tripIds.add(t.trip_id);
     
     // Extract final stop name from stop_times
-    const stopTimes = state.gtfsData.stopTimesIndex[t.trip_id] || [];
+    const stopTimes = getStopTimesIndexOrCache()[t.trip_id] || [];
     const sorted = stopTimes.slice().sort((a, b) => a.stop_sequence - b.stop_sequence);
     const lastStopId = sorted[sorted.length - 1]?.stop_id;
     const lastStop = state.gtfsData.stopsIndex[lastStopId];
@@ -5039,7 +5359,7 @@ function getAvailableDirections() {
     let termini = '';
     let bestStops = null, bestLen = 0;
     for (const t of info.trips) {
-      const sts = (state.gtfsData.stopTimesIndex && state.gtfsData.stopTimesIndex[t.trip_id]) || [];
+      const sts = getStopTimesIndexOrCache()[t.trip_id] || [];
       if (sts.length > bestLen) { bestLen = sts.length; bestStops = sts; }
     }
     if (bestStops && bestStops.length > 0) {
@@ -5357,7 +5677,7 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
   if (drawnVariantCoords.length < 2) {
     const allStopIds = new Set();
     routeTripsAll.forEach(trip => {
-      const sts = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const sts = getStopTimesIndexOrCache()[trip.trip_id] || [];
       sts.forEach(st => { if (st && st.stop_id) allStopIds.add(st.stop_id); });
     });
     const allCoords = [];
@@ -5800,8 +6120,21 @@ function selectRoute(route) {
   // Invalidate canonical cache when route changes
   invalidateCanonicalCacheForCurrentSelection();
 
-  resetMap();
-  render();
+  // Preload stop_times for this route if using IndexedDB
+  if (state.gtfsData.stopTimesDB) {
+    const tripIds = routeTrips.map(t => t.trip_id);
+    preloadStopTimesForTrips(tripIds, (loaded, total, percent) => {
+      state.loadingStep = `Ładowanie danych trasy... ${loaded}/${total}`;
+      state.loadingProgressPercent = percent;
+    }).then(() => {
+      state.loadingStep = '';
+      resetMap();
+      render();
+    });
+  } else {
+    resetMap();
+    render();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -6081,7 +6414,7 @@ async function renderStopsView() {
   const stopToRoutes = await getStopToRoutesMap(
     state.gtfsData.routes,
     state.gtfsData.tripsIndex,
-    state.gtfsData.stopTimesIndex,
+    getStopTimesIndexOrCache(),
     isInitialLoad ? (processed, total, percent) => {
       stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
     } : null
@@ -6492,7 +6825,7 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     
     trips.forEach(trip => {
       if (! activeServices.includes(trip.service_id)) return;
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
       if (stopTimes.some(st => st.stop_id === stopId)) {
         passesThrough = true;
         tripCount++;
@@ -6519,7 +6852,7 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     // UPROSZCZENIE: dla przystanku jest tylko jeden kierunek tej linii
     const representative = findMostFrequentTripPattern(
       activeTrips, 
-      state.gtfsData.stopTimesIndex,
+      getStopTimesIndexOrCache(),
       stopId,
       activeServices
     );
@@ -6595,7 +6928,7 @@ function getTripDestination(dep) {
   }
   
   // 2. Fallback: last stop_name from stop_times sequence
-  const stopTimes = state.gtfsData.stopTimesIndex[dep.trip.trip_id] || [];
+  const stopTimes = getStopTimesIndexOrCache()[dep.trip.trip_id] || [];
   if (stopTimes.length > 0) {
     const sorted = stopTimes.slice().sort((a, b) => {
       const seqA = parseInt(a.stop_sequence || '0', 10);
@@ -6810,7 +7143,7 @@ let masterList = ensureCanonicalMasterListForCurrentSelection();
 
 const tripStopMaps = {};
 trips.forEach(trip => {
-  const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+  const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
   stopTimes.sort((a,b)=>parseInt(a.stop_sequence||'0') - parseInt(b.stop_sequence||'0'));
   tripStopMaps[trip.trip_id] = stopTimes;
 });
@@ -7037,7 +7370,7 @@ masterList.forEach((mStop) => {
   
   // Go through ALL trips (not just sortedTrips) to include hidden ones
   trips.forEach(trip => {
-    const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+    const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
     const stopTime = stopTimes.find(st => allStopIds.includes(st.stop_id));
     
     if (stopTime) {
@@ -7231,7 +7564,7 @@ function openStopTimetable(stopId) {
     const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
     
     directionTrips.forEach(trip => {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === stopId);
       
       if (stopTime) {
@@ -7254,7 +7587,7 @@ function openStopTimetable(stopId) {
       const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
       
       routeTrips.forEach(trip => {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         const stopTime = stopTimes.find(st => st.stop_id === stopId);
         
         if (stopTime) {
@@ -7308,7 +7641,7 @@ function openStopTimetable(stopId) {
     if (mainDestination && directionTrips.length > 0) {
       const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
       if (trip) {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         if (stopTimes.length > 0) {
           const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
           const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
@@ -7319,7 +7652,7 @@ function openStopTimetable(stopId) {
 
     if (!mainDestination && directionTrips.length > 0) {
       const firstTrip = directionTrips[0];
-      const stopTimes = state.gtfsData.stopTimesIndex[firstTrip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[firstTrip.trip_id] || [];
       if (stopTimes.length > 0) {
         const lastStopTime = stopTimes[stopTimes.length - 1];
         const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
@@ -7386,7 +7719,7 @@ function openStopTimetable(stopId) {
 
   // Helper: get trip terminus
   const getTripTerminus = (tripId) => {
-    const stopTimes = state.gtfsData.stopTimesIndex[tripId] || [];
+    const stopTimes = getStopTimesIndexOrCache()[tripId] || [];
     if (stopTimes.length === 0) return null;
     const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
     const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
@@ -7836,9 +8169,22 @@ function openStopTimetable(stopId) {
 
 switch(currentView) {
   case VIEW.LOADING:
+    const progressBarHtml = state.loadingProgressPercent > 0 
+      ? `<div style="width: 300px; background: #e5e7eb; border-radius: 8px; height: 12px; margin: 1rem auto; overflow: hidden;">
+           <div style="width: ${state.loadingProgressPercent}%; height: 100%; background: linear-gradient(90deg,#60a5fa,#3b82f6); border-radius: 8px; transition: width 200ms ease;"></div>
+         </div>
+         <p class="text-sm text-gray-500">${state.loadingProgressPercent}%</p>`
+      : '';
+    
+    const dbModeIndicator = state.loadingStep && state.loadingStep.includes('cache dysku')
+      ? `<p class="text-sm text-blue-600 font-semibold mt-2">💾 Używam cache dysku (feed > 12M wierszy)</p>`
+      : '';
+    
     html += `<div class="flex-1 flex flex-col items-center justify-center bg-gray-50">
     <div class="text-center">
-      <p class="text-gray-600 font-medium animate-ellipsis">Przetwarzanie</p>
+      <p class="text-gray-600 font-medium">${state.loadingStep || 'Przetwarzanie'}</p>
+      ${progressBarHtml}
+      ${dbModeIndicator}
       <div style="margin-top:1rem;">
         <button id="cancel-parse" class="bg-red-500 text-white px-3 py-1 hover:bg-red-600">Anuluj</button>
       </div>
@@ -7874,7 +8220,7 @@ switch(currentView) {
       const trips = state.gtfsData.tripsIndex[route.route_id] || [];
       trips.forEach(trip => {
         if (!activeServices.includes(trip.service_id)) return;
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         const stopTime = stopTimes.find(st => st.stop_id === stop.stop_id);
         if (stopTime) {
           const departureTime = stopTime.departure_time || stopTime.arrival_time;
@@ -8393,7 +8739,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     const trips = state.gtfsData.tripsIndex[route.route_id] || [];
     trips.forEach(trip => {
       if (!activeServices.includes(trip.service_id)) return;
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === state.selectedStop.stop_id);
       if (stopTime) {
         const departureTime = stopTime.departure_time || stopTime.arrival_time;
