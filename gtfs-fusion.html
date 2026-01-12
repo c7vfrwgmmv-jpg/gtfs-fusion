@@ -3012,6 +3012,16 @@ if (dates.length > 0) {
         console.log(`  Simplified shapes cache: ${Object.keys(simplifiedShapesCache).length} entries`);
         console.log('═══════════════════════════════════════════════');
         
+        if (globalWorkerPool) {
+          const stats = globalWorkerPool.getStats();
+          console.log('');
+          console.log('Worker Statistics:');
+          console.log(`  Workers used: ${stats.totalWorkers}`);
+          console.log(`  Currently busy: ${stats.busyWorkers}`);
+          console.log(`  Active jobs: ${stats.activeJobs}`);
+        }
+        
+        
         // Store metrics in state for optional display
         const perfMetrics = {
           totalTime: performance.now() - perfTimings.totalStart,
