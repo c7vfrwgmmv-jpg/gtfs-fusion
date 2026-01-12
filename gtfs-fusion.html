@@ -3946,85 +3946,6 @@ function buildRouteProfileForCurrentSelection() {
   return profile;
 }
 
-function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
-  const profile = getCurrentRouteProfile();
-  if (!profile || !profile.coreStops) {
-    // This should never happen, but fail gracefully
-    return [];
-  }
-  
-  const coreStops = profile.coreStops;
-  const allowedSet = profile.stationMergeAllowed;
-  
-  const stopsByStation = new Map();
-  
-  coreStops.forEach(stopId => {
-    const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-    if (!stopsByStation.has(stationId)) {
-      stopsByStation.set(stationId, []);
-    }
-    stopsByStation.get(stationId).push(stopId);
-  });
-  
-  const getStationDisplayName = (stationId, stopIds) => {
-    if (stopsIndex[stationId]?.stop_name) {
-      return stopsIndex[stationId].stop_name;
-    }
-    const firstStop = stopsIndex[stopIds[0]];
-    return firstStop?.stop_name || stationId;
-  };
-
-  const masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
-    id: stopIds[0],
-    name: getStationDisplayName(stationId, stopIds),
-    stopIds: stopIds
-  }));
-  
-  // Step 4: Add branch stops (stops outside core)
-  const masterListStationIds = masterList.map(entry => {
-    return getStationIdWithPolicy(entry.stopIds[0], stopsIndex, allowedSet);
-  });
-  
-  // Process all trips to add stops not in core
-  sortedTrips.forEach(trip => {
-    const tripStops = tripStopMaps[trip.trip_id] || [];
-    let lastMasterIdx = -1;
-    
-    tripStops.forEach(stopTime => {
-      const stopId = stopTime.stop_id;
-      const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-      
-      let existingIdx = -1;
-      for (let i = 0; i < masterListStationIds.length; i++) {
-        if (masterListStationIds[i] === stationId) {
-          existingIdx = i;
-          break;
-        }
-      }
-      
-      if (existingIdx !== -1) {
-        // Station already exists - add stop_id if not present
-        if (!masterList[existingIdx].stopIds.includes(stopId)) {
-          masterList[existingIdx].stopIds.push(stopId);
-        }
-        lastMasterIdx = existingIdx;
-      } else {
-        const newEntry = {
-          id: stopId,
-          name: getStationDisplayName(stationId, [stopId]),
-          stopIds: [stopId]
-        };
-        
-        const insertPos = lastMasterIdx + 1;
-        masterList.splice(insertPos, 0, newEntry);
-        masterListStationIds.splice(insertPos, 0, stationId);
-        lastMasterIdx = insertPos;
-      }
-    });
-  });
-  
-  return masterList;
-}
 
 function createTripMappings(sortedTrips, tripStopMaps, masterList) {
   return sortedTrips.map(trip => {
@@ -4163,12 +4084,13 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       const stopId = stopTime.stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
       
-      // Check if continuing same station
+      // Determine if we're entering a different station (new or returning after visiting others)
+      // This enables proper occurrence counting for loops (e.g., A→B→A becomes occurrence 1 and 2)
       const prevStationId = idx > 0 
         ? getStationIdWithPolicy(stops[idx - 1].stop_id, stopsIndex, allowedSet)
         : null;
       
-      // Increment occurrence only when entering station (new or return)
+      // Increment occurrence counter when transitioning to a different station
       if (prevStationId !== stationId) {
         occurrenceCount.set(stationId, (occurrenceCount.get(stationId) || 0) + 1);
       }
@@ -4219,14 +4141,15 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         lastMasterIdx = existingIdx;
       } else {
         // Create new entry
-        const stop = stopsIndex[stopId] || {};
-        const baseName = stopsIndex[stationId]?.stop_name || stop.stop_name || stationId;
+        const baseName = getStationDisplayName(stationId, [stopId]);
         const displayName = occurrence > 1 ? `${baseName} (${occurrence})` : baseName;
         
-        // Determine stopIds
+        // Determine stopIds based on split requirement
+        // Split mode: Keep platforms separate (one stop_id per row) for trips using multiple platforms
+        // Merge mode: Combine all platforms (multiple stop_ids) when no trip uses multiple platforms
         const stopIdsForEntry = requiresSplit 
-          ? [stopId]  // Don't merge - single platform
-          : Array.from(stationToAllStopIds.get(stationId) || [stopId]); // Merge all
+          ? [stopId]
+          : Array.from(stationToAllStopIds.get(stationId) || [stopId]);
         
         const newEntry = {
           id: stopIdsForEntry[0],
@@ -6472,7 +6395,6 @@ if (variantsData && variantsData.variantDetails) {
 }
 
 let masterList = ensureCanonicalMasterListForCurrentSelection();
-let usingCanonical = !!masterList;
 
 const tripStopMaps = {};
 trips.forEach(trip => {
@@ -6550,12 +6472,6 @@ sortedTrips.forEach(t => {
   }
 });
 
-// === STEP 5: Get master list (canonical or fallback) ===
-if (!usingCanonical) {
-  // Fallback: use old buildMasterList
-  masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
-}
-
 if (!masterList || masterList.length === 0) {
   tableRoot.innerHTML = "<div class='p-4 text-gray-500'>Unable to build schedule.</div>";
   return;
@@ -6613,7 +6529,7 @@ const dir = state.selectedDirection || '0';
 const columnOrderCacheKey = `${key}::${dir}::${state.selectedDate}::${state.showAllTrips}`;
 
 let orderedServiceTrips = serviceTrips;
-if (usingCanonical && serviceTrips.length > 0) {
+if (serviceTrips.length > 0) {
   const serviceTripMappings = serviceTrips.map(trip => {
     const originalIdx = sortedTrips.findIndex(t => t.trip_id === trip.trip_id);
     return tripMappings[originalIdx];
