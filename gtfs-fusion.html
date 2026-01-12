@@ -2380,11 +2380,11 @@ function createStopTimesIndexProxy() {
   return new Proxy({}, {
     get(target, tripId) {
       if (!db) return [];
-      const result = db.exec(\`
+      const result = db.exec(`
         SELECT * FROM stop_times 
         WHERE trip_id = ? 
         ORDER BY stop_sequence
-      \`, [tripId]);
+      `, [tripId]);
       return result[0] ? convertSQLResultToObjects(result[0]) : [];
     }
   });
@@ -2398,12 +2398,12 @@ function createShapesIndexProxy() {
       if (cache[shapeId]) return cache[shapeId];
       if (!db) return null;
       
-      const result = db.exec(\`
+      const result = db.exec(`
         SELECT shape_pt_lat, shape_pt_lon, shape_pt_sequence 
         FROM shapes 
         WHERE shape_id = ? 
         ORDER BY shape_pt_sequence
-      \`, [shapeId]);
+      `, [shapeId]);
       
       if (result[0] && result[0].values.length > 0) {
         const coords = result[0].values.map(row => [row[0], row[1]]);
