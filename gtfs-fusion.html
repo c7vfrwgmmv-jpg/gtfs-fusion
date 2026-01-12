@@ -2315,8 +2315,31 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
   
   let text;
   try {
-    text = await file.async('string');
-    console.log(`${filename}: text length = ${text.length} characters`);
+    // For large files (> 100MB), use chunked decoding to avoid string size limits
+    if (file._data && file._data.length > 100 * 1024 * 1024) {
+      console.log(`${filename}: Large file detected (${(file._data.length / 1024 / 1024).toFixed(2)} MB), using chunked decoding...`);
+      const decoder = new TextDecoder('utf-8');
+      const chunkSize = 50 * 1024 * 1024; // 50MB chunks
+      const chunks = [];
+      
+      for (let offset = 0; offset < file._data.length; offset += chunkSize) {
+        const end = Math.min(offset + chunkSize, file._data.length);
+        const chunk = file._data.subarray(offset, end);
+        chunks.push(decoder.decode(chunk, { stream: offset + chunkSize < file._data.length }));
+        
+        // Show progress for very large files
+        if (file._data.length > 500 * 1024 * 1024 && offset % (100 * 1024 * 1024) === 0) {
+          console.log(`${filename}: Decoded ${(offset / 1024 / 1024).toFixed(2)} MB / ${(file._data.length / 1024 / 1024).toFixed(2)} MB`);
+        }
+      }
+      
+      text = chunks.join('');
+      console.log(`${filename}: Successfully decoded ${(file._data.length / 1024 / 1024).toFixed(2)} MB to ${text.length.toLocaleString()} characters`);
+    } else {
+      // For small files, use the simple approach
+      text = await file.async('string');
+      console.log(`${filename}: text length = ${text.length.toLocaleString()} characters`);
+    }
   } catch (err) {
     console.error(`${filename}: Failed to extract text:`, err);
     throw new Error(`Failed to extract ${filename}: ${err.message}`);
