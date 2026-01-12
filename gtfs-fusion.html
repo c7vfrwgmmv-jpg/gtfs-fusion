@@ -2452,6 +2452,8 @@ clearStopsSearchIndex();
 clearStopToRoutesCache();
 cachedGroupsArray = null;
 lastStopsDataHash = null;
+state.routeProfiles = {};  // Clear cached route profiles
+state.canonicalMasterLists = {};  // Clear cached master lists
 
 state.gtfsData = {
   routes,
@@ -3153,7 +3155,7 @@ function getStationId(stopId, stopsIndex) {
     const cache = buildStationNameCache(stopsIndex);
     
     if (cache.has(normalizedName)) {
-      return cache. get(normalizedName);
+      return cache.get(normalizedName);
     }
     
     // Fallback: zwróć znormalizowaną nazwę
@@ -3489,6 +3491,9 @@ function buildRouteProfileForCurrentSelection() {
   const stationEdgeFrequency = {};
   const allTripStationData = []; // będziemy potrzebować później
 
+  console.log(`[DEBUG] Building route profile for ${key} direction ${dir}`);
+  console.log(`[DEBUG] Processing ${allTrips.length} trips...`);
+  
   allTrips.forEach(trip => {
     const stsRaw = stopTimesIndex[trip.trip_id] || [];
     const sts = stsRaw
@@ -3496,38 +3501,19 @@ function buildRouteProfileForCurrentSelection() {
       .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
     
     const stationIds = sts.map(st => getStationId(st.stop_id, stopsIndex));
+    const stopIds = sts.map(st => st.stop_id);
     
     // Zapisz dane tripu do późniejszego użycia
     allTripStationData.push({
       tripId: trip.trip_id,
       stationIds: stationIds,
-      stopIds: sts.map(st => st.stop_id)
+      stopIds: stopIds
     });
     
     // Zlicz krawędzie
     for (let i = 0; i < stationIds.length - 1; i++) {
       const edge = stationIds[i] + '→' + stationIds[i + 1];
       stationEdgeFrequency[edge] = (stationEdgeFrequency[edge] || 0) + 1;
-    }
-  });
-
-  const stationMaxOccurrence = new Map();
-  allTripStationData.forEach(({ stationIds }) => {
-    const stationCounts = new Map();
-    stationIds.forEach(stationId => {
-      stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
-    });
-    stationCounts.forEach((count, stationId) => {
-      const currentMax = stationMaxOccurrence.get(stationId) || 0;
-      if (count > currentMax) {
-        stationMaxOccurrence.set(stationId, count);
-      }
-    });
-  });
-  const stationMergeAllowed = new Set();
-  stationMaxOccurrence.forEach((maxCount, stationId) => {
-    if (maxCount <= 1) {
-      stationMergeAllowed.add(stationId);
     }
   });
 
@@ -3909,6 +3895,78 @@ function buildRouteProfileForCurrentSelection() {
     };
   });
 
+  // Build stationMergeAllowed based on ACTUAL VISIBLE stops (after all filtering)
+  // Rule: If ANY consecutive stops at same station in the visible sequence → don't merge
+  console.log(`[DEBUG] ========================================`);
+  console.log(`[DEBUG] Checking consecutive stops in VISIBLE sequences for merge policy...`);
+  console.log(`[DEBUG] ========================================`);
+  
+  const stationsWithConsecutiveStops = new Set();
+  const allStations = new Set();
+  
+  Object.entries(processedTrips).forEach(([tripId, tripData]) => {
+    const pStops = tripData.pStops || [];
+    
+    // Filter pStops the same way the table does:
+    // 1. Exclude strictly technical stops (pickup_type=1 AND drop_off_type=1)
+    // 2. Exclude on-demand-only stops in some cases (though we'll keep them for now)
+    const visibleStops = pStops.filter(st => {
+      const meta = stopMetadata[st.stop_id];
+      if (!meta) return true; // If no metadata, assume visible
+      
+      // Exclude strictly technical stops (no pickup AND no drop-off)
+      if (meta.isStrictlyTechnical) {
+        return false;
+      }
+      
+      return true;
+    });
+    
+    // Get station IDs for the visible stops
+    const visibleStationIds = visibleStops.map(st => getStationId(st.stop_id, stopsIndex));
+    const visibleStopIds = visibleStops.map(st => st.stop_id);
+    
+    // Debug: Show what's actually visible for this trip
+    if (visibleStopIds.length !== pStops.map(st => st.stop_id).length) {
+      console.log(`[DEBUG] Trip ${tripId} filtered ${pStops.length - visibleStops.length} technical stop(s)`);
+    }
+    console.log(`[DEBUG] Trip ${tripId} VISIBLE stops (after filtering):`);
+    console.log(`  stopIds: [${visibleStopIds.join(', ')}]`);
+    console.log(`  stationIds: [${visibleStationIds.map(s => `"${s}"`).join(', ')}]`);
+    
+    // Collect all stations
+    visibleStationIds.forEach(stationId => allStations.add(stationId));
+    
+    // Check for consecutive stops in the VISIBLE sequence
+    for (let i = 0; i < visibleStationIds.length - 1; i++) {
+      if (visibleStationIds[i] === visibleStationIds[i + 1]) {
+        stationsWithConsecutiveStops.add(visibleStationIds[i]);
+        console.log(`  → CONSECUTIVE FOUND: "${visibleStationIds[i]}" at positions ${i} and ${i+1}`);
+        console.log(`     stopIds: ${visibleStops[i].stop_id} → ${visibleStops[i + 1].stop_id}`);
+      }
+    }
+  });
+  
+  console.log(`[DEBUG] ========================================`);
+  console.log(`[DEBUG] Stations with consecutive stops in VISIBLE table: [${Array.from(stationsWithConsecutiveStops).join(', ')}]`);
+  console.log(`[DEBUG] ========================================`);
+  
+  // Only allow merging for stations without consecutive stops in visible sequences
+  const stationMergeAllowed = new Set();
+  allStations.forEach(stationId => {
+    if (!stationsWithConsecutiveStops.has(stationId)) {
+      stationMergeAllowed.add(stationId);
+    }
+  });
+  
+  // Debug: Log merge policy for all stations
+  console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir} (based on VISIBLE stops):`);
+  allStations.forEach(stationId => {
+    const allowed = stationMergeAllowed.has(stationId);
+    console.log(`  "${stationId}": ${allowed ? '✓ MERGE allowed' : '✗ NO MERGE (consecutive in visible table)'}`);
+  });
+  console.log(`[DEBUG] ========================================`);
+
   // 11. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
   const profile = {
@@ -4021,23 +4079,21 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     tripStopMaps[trip.trip_id] = sortedStops;
   });
 
-  // Step 0: Detect stations requiring split and collect all platforms (combined for efficiency)
-  const stationRequiresSplit = new Set();
-  const stationToAllStopIds = new Map(); // Will store Arrays, not Sets
+  // Step 0: Collect all platforms for each station
+  const stationToAllStopIds = new Map();
   
+  console.log(`[DEBUG] Masterlist building - collecting platforms:`);
   sortedTrips.forEach(trip => {
-    const stationStopsInTrip = new Map(); // stationId → Set(stop_id)
     const stops = tripStopMaps[trip.trip_id] || [];
     
     stops.forEach(stopTime => {
       const stopId = stopTime.stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
       
-      // Track stops per station in this trip
-      if (!stationStopsInTrip.has(stationId)) {
-        stationStopsInTrip.set(stationId, new Set());
+      // Debug first occurrence
+      if (!stationToAllStopIds.has(stationId)) {
+        console.log(`  New station: "${stationId}" (from stopId "${stopId}")`);
       }
-      stationStopsInTrip.get(stationId).add(stopId);
       
       // Collect all platforms globally
       if (!stationToAllStopIds.has(stationId)) {
@@ -4045,19 +4101,16 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       }
       stationToAllStopIds.get(stationId).add(stopId);
     });
-    
-    // If trip has >1 stop_id for a station → mark for splitting
-    stationStopsInTrip.forEach((stopIds, stationId) => {
-      if (stopIds.size > 1) {
-        stationRequiresSplit.add(stationId);
-      }
-    });
   });
   
   // Convert Sets to Arrays once for efficiency
+  console.log(`[DEBUG] Final platform mapping:`);
   stationToAllStopIds.forEach((stopIdsSet, stationId) => {
-    stationToAllStopIds.set(stationId, Array.from(stopIdsSet));
+    const stopIdsArray = Array.from(stopIdsSet);
+    stationToAllStopIds.set(stationId, stopIdsArray);
+    console.log(`  "${stationId}" → [${stopIdsArray.join(', ')}] (${stopIdsArray.length} platform${stopIdsArray.length > 1 ? 's' : ''})`);
   });
+
 
   // Step 1: Build trip sequences with occurrence tracking
   const tripSequences = new Map();
@@ -4084,8 +4137,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       return {
         stopId,
         stationId,
-        occurrence: occurrenceCount.get(stationId),
-        requiresSplit: stationRequiresSplit.has(stationId),
+        occurrence: occurrenceCount.get(stationId)
       };
     });
     
@@ -4106,10 +4158,8 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     if (!seenCoreStations.has(stationId)) {
       seenCoreStations.add(stationId);
       
-      // Determine stopIds based on split requirement
-      const stopIdsForStation = stationRequiresSplit.has(stationId)
-        ? [stopId]
-        : (stationToAllStopIds.get(stationId) || [stopId]);
+      // Get all stop IDs for this station
+      const stopIdsForStation = stationToAllStopIds.get(stationId) || [stopId];
       
       const coreEntry = {
         id: stopIdsForStation[0],
@@ -4122,16 +4172,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       
       masterList.push(coreEntry);
       
-      // Add to map with both possible keys (split/merge)
-      const mergedKey = `${stationId}::1`;
-      masterListMap.set(mergedKey, masterList.length - 1);
-      
-      // If split required, also add keys for each platform
-      if (stationRequiresSplit.has(stationId)) {
-        stopIdsForStation.forEach(sid => {
-          masterListMap.set(`${stationId}::1::${sid}`, masterList.length - 1);
-        });
-      }
+      // Add to map
+      const key = `${stationId}::1`;
+      masterListMap.set(key, masterList.length - 1);
     }
   });
 
@@ -4139,11 +4182,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   tripSequences.forEach((sequence, tripId) => {
     let lastMasterIdx = -1;
     
-    sequence.forEach(({stopId, stationId, occurrence, requiresSplit}) => {
-      // Create lookup key as string for Map efficiency
-      const lookupKey = requiresSplit 
-        ? `${stationId}::${occurrence}::${stopId}` // Key: (stationId, occurrence, stopId)
-        : `${stationId}::${occurrence}`; // Key: (stationId, occurrence) - merge platforms
+    sequence.forEach(({stopId, stationId, occurrence}) => {
+      // Create lookup key - just use stationId and occurrence
+      const lookupKey = `${stationId}::${occurrence}`;
       
       const existingIdx = masterListMap.get(lookupKey);
       
@@ -4154,12 +4195,8 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         const baseName = getStationDisplayName(stationId, [stopId]);
         const displayName = occurrence > 1 ? `${baseName} (${occurrence})` : baseName;
         
-        // Determine stopIds based on split requirement
-        // Split mode: Keep platforms separate (one stop_id per row) for trips using multiple platforms
-        // Merge mode: Combine all platforms (multiple stop_ids) when no trip uses multiple platforms
-        const stopIdsForEntry = requiresSplit 
-          ? [stopId]
-          : (stationToAllStopIds.get(stationId) || [stopId]);
+        // Get all stop IDs for this station
+        const stopIdsForEntry = stationToAllStopIds.get(stationId) || [stopId];
         
         const newEntry = {
           id: stopIdsForEntry[0],
