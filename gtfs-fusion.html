@@ -2301,15 +2301,24 @@ async function initDatabase() {
 // Helper function for bulk loading CSV to SQL
 async function loadTableFromCSV(zip, filename, tableName, columns, showProgress = false) {
   const file = findFile(zip, filename);
-  if (!file) return;
+  if (!file) {
+    console.log(`Skipping ${filename} (not found)`);
+    return;
+  }
   
   state.loadingStep = `Ładowanie ${filename}...`;
   render();
   
+  console.log(`Parsing ${filename}...`);
   const text = await file.async('string');
   const rows = parseCSV(text);
   
-  if (rows.length === 0) return;
+  if (rows.length === 0) {
+    console.log(`${filename} is empty, skipping`);
+    return;
+  }
+  
+  console.log(`${filename}: ${rows.length.toLocaleString()} rows to insert`);
   
   const placeholders = columns.map(() => '?').join(', ');
   const stmt = db.prepare(`INSERT INTO ${tableName} VALUES (${placeholders})`);
@@ -2339,6 +2348,9 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
       // Commit and restart transaction for memory efficiency
       db.run('COMMIT');
       db.run('BEGIN TRANSACTION');
+      
+      // Allow browser to breathe and update UI
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
   
@@ -2499,44 +2511,60 @@ function createAgenciesIndexProxy() {
         // Parse and load each file into SQL
         perfTimings.loadStart = performance.now();
         
+        console.log('Loading routes.txt...');
         await loadTableFromCSV(zip.files, 'routes.txt', 'routes', [
           'route_id', 'route_short_name', 'route_long_name', 
           'route_type', 'route_color', 'route_text_color', 'agency_id'
         ]);
+        console.log('✓ routes.txt loaded');
         
+        console.log('Loading trips.txt...');
         await loadTableFromCSV(zip.files, 'trips.txt', 'trips', [
           'trip_id', 'route_id', 'service_id', 'trip_headsign', 
           'direction_id', 'shape_id', 'block_id'
         ]);
+        console.log('✓ trips.txt loaded');
         
+        console.log('Loading stops.txt...');
         await loadTableFromCSV(zip.files, 'stops.txt', 'stops', [
           'stop_id', 'stop_name', 'stop_lat', 'stop_lon', 
           'stop_code', 'location_type', 'parent_station'
         ]);
+        console.log('✓ stops.txt loaded');
         
+        console.log('Loading calendar.txt...');
         await loadTableFromCSV(zip.files, 'calendar.txt', 'calendar', [
           'service_id', 'monday', 'tuesday', 'wednesday', 'thursday',
           'friday', 'saturday', 'sunday', 'start_date', 'end_date'
         ]);
+        console.log('✓ calendar.txt loaded');
         
+        console.log('Loading calendar_dates.txt...');
         await loadTableFromCSV(zip.files, 'calendar_dates.txt', 'calendar_dates', [
           'service_id', 'date', 'exception_type'
         ]);
+        console.log('✓ calendar_dates.txt loaded');
         
         // Large file - show progress
+        console.log('Loading stop_times.txt (this may take a while for large files)...');
         await loadTableFromCSV(zip.files, 'stop_times.txt', 'stop_times', [
           'trip_id', 'stop_sequence', 'stop_id', 'arrival_time', 
           'departure_time', 'pickup_type', 'drop_off_type', 'timepoint'
         ], true); // progressUpdates = true
+        console.log('✓ stop_times.txt loaded');
         
         // Optional files
+        console.log('Loading shapes.txt...');
         await loadTableFromCSV(zip.files, 'shapes.txt', 'shapes', [
           'shape_id', 'shape_pt_lat', 'shape_pt_lon', 'shape_pt_sequence'
         ], true);
+        console.log('✓ shapes.txt loaded');
         
+        console.log('Loading agency.txt...');
         await loadTableFromCSV(zip.files, 'agency.txt', 'agencies', [
           'agency_id', 'agency_name', 'agency_url', 'agency_timezone'
         ]);
+        console.log('✓ agency.txt loaded');
         
         perfTimings.loadEnd = performance.now();
         
