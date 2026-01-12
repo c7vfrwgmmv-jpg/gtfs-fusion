@@ -3511,22 +3511,27 @@ function buildRouteProfileForCurrentSelection() {
     }
   });
 
-  const stationMaxOccurrence = new Map();
+  // Build stationMergeAllowed based on consecutive stop check
+  const stationsWithConsecutiveStops = new Set();
   allTripStationData.forEach(({ stationIds }) => {
-    const stationCounts = new Map();
-    stationIds.forEach(stationId => {
-      stationCounts.set(stationId, (stationCounts.get(stationId) || 0) + 1);
-    });
-    stationCounts.forEach((count, stationId) => {
-      const currentMax = stationMaxOccurrence.get(stationId) || 0;
-      if (count > currentMax) {
-        stationMaxOccurrence.set(stationId, count);
+    // Check for consecutive stops at the same station
+    for (let i = 0; i < stationIds.length - 1; i++) {
+      if (stationIds[i] === stationIds[i + 1]) {
+        stationsWithConsecutiveStops.add(stationIds[i]);
       }
-    });
+    }
   });
+  
+  // Collect all unique stations
+  const allStations = new Set();
+  allTripStationData.forEach(({ stationIds }) => {
+    stationIds.forEach(stationId => allStations.add(stationId));
+  });
+  
+  // Only allow merging for stations without consecutive stops
   const stationMergeAllowed = new Set();
-  stationMaxOccurrence.forEach((maxCount, stationId) => {
-    if (maxCount <= 1) {
+  allStations.forEach(stationId => {
+    if (!stationsWithConsecutiveStops.has(stationId)) {
       stationMergeAllowed.add(stationId);
     }
   });
