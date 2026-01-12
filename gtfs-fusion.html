@@ -3513,19 +3513,17 @@ function buildRouteProfileForCurrentSelection() {
 
   // Build stationMergeAllowed based on consecutive stop check
   const stationsWithConsecutiveStops = new Set();
+  const allStations = new Set();
+  
   allTripStationData.forEach(({ stationIds }) => {
-    // Check for consecutive stops at the same station
+    // Collect all unique stations and check for consecutive stops
+    stationIds.forEach(stationId => allStations.add(stationId));
+    
     for (let i = 0; i < stationIds.length - 1; i++) {
       if (stationIds[i] === stationIds[i + 1]) {
         stationsWithConsecutiveStops.add(stationIds[i]);
       }
     }
-  });
-  
-  // Collect all unique stations
-  const allStations = new Set();
-  allTripStationData.forEach(({ stationIds }) => {
-    stationIds.forEach(stationId => allStations.add(stationId));
   });
   
   // Only allow merging for stations without consecutive stops
