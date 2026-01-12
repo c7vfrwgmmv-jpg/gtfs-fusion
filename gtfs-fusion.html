@@ -3491,6 +3491,9 @@ function buildRouteProfileForCurrentSelection() {
   const stationEdgeFrequency = {};
   const allTripStationData = []; // będziemy potrzebować później
 
+  console.log(`[DEBUG] Building route profile for ${key} direction ${dir}`);
+  console.log(`[DEBUG] Processing ${allTrips.length} trips...`);
+  
   allTrips.forEach(trip => {
     const stsRaw = stopTimesIndex[trip.trip_id] || [];
     const sts = stsRaw
@@ -3498,12 +3501,18 @@ function buildRouteProfileForCurrentSelection() {
       .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
     
     const stationIds = sts.map(st => getStationId(st.stop_id, stopsIndex));
+    const stopIds = sts.map(st => st.stop_id);
+    
+    // Debug: Show trip sequence
+    console.log(`[DEBUG] Trip ${trip.trip_id}:`);
+    console.log(`  stopIds: [${stopIds.join(', ')}]`);
+    console.log(`  stationIds: [${stationIds.map(s => `"${s}"`).join(', ')}]`);
     
     // Zapisz dane tripu do późniejszego użycia
     allTripStationData.push({
       tripId: trip.trip_id,
       stationIds: stationIds,
-      stopIds: sts.map(st => st.stop_id)
+      stopIds: stopIds
     });
     
     // Zlicz krawędzie
