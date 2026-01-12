@@ -2070,7 +2070,7 @@ const TimeUtils = {
   /**
    * Calculate Easter using Meeus/Jones/Butcher algorithm
    */
-  TimeUtils.calculateEaster(year) {
+  calculateEaster(year) {
     const a = year % 19;
     const b = Math.floor(year / 100);
     const c = year % 100;
@@ -2091,7 +2091,7 @@ const TimeUtils = {
   /**
    * Get Polish holidays for year
    */
-  TimeUtils.getPolishHolidays(year) {
+  getPolishHolidays(year) {
     const holidays = [];
     holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
     holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
@@ -2100,7 +2100,7 @@ const TimeUtils = {
     holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
     holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt' });
     
-    const easter = this.TimeUtils.calculateEaster(year);
+    const easter = this.calculateEaster(year);
     const easterMonday = new Date(easter);
     easterMonday.setDate(easter.getDate() + 1);
     holidays.push({ date: this.formatDate(easterMonday), name: 'Poniedziałek Wielkanocny' });
@@ -2118,8 +2118,8 @@ const TimeUtils = {
   findUpcomingHolidays(referenceDateStr, daysAhead = 7) {
     const refYear = parseInt(referenceDateStr.substring(0, 4), 10);
     const holidays = [
-      ...this.TimeUtils.getPolishHolidays(refYear),
-      ...this.TimeUtils.getPolishHolidays(refYear + 1)
+      ...this.getPolishHolidays(refYear),
+      ...this.getPolishHolidays(refYear + 1)
     ];
     
     const upcoming = [];
