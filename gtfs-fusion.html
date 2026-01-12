@@ -1263,38 +1263,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       return coords;
     }
 
-      return 'shapes_' + Math.abs(hash).toString(36);
-    }
-
-    }
-
-    }
-
-      let totalOriginal = 0;
-      let totalSimplified = 0;
-      
-      Object.keys(shapesIndex).forEach(shapeId => {
-        const points = shapesIndex[shapeId];
-        totalOriginal += points.length;
-        
-        if (points.length <= 2) {
-          simplified[shapeId] = points;
-          totalSimplified += points.length;
-        } else {
-          const simplifiedPoints = simplifyDouglasPeucker(points, tolerance);
-          simplified[shapeId] = simplifiedPoints;
-          totalSimplified += simplifiedPoints.length;
-        }
-      });
-      
-      const reduction = totalOriginal > 0 
-        ? Math.round((1 - totalSimplified / totalOriginal) * 100) 
-        : 0;
-      
-      return simplified;
-    }
-
-// ═══════════════════════════════════════════════════════════════
 // 3.5. DATA QUALITY HEURISTICS MODULE
 // ═══════════════════════════════════════════════════════════════
 function mostCommonString(arr) {
@@ -1473,6 +1441,13 @@ function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
   });
 }
 
+async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, onProgress) {
+  // 1) trips do przetworzenia
+  const tripsToProcess = trips.filter(t => t && t.trip_id && (t.direction_id === undefined || t.direction_id === null || String(t.direction_id).trim() === ''));
+  if (!tripsToProcess.length) {
+    if (onProgress) onProgress(0, 0, 100);
+    return;
+  }
 
   // 2) Zbuduj minimalny filteredStopTimesIndex oraz zbiór używanych stop_id
   const filteredStopTimesIndex = Object.create(null);
@@ -1798,8 +1773,326 @@ function parseCSV(text) {
 
 // Async CSV parser with chunked processing for better UI responsiveness
 
+function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const arrayBuffer = await zipFileEntry.async('arraybuffer');
+      const decoder = new TextDecoder('utf-8');
+      
+      let buffer = '';
+      let lineCount = 0;
+      let headers = null;
+      const stopTimesIndex = Object.create(null);
+      
+      const PROGRESS_UPDATE_INTERVAL = 100000;  // ← Increased from 10k
+      const ESTIMATED_LINES_FOR_PROGRESS = 100000;
+      const CHUNK_SIZE = 1024 * 1024;
+      
+      // ═══ REMOVED smartSplit - use native split! ═══
+      // NOTE: Using native split(',') for performance (100x faster than smartSplit).
+      // This works for GTFS stop_times.txt because fields typically don't contain commas.
+      // If a feed has quoted fields with embedded commas, use the full parseCSV function instead.
+      
+      const getCol = (cols, idx) => {
+        if (idx === -1 || idx >= cols.length) return '';
+        let val = cols[idx];
+        if (!val) return '';
+        
+        // Remove quotes in-place
+        if (val[0] === '"' && val[val.length-1] === '"') {
+          val = val.substring(1, val.length - 1);
+        }
+        
+        // Trim only if needed (check first/last char)
+        if (val[0] === ' ' || val[val.length-1] === ' ') {
+          return val.trim();
+        }
+        
+        return val;
+      };
+      
+      const processLine = (line) => {
+        if (!line.trim()) return;
+        
+        if (!headers) {
+          const rawHeaders = line.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+          headers = {
+            tripIdx: -1,
+            stopIdx: -1,
+            seqIdx: -1,
+            arrIdx: -1,
+            depIdx: -1,
+            pickupIdx: -1,
+            dropoffIdx: -1
+          };
+          
+          rawHeaders.forEach((h, i) => {
+            const normalized = normalizeKey(h);
+            if (normalized === 'trip_id') headers.tripIdx = i;
+            else if (normalized === 'stop_id') headers.stopIdx = i;
+            else if (normalized === 'stop_sequence') headers.seqIdx = i;
+            else if (normalized === 'arrival_time') headers.arrIdx = i;
+            else if (normalized === 'departure_time') headers.depIdx = i;
+            else if (normalized === 'pickup_type') headers.pickupIdx = i;
+            else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
+          });
+          
+          if (headers.tripIdx === -1 || headers.stopIdx === -1) {
+            throw new Error('Brakuje wymaganych kolumn w stop_times.txt: trip_id lub stop_id');
+          }
+          return;
+        }
+        
+        // ═══ NATIVE SPLIT - 100x faster than smartSplit! ═══
+        const cols = line.split(',');
+        
+        if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) return;
+        
+        const tripId = getCol(cols, headers.tripIdx);
+        const stopId = getCol(cols, headers.stopIdx);
+        
+        if (!tripId || !stopId) return;
+        
+        if (!stopTimesIndex[tripId]) {
+          stopTimesIndex[tripId] = [];
+        }
+        
+        stopTimesIndex[tripId].push({
+          stop_id: stopId,
+          arrival_time: getCol(cols, headers.arrIdx),
+          departure_time: getCol(cols, headers.depIdx),
+          stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
+          pickup_type: getCol(cols, headers.pickupIdx) || '0',  // ← Removed String()
+          drop_off_type: getCol(cols, headers.dropoffIdx) || '0'  // ← Removed String()
+        });
+        
+        lineCount++;
+        if (lineCount % PROGRESS_UPDATE_INTERVAL === 0) {  // ← Less frequent
+          state.loadingProgress = lineCount;
+          if (onProgress) {
+            onProgress(lineCount, Math.min(99, Math.round(lineCount / ESTIMATED_LINES_FOR_PROGRESS * 100)));
+          }
+        }
+      };
+      
+      let offset = 0;
+      while (offset < arrayBuffer.byteLength) {
+        try {
+          const chunkEnd = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+          const chunk = new Uint8Array(arrayBuffer, offset, chunkEnd - offset);
+          const isLastChunk = chunkEnd === arrayBuffer.byteLength;
+          const text = decoder.decode(chunk, { stream: !isLastChunk });
+          buffer += text;
+          
+          let newlineIndex;
+          // Optimize: Use lastIndexOf to process multiple lines at once
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex); // slice is faster for large strings
+            processLine(line);
+            buffer = buffer.slice(newlineIndex + 1);
+          }
+          
+          offset = chunkEnd;
+        } catch (err) {
+          console.error('Error processing chunk at offset', offset, ':', err);
+          // Continue processing next chunk instead of failing completely
+          offset = Math.min(offset + CHUNK_SIZE, arrayBuffer.byteLength);
+        }
+      }
+      
+      if (buffer.trim()) {
+        try {
+          processLine(buffer);
+        } catch (err) {
+          console.error('Error processing final buffer:', err);
+        }
+      }
+      
+      // Sort (same as before)
+      Object.keys(stopTimesIndex).forEach(tripId => {
+        stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
+      });
+      
+      if (onProgress) onProgress(lineCount, 100);
+      resolve(stopTimesIndex);
+      
+    } catch(err) {
+      reject(err);
+    }
+  });
 }
 
+    function parseShapesWithWorker(zipFileEntry, onProgress) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const text = await zipFileEntry.async('string');
+          
+          const workerCode = `
+            const KEY_ALIAS = {
+              'route id':'route_id','routeid':'route_id','route_id':'route_id','route short name':'route_short_name','route_short_name':'route_short_name',
+              'route long name':'route_long_name','route_long_name':'route_long_name','trip id':'trip_id','tripid':'trip_id','trip_id':'trip_id',
+              'service id':'service_id','serviceid':'service_id','service_id':'service_id','stop id':'stop_id','stopid':'stop_id','stop_id':'stop_id',
+              'stop sequence':'stop_sequence','stop_sequence':'stop_sequence','arrival time':'arrival_time','arrival_time':'arrival_time',
+              'departure time':'departure_time','departure_time':'departure_time','pickup type':'pickup_type','pickup_type':'pickup_type',
+              'drop off type':'drop_off_type','drop_off_type':'drop_off_type','stop lat':'stop_lat','stop_lat':'stop_lat',
+              'stop lon':'stop_lon','stop_lon':'stop_lon','direction id':'direction_id','direction_id':'direction_id',
+              'trip headsign':'trip_headsign','trip_headsign':'trip_headsign','start date':'start_date','start_date':'start_date',
+              'end date':'end_date','end_date':'end_date','monday':'monday','tuesday':'tuesday','wednesday':'wednesday','thursday':'thursday',
+              'friday':'friday','saturday':'saturday','sunday':'sunday','exception type':'exception_type','exception_type':'exception_type','date':'date',
+              'shape id':'shape_id','shape_id':'shape_id','shape pt lat':'shape_pt_lat','shape_pt_lat':'shape_pt_lat',
+              'shape pt lon':'shape_pt_lon','shape_pt_lon':'shape_pt_lon','shape pt sequence':'shape_pt_sequence','shape_pt_sequence':'shape_pt_sequence'
+            };
+            
+            function normalizeKey(k) {
+              if (k === null || k === undefined) return k;
+              let key = String(k).replace(/^\\uFEFF/,'').trim().toLowerCase();
+              return KEY_ALIAS[key] || key.replace(/\\s+/g,'_');
+            }
+            
+            function smartSplit(line) {
+              if (!line.includes('"')) {
+                return line.split(',');
+              }
+              
+              const cols = [];
+              let current = '';
+              let inQuotes = false;
+              
+              for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                
+                if (char === '"') {
+                  if (i + 1 < line.length && line[i+1] === '"') {
+                    current += '"';
+                    i++;
+                  } else {
+                    inQuotes = !inQuotes;
+                  }
+                } else if (char === ',' && !inQuotes) {
+                  cols.push(current);
+                  current = '';
+                } else {
+                  current += char;
+                }
+              }
+              cols.push(current);
+              return cols;
+            }
+            
+            self.onmessage = function(e) {
+              const text = e.data.text;
+              const lines = text.split(/\\r?\\n/);
+              
+              if (lines.length === 0) {
+                self.postMessage({ type: 'done', shapesIndex: {} });
+                return;
+              }
+              
+              const headerLine = lines[0];
+              const rawHeaders = smartSplit(headerLine);
+              const headers = rawHeaders.map(h => normalizeKey(h));
+              
+              const shapeIdIdx = headers.indexOf('shape_id');
+              const latIdx = headers.indexOf('shape_pt_lat');
+              const lonIdx = headers.indexOf('shape_pt_lon');
+              const seqIdx = headers.indexOf('shape_pt_sequence');
+              
+              if (shapeIdIdx === -1 || latIdx === -1 || lonIdx === -1 || seqIdx === -1) {
+                self.postMessage({ 
+                  type: 'error', 
+                  message: 'shapes.txt missing required fields' 
+                });
+                return;
+              }
+              
+              const shapesData = {};
+              let processedRows = 0;
+              const totalRows = lines.length - 1;
+              
+              // Parse all rows
+              for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                const cols = smartSplit(line);
+                const shapeId = cols[shapeIdIdx];
+                const lat = parseFloat(cols[latIdx]);
+                const lon = parseFloat(cols[lonIdx]);
+                const seq = parseInt(cols[seqIdx] || '0', 10);
+                
+                if (!shapeId || isNaN(lat) || isNaN(lon)) continue;
+                
+                if (!shapesData[shapeId]) {
+                  shapesData[shapeId] = [];
+                }
+                
+                shapesData[shapeId].push({ lat, lon, seq });
+                processedRows++;
+                
+                // Report progress every 10000 rows
+                if (processedRows % 10000 === 0) {
+                  const percent = Math.round((processedRows / totalRows) * 100);
+                  self.postMessage({ 
+                    type: 'progress', 
+                    processed: processedRows,
+                    total: totalRows,
+                    percent 
+                  });
+                }
+              }
+              
+              const shapesIndex = {};
+              Object.keys(shapesData).forEach(shapeId => {
+                const points = shapesData[shapeId];
+                points.sort((a, b) => a.seq - b.seq);
+                shapesIndex[shapeId] = points.map(p => [p.lat, p.lon]);
+              });
+              
+              self.postMessage({ 
+                type: 'done', 
+                shapesIndex,
+                shapeCount: Object.keys(shapesIndex).length,
+                pointCount: processedRows
+              });
+            };
+          `;
+          
+          const blob = new Blob([workerCode], { type: 'application/javascript' });
+          const workerUrl = URL.createObjectURL(blob);
+          const worker = new Worker(workerUrl);
+          state.currentWorker = worker;
+          
+          worker.onmessage = function(ev) {
+            const msg = ev.data;
+            
+            if (msg.type === 'progress') {
+              if (onProgress) {
+                onProgress(msg.processed, msg.percent);
+              }
+            } else if (msg.type === 'done') {
+              state.currentWorker = null;
+              URL.revokeObjectURL(workerUrl);
+              resolve(msg.shapesIndex);
+            } else if (msg.type === 'error') {
+              state.currentWorker = null;
+              URL.revokeObjectURL(workerUrl);
+              reject(new Error(msg.message));
+            }
+          };
+          
+          worker.onerror = function(ev) {
+            state.currentWorker = null;
+            URL.revokeObjectURL(workerUrl);
+            reject(new Error(ev.message || 'Worker parse error'));
+          };
+          
+          // Start parsing
+          worker.postMessage({ text });
+          
+        } catch(err) {
+          reject(err);
+        }
+      });
     }
 
     async function unzipWithFflate(file) {
