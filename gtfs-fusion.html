@@ -3895,10 +3895,10 @@ function buildRouteProfileForCurrentSelection() {
     };
   });
 
-  // Build stationMergeAllowed based on ACTUAL displayed stops (pStops)
-  // Rule: If ANY consecutive stops at same station in the displayed sequence → don't merge
+  // Build stationMergeAllowed based on ACTUAL VISIBLE stops (after all filtering)
+  // Rule: If ANY consecutive stops at same station in the visible sequence → don't merge
   console.log(`[DEBUG] ========================================`);
-  console.log(`[DEBUG] Checking consecutive stops in DISPLAYED sequences (pStops) for merge policy...`);
+  console.log(`[DEBUG] Checking consecutive stops in VISIBLE sequences for merge policy...`);
   console.log(`[DEBUG] ========================================`);
   
   const stationsWithConsecutiveStops = new Set();
@@ -3907,33 +3907,51 @@ function buildRouteProfileForCurrentSelection() {
   Object.entries(processedTrips).forEach(([tripId, tripData]) => {
     const pStops = tripData.pStops || [];
     
-    // Get station IDs for the displayed stops
-    const displayedStationIds = pStops.map(st => getStationId(st.stop_id, stopsIndex));
-    const displayedStopIds = pStops.map(st => st.stop_id);
+    // Filter pStops the same way the table does:
+    // 1. Exclude strictly technical stops (pickup_type=1 AND drop_off_type=1)
+    // 2. Exclude on-demand-only stops in some cases (though we'll keep them for now)
+    const visibleStops = pStops.filter(st => {
+      const meta = stopMetadata[st.stop_id];
+      if (!meta) return true; // If no metadata, assume visible
+      
+      // Exclude strictly technical stops (no pickup AND no drop-off)
+      if (meta.isStrictlyTechnical) {
+        return false;
+      }
+      
+      return true;
+    });
     
-    // Debug: Show what's actually displayed for this trip
-    console.log(`[DEBUG] Trip ${tripId} DISPLAYED stops (pStops):`);
-    console.log(`  stopIds: [${displayedStopIds.join(', ')}]`);
-    console.log(`  stationIds: [${displayedStationIds.map(s => `"${s}"`).join(', ')}]`);
+    // Get station IDs for the visible stops
+    const visibleStationIds = visibleStops.map(st => getStationId(st.stop_id, stopsIndex));
+    const visibleStopIds = visibleStops.map(st => st.stop_id);
+    
+    // Debug: Show what's actually visible for this trip
+    if (visibleStopIds.length !== pStops.map(st => st.stop_id).length) {
+      console.log(`[DEBUG] Trip ${tripId} filtered ${pStops.length - visibleStops.length} technical stop(s)`);
+    }
+    console.log(`[DEBUG] Trip ${tripId} VISIBLE stops (after filtering):`);
+    console.log(`  stopIds: [${visibleStopIds.join(', ')}]`);
+    console.log(`  stationIds: [${visibleStationIds.map(s => `"${s}"`).join(', ')}]`);
     
     // Collect all stations
-    displayedStationIds.forEach(stationId => allStations.add(stationId));
+    visibleStationIds.forEach(stationId => allStations.add(stationId));
     
-    // Check for consecutive stops in the DISPLAYED sequence
-    for (let i = 0; i < displayedStationIds.length - 1; i++) {
-      if (displayedStationIds[i] === displayedStationIds[i + 1]) {
-        stationsWithConsecutiveStops.add(displayedStationIds[i]);
-        console.log(`  → CONSECUTIVE FOUND: "${displayedStationIds[i]}" at positions ${i} and ${i+1}`);
-        console.log(`     stopIds: ${pStops[i].stop_id} → ${pStops[i + 1].stop_id}`);
+    // Check for consecutive stops in the VISIBLE sequence
+    for (let i = 0; i < visibleStationIds.length - 1; i++) {
+      if (visibleStationIds[i] === visibleStationIds[i + 1]) {
+        stationsWithConsecutiveStops.add(visibleStationIds[i]);
+        console.log(`  → CONSECUTIVE FOUND: "${visibleStationIds[i]}" at positions ${i} and ${i+1}`);
+        console.log(`     stopIds: ${visibleStops[i].stop_id} → ${visibleStops[i + 1].stop_id}`);
       }
     }
   });
   
   console.log(`[DEBUG] ========================================`);
-  console.log(`[DEBUG] Stations with consecutive stops in DISPLAYED table: [${Array.from(stationsWithConsecutiveStops).join(', ')}]`);
+  console.log(`[DEBUG] Stations with consecutive stops in VISIBLE table: [${Array.from(stationsWithConsecutiveStops).join(', ')}]`);
   console.log(`[DEBUG] ========================================`);
   
-  // Only allow merging for stations without consecutive stops in displayed sequences
+  // Only allow merging for stations without consecutive stops in visible sequences
   const stationMergeAllowed = new Set();
   allStations.forEach(stationId => {
     if (!stationsWithConsecutiveStops.has(stationId)) {
@@ -3942,10 +3960,10 @@ function buildRouteProfileForCurrentSelection() {
   });
   
   // Debug: Log merge policy for all stations
-  console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir} (based on DISPLAYED stops):`);
+  console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir} (based on VISIBLE stops):`);
   allStations.forEach(stationId => {
     const allowed = stationMergeAllowed.has(stationId);
-    console.log(`  "${stationId}": ${allowed ? '✓ MERGE allowed' : '✗ NO MERGE (consecutive in table)'}`);
+    console.log(`  "${stationId}": ${allowed ? '✓ MERGE allowed' : '✗ NO MERGE (consecutive in visible table)'}`);
   });
   console.log(`[DEBUG] ========================================`);
 
