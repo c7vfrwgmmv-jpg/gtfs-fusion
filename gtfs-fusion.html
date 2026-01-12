@@ -1839,7 +1839,7 @@ async function parseStopTimesToIndexedDB(text, onProgress) {
 async function getStopTimesForTrip(tripId) {
   if (state.gtfsData.stopTimesIndex) {
     // RAM mode (current)
-    return state.gtfsData.stopTimesIndex[tripId] || [];
+    return getStopTimesIndexOrCache()[tripId] || [];
   } else if (state.gtfsData.stopTimesDB) {
     // DB mode - check cache first
     if (stopTimesCache[tripId]) {
@@ -1857,7 +1857,7 @@ async function getStopTimesForTrip(tripId) {
 function getStopTimesForTripSync(tripId) {
   if (state.gtfsData.stopTimesIndex) {
     // RAM mode
-    return state.gtfsData.stopTimesIndex[tripId] || [];
+    return getStopTimesIndexOrCache()[tripId] || [];
   } else if (state.gtfsData.stopTimesDB) {
     // DB mode - return from cache only
     return stopTimesCache[tripId] || [];
@@ -3430,7 +3430,11 @@ if (dates.length > 0) {
         console.log(`  Routes: ${routes.length.toLocaleString()}`);
         console.log(`  Trips: ${trips.length.toLocaleString()}`);
         console.log(`  Stops: ${stops.length.toLocaleString()}`);
-        console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips`);
+        if (stopTimesIndex) {
+          console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips (RAM mode)`);
+        } else if (stopTimesDB) {
+          console.log(`  Stop times: ${stopTimesResult.rowCount.toLocaleString()} rows (IndexedDB mode)`);
+        }
         if (Object.keys(shapesIndex).length > 0) {
           console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
         }
@@ -3453,7 +3457,8 @@ if (dates.length > 0) {
             routes: routes.length,
             trips: trips.length,
             stops: stops.length,
-            stopTimes: Object.keys(stopTimesIndex).length,
+            stopTimes: stopTimesIndex ? Object.keys(stopTimesIndex).length : (stopTimesResult ? stopTimesResult.rowCount : 0),
+            stopTimesMode: stopTimesDB ? 'IndexedDB' : 'RAM',
             shapes: Object.keys(shapesIndex).length
           }
         };
@@ -4142,7 +4147,8 @@ function buildRouteProfileForCurrentSelection() {
     return state.routeProfiles[key][dir];
   }
 
-  const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData;
+  const { tripsIndex, stopsIndex } = state.gtfsData;
+  const stopTimesIndex = getStopTimesIndexOrCache();
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
   // 3. Zbierz trips tej logical linii + kierunku (bez filtra daty)
@@ -4913,7 +4919,8 @@ function ensureCanonicalMasterListForCurrentSelection() {
     return null; // Fallback
   }
 
-  const { stopTimesIndex, tripsIndex, stopsIndex } = state.gtfsData;
+  const { tripsIndex, stopsIndex } = state.gtfsData;
+  const stopTimesIndex = getStopTimesIndexOrCache();
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
   let routeIds = [];
@@ -4985,7 +4992,7 @@ function getAllTripsForRoute() {
       if (trips.length === 0) return null;
       const tripStopMaps = {};
       trips.forEach(trip => {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         stopTimes.sort((a,b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
         tripStopMaps[trip.trip_id] = stopTimes;
       });
@@ -5325,7 +5332,7 @@ function getAvailableDirections() {
     if (t.trip_id) dirs[dirId].tripIds.add(t.trip_id);
     
     // Extract final stop name from stop_times
-    const stopTimes = state.gtfsData.stopTimesIndex[t.trip_id] || [];
+    const stopTimes = getStopTimesIndexOrCache()[t.trip_id] || [];
     const sorted = stopTimes.slice().sort((a, b) => a.stop_sequence - b.stop_sequence);
     const lastStopId = sorted[sorted.length - 1]?.stop_id;
     const lastStop = state.gtfsData.stopsIndex[lastStopId];
@@ -5347,7 +5354,7 @@ function getAvailableDirections() {
     let termini = '';
     let bestStops = null, bestLen = 0;
     for (const t of info.trips) {
-      const sts = (state.gtfsData.stopTimesIndex && state.gtfsData.stopTimesIndex[t.trip_id]) || [];
+      const sts = getStopTimesIndexOrCache()[t.trip_id] || [];
       if (sts.length > bestLen) { bestLen = sts.length; bestStops = sts; }
     }
     if (bestStops && bestStops.length > 0) {
@@ -5665,7 +5672,7 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
   if (drawnVariantCoords.length < 2) {
     const allStopIds = new Set();
     routeTripsAll.forEach(trip => {
-      const sts = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const sts = getStopTimesIndexOrCache()[trip.trip_id] || [];
       sts.forEach(st => { if (st && st.stop_id) allStopIds.add(st.stop_id); });
     });
     const allCoords = [];
@@ -6402,7 +6409,7 @@ async function renderStopsView() {
   const stopToRoutes = await getStopToRoutesMap(
     state.gtfsData.routes,
     state.gtfsData.tripsIndex,
-    state.gtfsData.stopTimesIndex,
+    getStopTimesIndexOrCache(),
     isInitialLoad ? (processed, total, percent) => {
       stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
     } : null
@@ -6813,7 +6820,7 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     
     trips.forEach(trip => {
       if (! activeServices.includes(trip.service_id)) return;
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
       if (stopTimes.some(st => st.stop_id === stopId)) {
         passesThrough = true;
         tripCount++;
@@ -6840,7 +6847,7 @@ function collectRoutesForStop(stopId, selectedDate, filteredRouteIds = []) {
     // UPROSZCZENIE: dla przystanku jest tylko jeden kierunek tej linii
     const representative = findMostFrequentTripPattern(
       activeTrips, 
-      state.gtfsData.stopTimesIndex,
+      getStopTimesIndexOrCache(),
       stopId,
       activeServices
     );
@@ -6916,7 +6923,7 @@ function getTripDestination(dep) {
   }
   
   // 2. Fallback: last stop_name from stop_times sequence
-  const stopTimes = state.gtfsData.stopTimesIndex[dep.trip.trip_id] || [];
+  const stopTimes = getStopTimesIndexOrCache()[dep.trip.trip_id] || [];
   if (stopTimes.length > 0) {
     const sorted = stopTimes.slice().sort((a, b) => {
       const seqA = parseInt(a.stop_sequence || '0', 10);
@@ -7131,7 +7138,7 @@ let masterList = ensureCanonicalMasterListForCurrentSelection();
 
 const tripStopMaps = {};
 trips.forEach(trip => {
-  const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+  const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
   stopTimes.sort((a,b)=>parseInt(a.stop_sequence||'0') - parseInt(b.stop_sequence||'0'));
   tripStopMaps[trip.trip_id] = stopTimes;
 });
@@ -7358,7 +7365,7 @@ masterList.forEach((mStop) => {
   
   // Go through ALL trips (not just sortedTrips) to include hidden ones
   trips.forEach(trip => {
-    const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+    const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
     const stopTime = stopTimes.find(st => allStopIds.includes(st.stop_id));
     
     if (stopTime) {
@@ -7552,7 +7559,7 @@ function openStopTimetable(stopId) {
     const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
     
     directionTrips.forEach(trip => {
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === stopId);
       
       if (stopTime) {
@@ -7575,7 +7582,7 @@ function openStopTimetable(stopId) {
       const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
       
       routeTrips.forEach(trip => {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         const stopTime = stopTimes.find(st => st.stop_id === stopId);
         
         if (stopTime) {
@@ -7629,7 +7636,7 @@ function openStopTimetable(stopId) {
     if (mainDestination && directionTrips.length > 0) {
       const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
       if (trip) {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         if (stopTimes.length > 0) {
           const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
           const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
@@ -7640,7 +7647,7 @@ function openStopTimetable(stopId) {
 
     if (!mainDestination && directionTrips.length > 0) {
       const firstTrip = directionTrips[0];
-      const stopTimes = state.gtfsData.stopTimesIndex[firstTrip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[firstTrip.trip_id] || [];
       if (stopTimes.length > 0) {
         const lastStopTime = stopTimes[stopTimes.length - 1];
         const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
@@ -7707,7 +7714,7 @@ function openStopTimetable(stopId) {
 
   // Helper: get trip terminus
   const getTripTerminus = (tripId) => {
-    const stopTimes = state.gtfsData.stopTimesIndex[tripId] || [];
+    const stopTimes = getStopTimesIndexOrCache()[tripId] || [];
     if (stopTimes.length === 0) return null;
     const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
     const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
@@ -8195,7 +8202,7 @@ switch(currentView) {
       const trips = state.gtfsData.tripsIndex[route.route_id] || [];
       trips.forEach(trip => {
         if (!activeServices.includes(trip.service_id)) return;
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
         const stopTime = stopTimes.find(st => st.stop_id === stop.stop_id);
         if (stopTime) {
           const departureTime = stopTime.departure_time || stopTime.arrival_time;
@@ -8714,7 +8721,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     const trips = state.gtfsData.tripsIndex[route.route_id] || [];
     trips.forEach(trip => {
       if (!activeServices.includes(trip.service_id)) return;
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
+      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === state.selectedStop.stop_id);
       if (stopTime) {
         const departureTime = stopTime.departure_time || stopTime.arrival_time;
