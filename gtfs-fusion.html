@@ -781,16 +781,16 @@ const icons = { upload: (size=24) => `<svg width="${size}" height="${size}" view
     };
 
     const ROUTE_TYPE_META_BASIC = {
-      0: { label: 'Tram', color: '#f59e0b', weight: 3, iconSvg: 'M6 3v13' },
-      1: { label: 'Subway', color: '#ef4444', weight: 3, iconSvg: 'M3 6h18v12H3z' },
-      2: { label: 'Rail', color: '#10b981', weight: 3, iconSvg: 'M4 6h16' },
-      3: { label: 'Bus', color: '#2563eb', weight: 3, iconSvg: 'M5 6h14v8H5z' },
-      4: { label: 'Ferry', color: '#0ea5a4', weight: 3, iconSvg: 'M2 16s3-4 10-4 10 4 10 4' },
-      5: { label: 'Cable car', color: '#7c3aed', weight: 3, iconSvg: 'M4 6l8-4 8 4' },
-      6: { label: 'Gondola', color: '#06b6d4', weight: 3, iconSvg: 'M4 6c4 0 8-4 12 0' },
-      7: { label: 'Funicular', color: '#f97316', weight: 3, iconSvg: 'M3 18h18' },
-      11:{ label: 'Trolleybus', color: '#8b5cf6', weight: 3, iconSvg: 'M4 6h16' },
-      12:{ label: 'Monorail', color: '#06b6d4', weight: 3, iconSvg: 'M2 12h20' }
+      0: { label: 'Tram', color: '#f59e0b', weight: 3 },
+      1: { label: 'Subway', color: '#ef4444', weight: 3 },
+      2: { label: 'Rail', color: '#10b981', weight: 3 },
+      3: { label: 'Bus', color: '#2563eb', weight: 3 },
+      4: { label: 'Ferry', color: '#0ea5a4', weight: 3 },
+      5: { label: 'Cable car', color: '#7c3aed', weight: 3 },
+      6: { label: 'Gondola', color: '#06b6d4', weight: 3 },
+      7: { label: 'Funicular', color: '#f97316', weight: 3 },
+      11:{ label: 'Trolleybus', color: '#8b5cf6', weight: 3 },
+      12:{ label: 'Monorail', color: '#06b6d4', weight: 3 }
     };
 
     const ROUTE_TYPE_META_EXTENDED = {
@@ -1002,7 +1002,6 @@ function debounce(func, wait) {
     }
     function normalizeRecord(rec) {
       if (!rec || typeof rec !== 'object') {
-        console.warn('normalizeRecord: Invalid record, expected object');
         return {};
       }
       
@@ -1438,7 +1437,6 @@ function isCircularRoute(stopSequence) {
   if (!stopSequence || stopSequence.length < 2) return false;
   return stopSequence[0] === stopSequence[stopSequence.length - 1];
 }
-// Helper function to process a single route's direction enrichment
 function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
   const tripsToProcess = routeTrips.filter(t => 
     !t.direction_id || t.direction_id === ''
@@ -1544,43 +1542,6 @@ function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
       }
     }
   });
-}
-
-// Async version with chunked processing to prevent UI freezes
-async function enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress) {
-  const tripsByRoute = {};
-  
-  for (const trip of trips) {
-    if (!trip || !trip.trip_id) continue;
-    
-    const routeId = trip.route_id || 'unknown';
-    if (!tripsByRoute[routeId]) {
-      tripsByRoute[routeId] = [];
-    }
-    tripsByRoute[routeId].push(trip);
-  }
-  
-  const routeIds = Object.keys(tripsByRoute);
-  const CHUNK_SIZE = 10; // Process 10 routes at a time
-  
-  for (let i = 0; i < routeIds.length; i += CHUNK_SIZE) {
-    const chunk = routeIds.slice(i, i + CHUNK_SIZE);
-    
-    chunk.forEach(routeId => {
-      enrichRouteDirections(tripsByRoute[routeId], stopTimesIndex, stopsIndex);
-    });
-    
-    // Update progress
-    if (onProgress) {
-      const percent = Math.round(((i + chunk.length) / routeIds.length) * 100);
-      onProgress(i + chunk.length, routeIds.length, percent);
-    }
-    
-    // Yield to browser to keep UI responsive
-    if (i + CHUNK_SIZE < routeIds.length) {
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
-  }
 }
 
 async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, onProgress) {
@@ -1823,24 +1784,15 @@ async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stop
     state.currentWorker = null;
     return;
   } catch (err) {
-    // fallback
-    try {
-      console.warn('Worker failed; falling back to main-thread enrichment:', err && err.message ? err.message : err);
-      if (typeof enrichTripsWithDirectionIdAsync === 'function') {
-        await enrichTripsWithDirectionIdAsync(trips, stopTimesIndex, stopsIndex, onProgress);
-        return;
-      }
-      throw err;
-    } finally {
-      if (worker) try { worker.terminate(); } catch(e){}
-      state.currentWorker = null;
-    }
+    // Worker failed - no fallback available
+    if (worker) try { worker.terminate(); } catch(e){}
+    state.currentWorker = null;
+    throw err;
   }
 }	  
 // ═══════════════════════════════════════════════════════════════
 // 4. DATA PARSING & LOADING
 // ═══════════════════════════════════════════════════════════════
-// Helper function to parse a single CSV line (handles quoted fields)
 function parseCSVLine(line) {
   if (!line) return [];
   
@@ -1880,7 +1832,7 @@ function parseCSVLine(line) {
   
   // Warn if quotes are still open (malformed CSV)
   if (inQuotes) {
-    console.warn('parseCSVLine: Unclosed quotes in line:', line.substring(0, 50) + '...');
+    // malformed CSV - unclosed quotes
   }
   
   return result;
@@ -1889,7 +1841,6 @@ function parseCSVLine(line) {
 // CSV parser - used for all files
 function parseCSV(text) {
   if (!text || typeof text !== 'string') {
-    console.warn('parseCSV: Invalid input, expected non-empty string');
     return [];
   }
   
@@ -2995,134 +2946,7 @@ function findDateForDayOfWeek(targetDayOfWeek) {
       return nearby;
     }
 
-    /**
-     * Calculate Easter Sunday for a given year using Meeus/Jones/Butcher algorithm
-     * @param {number} year - The year to calculate Easter for
-     * @returns {Date} - Easter Sunday as a Date object
-     */
-    function calculateEaster(year) {
-      const a = year % 19;
-      const b = Math.floor(year / 100);
-      const c = year % 100;
-      const d = Math.floor(b / 4);
-      const e = b % 4;
-      const f = Math.floor((b + 8) / 25);
-      const g = Math.floor((b - f + 1) / 3);
-      const h = (19 * a + b - d - g + 15) % 30;
-      const i = Math.floor(c / 4);
-      const k = c % 4;
-      const l = (32 + 2 * e + 2 * i - h - k) % 7;
-      const m = Math.floor((a + 11 * h + 22 * l) / 451);
-      const month = Math.floor((h + l - 7 * m + 114) / 31);
-      const day = ((h + l - 7 * m + 114) % 31) + 1;
-      return new Date(year, month - 1, day);
-    }
 
-    /**
-     * Get all Polish holidays for a given year
-     * @param {number} year - The year to get holidays for
-     * @returns {Array} - Array of {date: 'YYYYMMDD', name: 'Holiday Name'}
-     */
-    function getPolishHolidays(year) {
-      const holidays = [];
-      
-      // Fixed-date holidays
-      holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
-      holidays.push({ date: `${year}0102`, name: 'Dzień po Nowym Roku' });
-      holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
-      holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie Najświętszej Maryi Panny' });
-      holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
-      holidays.push({ date: `${year}1224`, name: 'Wigilia' });
-      holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
-      holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt Bożego Narodzenia' });
-      holidays.push({ date: `${year}1231`, name: 'Sylwester' });
-      
-      // Movable holidays based on Easter
-      const easter = calculateEaster(year);
-      
-      // Maundy Thursday (3 days before Easter)
-      const maundyThursday = new Date(easter);
-      maundyThursday.setDate(easter.getDate() - 3);
-      holidays.push({
-        date: formatDateToGTFS(maundyThursday),
-        name: 'Wielki Czwartek'
-      });
-      
-      // Good Friday (2 days before Easter)
-      const goodFriday = new Date(easter);
-      goodFriday.setDate(easter.getDate() - 2);
-      holidays.push({
-        date: formatDateToGTFS(goodFriday),
-        name: 'Wielki Piątek'
-      });
-      
-      // Easter Sunday
-      holidays.push({
-        date: formatDateToGTFS(easter),
-        name: 'Wielkanoc'
-      });
-      
-      // Easter Monday
-      const easterMonday = new Date(easter);
-      easterMonday.setDate(easter.getDate() + 1);
-      holidays.push({
-        date: formatDateToGTFS(easterMonday),
-        name: 'Poniedziałek Wielkanocny'
-      });
-      
-      // Corpus Christi (60 days after Easter, always Thursday)
-      const corpusChristi = new Date(easter);
-      corpusChristi.setDate(easter.getDate() + 60);
-      holidays.push({
-        date: formatDateToGTFS(corpusChristi),
-        name: 'Boże Ciało'
-      });
-      
-      return holidays;
-    }
-
-    /**
-     * Find holidays in the upcoming week from a reference date
-     * @param {string} referenceDateStr - GTFS date string (YYYYMMDD)
-     * @returns {Array} - Array of holiday objects that fall within the next 7 days
-     */
-function findNearbyHolidays(referenceDateStr) {
-  // Helper: difference in days between two GTFS dates
-  const daysDiff = (date1, date2) => {
-    const y1 = parseInt(date1.substring(0, 4));
-    const m1 = parseInt(date1.substring(4, 6)) - 1;
-    const d1 = parseInt(date1.substring(6, 8));
-    const y2 = parseInt(date2.substring(0, 4));
-    const m2 = parseInt(date2.substring(4, 6)) - 1;
-    const d2 = parseInt(date2.substring(6, 8));
-    
-    const ms1 = new Date(y1, m1, d1).getTime();
-    const ms2 = new Date(y2, m2, d2).getTime();
-    return Math.floor((ms2 - ms1) / (1000 * 60 * 60 * 24));
-  };
-  
-  const y = parseInt(referenceDateStr.substring(0, 4));
-  const holidays = [
-    ...getPolishHolidays(y),
-    ...getPolishHolidays(y + 1)
-  ];
-  
-  const nearby = [];
-  holidays.forEach(holiday => {
-    const diffDays = daysDiff(referenceDateStr, holiday.date);
-    
-    // ✅ Include holidays only in the upcoming week (0 to 7 days in the future)
-    if (diffDays >= 0 && diffDays <= 7) {
-      nearby.push({
-        ...holiday,
-        dateObj: parseGTFSDate(holiday.date),  // Only for display
-        daysFromRef: diffDays
-      });
-    }
-  });
-  
-  return nearby;
-}
 
 function buildStationNameCache(stopsIndex) {
   if (stationNameToIdCache) return stationNameToIdCache;
@@ -4103,12 +3927,10 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     return firstStop?.stop_name || stationId;
   };
 
-  // Helper function to merge chunks with signature collision handling
   const mergeChunkStops = (existingChunk, newStops, signature) => {
     const originalLength = existingChunk.stops.length;
     if (originalLength !== newStops.length) {
-      console.warn(`Signature collision detected for ${signature}: expected ${originalLength} stops, got ${newStops.length}`);
-      // Extend chunk to accommodate all stops from both versions
+      // Signature collision - extend chunk to accommodate all stops from both versions
       if (newStops.length > originalLength) {
         for (let idx = originalLength; idx < newStops.length; idx++) {
           existingChunk.stops.push({
@@ -5016,7 +4838,6 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
       return window.leafletMap;
     }
 
-    // Helper function to create SVG icon with dynamic color
     function createSvgIcon(color, baseSize = 96) {
       const width = baseSize;
       const height = Math.round(baseSize * 1.41);
@@ -5039,7 +4860,6 @@ function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
       });
     }
     
-    // Helper function to create circle marker (scales automatically with zoom)
     function createCircleMarker(lat, lon, color, radius = 6) {
       return window.L.circleMarker([lat, lon], {
         radius: radius,
@@ -6443,7 +6263,6 @@ function updateRouteFilterButtons() {
   });
 }
 
-// Helper function to get trip destination (headsign or last stop name)
 function getTripDestination(dep) {
   // 1. Prefer trip_headsign if available
   if (dep.headsign && dep.headsign.trim().length > 0) {
@@ -6672,7 +6491,6 @@ const processedTrips = trips.map(trip => {
   
   if (!processed) {
     // This should rarely happen - profile should process all trips
-    console.warn('No processed data for trip (profile not built?):', trip.trip_id);
     // Safe fallback: empty trip with no stops
     return { 
       ...trip, 
@@ -8032,7 +7850,7 @@ switch(currentView) {
         try {
           localStorage.setItem('gtfs_skip_direction_enrichment', JSON.stringify(state.skipDirectionIdEnrichment));
         } catch (err) {
-          console.warn('Failed to save skip direction enrichment preference:', err);
+          // Failed to save skip direction enrichment preference
         }
       });
       
@@ -8326,7 +8144,7 @@ if (state.gtfsData && state.selectedRoute) {
         state.skipDirectionIdEnrichment = JSON.parse(savedSkipPref);
       }
     } catch (err) {
-      console.warn('Failed to load skip direction enrichment preference:', err);
+      // Failed to load skip direction enrichment preference
     }
     
     // global delegated handlers (one-time) ---------------------------------------------------------
@@ -8354,404 +8172,6 @@ if (state.gtfsData && state.selectedRoute) {
     // DEBUG FUNCTION: window.debugTrips()
     // ═══════════════════════════════════════════════════════════════
     
-    /**
-     * Debug function to export all trip data for current route as HTML
-     * Helps debug trip filtering issues by showing all trips with classification data
-     */
-    window.debugTrips = function() {
-      // 1. Validation: Check if route is selected
-      if (!state.selectedRoute) {
-        console.error('❌ No route selected! Select a route first.');
-        return;
-      }
-
-      if (!state.gtfsData || !state.selectedDate) {
-        console.error('❌ No GTFS data loaded or date selected!');
-        return;
-      }
-
-      // 2. Data collection using existing functions
-      const allTrips = getAllTripsForRoute();
-      const variantsData = computeVariantsForRoute();
-      const profile = getCurrentRouteProfile();
-      const activeServices = getServicesForDate(state.selectedDate);
-
-      if (!allTrips || allTrips.length === 0) {
-        console.error('❌ No trips found for this route!');
-        return;
-      }
-
-      // HTML escape utility
-      const escapeHtml = (str) => {
-        if (str === null || str === undefined) return '';
-        return String(str)
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#039;');
-      };
-
-      // 3. Process each trip
-      const processedTrips = allTrips.map(trip => {
-        const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-        const sortedStops = [...stopTimes].sort((a, b) => 
-          parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0')
-        );
-
-        // Get core stops info from profile
-        let coreStops = new Set();
-        let nodeTypes = {};
-        if (profile && profile.coreStops) {
-          // profile.coreStops is a flat array of stop_ids, not objects
-          if (Array.isArray(profile.coreStops)) {
-            profile.coreStops.forEach(stopId => coreStops.add(stopId));
-          }
-        }
-        if (profile && profile.nodeTypes) {
-          nodeTypes = profile.nodeTypes;
-        }
-
-        // Calculate firstCoreIdx and lastCoreIdx
-        let firstCoreIdx = -1;
-        let lastCoreIdx = -1;
-        for (let i = 0; i < sortedStops.length; i++) {
-          const stopId = sortedStops[i].stop_id;
-          if (coreStops.has(stopId)) {
-            if (firstCoreIdx === -1) firstCoreIdx = i;
-            lastCoreIdx = i;
-          }
-        }
-
-        // Process stop details
-        const stopDetails = sortedStops.map((st, idx) => {
-          const stopId = st.stop_id;
-          const stopInfo = state.gtfsData.stopsIndex[stopId] || {};
-          const pType = st.pickup_type ? String(st.pickup_type).trim() : "0";
-          const dType = st.drop_off_type ? String(st.drop_off_type).trim() : "0";
-          
-          // Determine if technical stop
-          let isTech = false;
-          const nodeType = nodeTypes[stopId] || 'passenger';
-          
-          if (nodeType === 'tail') {
-            isTech = true;
-          } else if (nodeType === 'passenger' || nodeType === 'core') {
-            isTech = false;
-          } else {
-            // Fallback logic
-            const isStrictlyTechnical = (pType === "1" && dType === "1");
-            if (isStrictlyTechnical) {
-              isTech = true;
-            } else if (idx === 0 && pType === "1") {
-              isTech = true;
-            } else if (idx === sortedStops.length - 1 && dType === "1") {
-              isTech = true;
-            }
-          }
-
-          const isCore = coreStops.has(stopId);
-          const isBetweenCore = idx > firstCoreIdx && idx < lastCoreIdx && firstCoreIdx !== -1 && lastCoreIdx !== -1;
-
-          return {
-            seq: st.stop_sequence,
-            stop_id: stopId,
-            stop_name: stopInfo.stop_name || stopId,
-            arrival: st.arrival_time || '',
-            departure: st.departure_time || '',
-            pickup_type: pType,
-            drop_off_type: dType,
-            nodeType: nodeType,
-            isCore: isCore,
-            isTech: isTech,
-            isBetweenCore: isBetweenCore
-          };
-        });
-
-        // Calculate hasPassenger
-        const hasPassenger = stopDetails.some(s => !s.isTech);
-        
-        // Count passenger stops (non-technical stops)
-        const passengerStopCount = stopDetails.filter(s => !s.isTech).length;
-
-        // Calculate hasPassengerBetweenCore (same as hasPassengerInsideCore in main code)
-        let hasPassengerBetweenCore = false;
-        if (firstCoreIdx !== -1 && lastCoreIdx !== -1 && firstCoreIdx < lastCoreIdx) {
-          for (let i = firstCoreIdx + 1; i < lastCoreIdx; i++) {
-            if (stopDetails[i] && !stopDetails[i].isTech) {
-              hasPassengerBetweenCore = true;
-              break;
-            }
-          }
-        }
-
-        // Calculate filtering status
-        const wouldBeFiltered = !hasPassenger && !state.showAllTrips;
-        
-        // Match the main code logic for service vs depot classification
-        // For trips with ≤2 passenger stops: classify as service if it has any passenger stops
-        // For trips with 3+ passenger stops: classify as service only if has passenger stops between core
-        const isServiceTrip = passengerStopCount <= 2 
-          ? hasPassenger 
-          : hasPassengerBetweenCore;
-        const wouldBeDepot = !isServiceTrip;
-        const activeOnDate = activeServices.includes(trip.service_id);
-        const variant = variantsData ? variantsData.tripToVariant[trip.trip_id] : 'N/A';
-
-        // Generate classification reason
-        let classificationReason = '';
-        if (!hasPassenger) {
-          classificationReason = '✗ NO passenger stops (all technical) | 🚫 FILTERED OUT (depot positioning)';
-        } else if (passengerStopCount <= 2) {
-          // Short trips (≤2 passenger stops): classified as service if has any passenger stops
-          classificationReason = `✓ Has ${passengerStopCount} passenger stop(s) | ✅ SHORT TRIP → CLASSIFIED AS SERVICE TRIP`;
-        } else if (!hasPassengerBetweenCore) {
-          const coreRange = firstCoreIdx !== -1 && lastCoreIdx !== -1 
-            ? `${firstCoreIdx} to ${lastCoreIdx}` 
-            : 'none';
-          classificationReason = `✓ Has ${passengerStopCount} passenger stops | Core stops: ${coreRange} | ❌ NO PASSENGER STOPS BETWEEN CORE | 🔧 CLASSIFIED AS DEPOT TRIP`;
-        } else {
-          const coreRange = firstCoreIdx !== -1 && lastCoreIdx !== -1 
-            ? `${firstCoreIdx} to ${lastCoreIdx}` 
-            : 'none';
-          classificationReason = `✓ Has ${passengerStopCount} passenger stops | Core stops: ${coreRange} | ✓ Has passengers between core | ✅ NORMAL SERVICE TRIP`;
-        }
-
-        return {
-          trip,
-          variant,
-          firstCoreIdx,
-          lastCoreIdx,
-          hasPassenger,
-          hasPassengerBetweenCore,
-          wouldBeFiltered,
-          wouldBeDepot,
-          activeOnDate,
-          stopsCount: sortedStops.length,
-          stopDetails,
-          classificationReason
-        };
-      });
-
-      // 4. Calculate active days in current month
-      const selectedDate = parseGTFSDate(state.selectedDate);
-      const year = selectedDate.getFullYear();
-      const month = selectedDate.getMonth();
-      const daysInMonth = new Date(year, month + 1, 0).getDate();
-      
-      const activeDaysInMonth = [];
-      for (let day = 1; day <= daysInMonth; day++) {
-        const testDate = new Date(year, month, day);
-        const dateStr = `${testDate.getFullYear()}${String(testDate.getMonth() + 1).padStart(2, '0')}${String(testDate.getDate()).padStart(2, '0')}`;
-        const servicesForDate = getServicesForDate(dateStr);
-        
-        // Check if any trip from this route runs on this date
-        const hasServiceOnDate = allTrips.some(trip => servicesForDate.includes(trip.service_id));
-        if (hasServiceOnDate) {
-          activeDaysInMonth.push(day);
-        }
-      }
-
-      // 5. Generate HTML
-      const routeId = state.selectedRoute.route_id || 'unknown';
-      const routeName = state.selectedRoute.route_short_name || state.selectedRoute.route_long_name || routeId;
-      const direction = state.selectedDirection;
-      const directionName = direction === '0' ? 'Direction 0' : 'Direction 1';
-      
-      const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Debug Trips - ${escapeHtml(routeName)} - ${escapeHtml(state.selectedDate)}</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-      margin: 20px;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    h1 { font-size: 18px; margin-bottom: 10px; }
-    h2 { font-size: 14px; margin-top: 15px; margin-bottom: 8px; }
-    .header-info { margin-bottom: 15px; background: #f0f0f0; padding: 10px; border-radius: 4px; }
-    .header-info p { margin: 4px 0; }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      margin-top: 10px;
-      font-size: 11px;
-    }
-    th, td {
-      border: 1px solid #ddd;
-      padding: 4px 6px;
-      text-align: left;
-    }
-    th {
-      background-color: #f5f5f5;
-      font-weight: 600;
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }
-    tr.filtered {
-      background-color: #fff3cd;
-    }
-    tr:hover {
-      background-color: #f9f9f9;
-    }
-    .mono {
-      font-family: 'Courier New', monospace;
-    }
-    .center {
-      text-align: center;
-    }
-    .stops-table {
-      font-size: 10px;
-      margin: 5px 0;
-      width: 100%;
-    }
-    .stops-table th, .stops-table td {
-      padding: 2px 4px;
-    }
-    .stops-table th {
-      background-color: #e9e9e9;
-    }
-    .checkmark { color: green; }
-    .crossmark { color: red; }
-    .stats { display: flex; gap: 20px; margin-top: 10px; }
-    .stat { font-weight: bold; }
-    details { margin: 5px 0; }
-    summary { cursor: pointer; font-weight: 600; }
-  </style>
-</head>
-<body>
-  <h1>🔍 Debug Trips Export</h1>
-  
-  <div class="header-info">
-    <p><strong>Route:</strong> ${escapeHtml(routeName)} (ID: ${escapeHtml(routeId)})</p>
-    <p><strong>Date:</strong> ${escapeHtml(state.selectedDate)}</p>
-    <p><strong>Direction:</strong> ${escapeHtml(directionName)} (${escapeHtml(direction)})</p>
-    <p><strong>Show All Trips Mode:</strong> ${state.showAllTrips ? '✓ ON (showing depot trips)' : '✗ OFF (hiding depot trips)'}</p>
-    <p><strong>Active days this month:</strong> ${activeDaysInMonth.length > 0 ? activeDaysInMonth.join(', ') : 'None'} (${activeDaysInMonth.length} days out of ${daysInMonth})</p>
-    
-    <div class="stats">
-      <span class="stat">Total trips: ${processedTrips.length}</span>
-      <span class="stat">Active on ${escapeHtml(state.selectedDate)}: ${processedTrips.filter(t => t.activeOnDate).length}</span>
-      <span class="stat">Would be filtered: ${processedTrips.filter(t => t.wouldBeFiltered).length}</span>
-      <span class="stat">Depot trips: ${processedTrips.filter(t => t.wouldBeDepot).length}</span>
-      <span class="stat">Normal service trips: ${processedTrips.filter(t => !t.wouldBeDepot).length}</span>
-    </div>
-  </div>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Trip ID</th>
-        <th>Variant</th>
-        <th>Service ID</th>
-        <th>Direction</th>
-        <th class="center">Stops Count</th>
-        <th class="center">First Core</th>
-        <th class="center">Last Core</th>
-        <th class="center">Has Passenger</th>
-        <th class="center">Passenger Between Core</th>
-        <th class="center">Active on Date</th>
-        <th class="center">Would Be Filtered</th>
-        <th class="center">Would Be Depot</th>
-        <th>Classification Reason</th>
-        <th>Stop Sequence</th>
-      </tr>
-    </thead>
-    <tbody>
-${processedTrips.map(pt => {
-  const trip = pt.trip;
-  const rowClass = pt.wouldBeFiltered ? ' class="filtered"' : '';
-  
-  // Build stop sequence nested table
-  const stopsHtml = `
-    <details>
-      <summary>${pt.stopDetails.length} stops (click to expand)</summary>
-      <table class="stops-table">
-        <thead>
-          <tr>
-            <th>Seq</th>
-            <th>Stop ID</th>
-            <th>Stop Name</th>
-            <th>Arrival</th>
-            <th>Departure</th>
-            <th>Pickup</th>
-            <th>Drop</th>
-            <th>Node Type</th>
-            <th>Core?</th>
-            <th>Tech?</th>
-            <th>Between Core?</th>
-          </tr>
-        </thead>
-        <tbody>
-${pt.stopDetails.map(s => `          <tr>
-            <td class="center">${escapeHtml(s.seq)}</td>
-            <td class="mono">${escapeHtml(s.stop_id)}</td>
-            <td>${escapeHtml(s.stop_name)}</td>
-            <td class="center mono">${escapeHtml(s.arrival)}</td>
-            <td class="center mono">${escapeHtml(s.departure)}</td>
-            <td class="center">${escapeHtml(s.pickup_type)}</td>
-            <td class="center">${escapeHtml(s.drop_off_type)}</td>
-            <td class="center">${escapeHtml(s.nodeType)}</td>
-            <td class="center">${s.isCore ? '✓' : ''}</td>
-            <td class="center">${s.isTech ? '✓' : ''}</td>
-            <td class="center">${s.isBetweenCore ? '✓' : ''}</td>
-          </tr>`).join('\n')}
-        </tbody>
-      </table>
-    </details>
-  `;
-
-  return `      <tr${rowClass}>
-        <td class="mono">${escapeHtml(trip.trip_id)}</td>
-        <td class="center">${escapeHtml(String(pt.variant))}</td>
-        <td class="mono">${escapeHtml(trip.service_id)}</td>
-        <td class="center">${escapeHtml(trip.direction_id || '0')}</td>
-        <td class="center">${pt.stopsCount}</td>
-        <td class="center">${pt.firstCoreIdx !== -1 ? pt.firstCoreIdx : 'N/A'}</td>
-        <td class="center">${pt.lastCoreIdx !== -1 ? pt.lastCoreIdx : 'N/A'}</td>
-        <td class="center ${pt.hasPassenger ? 'checkmark' : 'crossmark'}">${pt.hasPassenger ? '✓' : '✗'}</td>
-        <td class="center ${pt.hasPassengerBetweenCore ? 'checkmark' : 'crossmark'}">${pt.hasPassengerBetweenCore ? '✓' : '✗'}</td>
-        <td class="center ${pt.activeOnDate ? 'checkmark' : 'crossmark'}">${pt.activeOnDate ? '✓' : '✗'}</td>
-        <td class="center ${pt.wouldBeFiltered ? 'crossmark' : ''}">${pt.wouldBeFiltered ? '✓ Filtered' : ''}</td>
-        <td class="center">${pt.wouldBeDepot ? '🚂' : '🚌'}</td>
-        <td>${escapeHtml(pt.classificationReason)}</td>
-        <td>${stopsHtml}</td>
-      </tr>`;
-}).join('\n')}
-    </tbody>
-  </table>
-
-  <p style="margin-top: 20px; color: #666; font-size: 11px;">
-    Generated at: ${new Date().toISOString()}<br>
-    Yellow background = trips that would be filtered out when "Show All Trips" is OFF
-  </p>
-</body>
-</html>`;
-
-      // 6. Download HTML file
-      const filename = `debug_trips_${routeId.replace(/[^a-zA-Z0-9]/g, '_')}_dir${direction}_${state.selectedDate}.html`;
-      const blob = new Blob([html], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-
-      // 7. Console output
-      console.log('✅ Debug HTML exported!');
-      console.log(`📄 Filename: ${filename}`);
-      console.log(`📊 Total trips: ${processedTrips.length}`);
-      console.log(`✅ Active on ${state.selectedDate}: ${processedTrips.filter(t => t.activeOnDate).length}`);
-      console.log(`🚫 Would be filtered: ${processedTrips.filter(t => t.wouldBeFiltered).length}`);
-      console.log(`🚂 Depot trips: ${processedTrips.filter(t => t.wouldBeDepot).length}`);
-      console.log(`🚌 Normal service trips: ${processedTrips.filter(t => !t.wouldBeDepot).length}`);
-    };
   </script>
 </body>
 </html>
