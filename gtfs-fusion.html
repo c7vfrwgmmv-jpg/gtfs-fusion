@@ -3524,6 +3524,7 @@ function buildRouteProfileForCurrentSelection() {
     for (let i = 0; i < stationIds.length - 1; i++) {
       if (stationIds[i] === stationIds[i + 1]) {
         stationsWithConsecutiveStops.add(stationIds[i]);
+        console.log(`[DEBUG] Consecutive stops detected: "${stationIds[i]}" (trip has same station twice in a row)`);
       }
     }
   });
@@ -3534,6 +3535,13 @@ function buildRouteProfileForCurrentSelection() {
     if (!stationsWithConsecutiveStops.has(stationId)) {
       stationMergeAllowed.add(stationId);
     }
+  });
+  
+  // Debug: Log merge policy for all stations
+  console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir}:`);
+  allStations.forEach(stationId => {
+    const allowed = stationMergeAllowed.has(stationId);
+    console.log(`  "${stationId}": ${allowed ? 'MERGE allowed' : 'NO MERGE (consecutive stops detected)'}`);
   });
 
   const totalTripsCount = allTrips.length;
@@ -4029,12 +4037,18 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   // Step 0: Collect all platforms for each station
   const stationToAllStopIds = new Map();
   
+  console.log(`[DEBUG] Masterlist building - collecting platforms:`);
   sortedTrips.forEach(trip => {
     const stops = tripStopMaps[trip.trip_id] || [];
     
     stops.forEach(stopTime => {
       const stopId = stopTime.stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
+      
+      // Debug first occurrence
+      if (!stationToAllStopIds.has(stationId)) {
+        console.log(`  New station: "${stationId}" (from stopId "${stopId}")`);
+      }
       
       // Collect all platforms globally
       if (!stationToAllStopIds.has(stationId)) {
@@ -4045,9 +4059,13 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   });
   
   // Convert Sets to Arrays once for efficiency
+  console.log(`[DEBUG] Final platform mapping:`);
   stationToAllStopIds.forEach((stopIdsSet, stationId) => {
-    stationToAllStopIds.set(stationId, Array.from(stopIdsSet));
+    const stopIdsArray = Array.from(stopIdsSet);
+    stationToAllStopIds.set(stationId, stopIdsArray);
+    console.log(`  "${stationId}" → [${stopIdsArray.join(', ')}] (${stopIdsArray.length} platform${stopIdsArray.length > 1 ? 's' : ''})`);
   });
+
 
   // Step 1: Build trip sequences with occurrence tracking
   const tripSequences = new Map();
