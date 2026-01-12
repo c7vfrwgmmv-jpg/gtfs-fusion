@@ -1427,6 +1427,10 @@ async function parseWithStrategy(text, fileName, onProgress) {
     if (fileType === 'stop_times') {
       // Parse header to get column indices
       const lines = text.split('\n');
+      if (lines.length === 0) {
+        return Object.create(null); // Return empty index for empty file
+      }
+      
       const headerLine = lines[0].replace(/^\uFEFF/, '');
       const rawHeaders = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
       
@@ -2819,61 +2823,60 @@ function parseCSV(text) {
     }
 
     async function unzipLargeFile(file) {
-      return new Promise(async (resolve, reject) => {
-        try {
-          // Use zip.js for large files with streaming support
-          const blobReader = new zip.BlobReader(file);
-          const zipReader = new zip.ZipReader(blobReader);
+      try {
+        // Use zip.js for large files with streaming support
+        const blobReader = new zip.BlobReader(file);
+        const zipReader = new zip.ZipReader(blobReader);
+        
+        const entries = await zipReader.getEntries();
+        const files = {};
+        
+        let processedEntries = 0;
+        const totalEntries = entries.filter(entry => !entry.directory).length;
+        
+        for (const entry of entries) {
+          // Skip directories
+          if (entry.directory) continue;
           
-          const entries = await zipReader.getEntries();
-          const files = {};
+          processedEntries++;
           
-          let processedEntries = 0;
-          const totalEntries = entries.filter(entry => !entry.directory).length;
-          
-          for (const entry of entries) {
-            // Skip directories
-            if (entry.directory) continue;
-            
-            processedEntries++;
-            
-            // Update progress during decompression
-            if (state && state.loadingStep) {
-              const percent = Math.round((processedEntries / totalEntries) * 100);
-              state.loadingStep = `Decompressing large ZIP: ${processedEntries}/${totalEntries} files (${percent}%)`;
-              if (typeof render === 'function') render();
-            }
-            
-            // Get the data as Uint8Array
-            const data = await entry.getData(new zip.Uint8ArrayWriter());
-            
-            files[entry.filename] = {
-              name: entry.filename,
-              _data: data,
-              async: function(type) {
-                return Promise.resolve().then(() => {
-                  if (type === 'string') {
-                    const decoder = new TextDecoder('utf-8');
-                    return decoder.decode(this._data);
-                  } else if (type === 'arraybuffer') {
-                    return this._data.buffer.slice(this._data.byteOffset, this._data.byteOffset + this._data.byteLength);
-                  } else if (type === 'uint8array') {
-                    return this._data;
-                  } else if (type === 'blob') {
-                    return new Blob([this._data]);
-                  }
-                  return this._data;
-                });
-              }
-            };
+          // Update progress during decompression
+          if (state && state.loadingStep) {
+            const percent = Math.round((processedEntries / totalEntries) * 100);
+            state.loadingStep = `Decompressing large ZIP: ${processedEntries}/${totalEntries} files (${percent}%)`;
+            if (typeof render === 'function') render();
           }
           
-          await zipReader.close();
-          resolve({ files });
-        } catch (err) {
-          reject(new Error('Failed to decompress large ZIP: ' + err.message));
+          // Get the data as Uint8Array
+          const data = await entry.getData(new zip.Uint8ArrayWriter());
+          
+          files[entry.filename] = {
+            name: entry.filename,
+            _data: data,
+            async: function(type) {
+              return Promise.resolve().then(() => {
+                if (type === 'string') {
+                  const decoder = new TextDecoder('utf-8');
+                  return decoder.decode(this._data);
+                } else if (type === 'arraybuffer') {
+                  return this._data.buffer.slice(this._data.byteOffset, this._data.byteOffset + this._data.byteLength);
+                } else if (type === 'uint8array') {
+                  return this._data;
+                } else if (type === 'blob') {
+                  return new Blob([this._data]);
+                }
+                return this._data;
+              });
+            }
+          };
         }
-      });
+        
+        await zipReader.close();
+        return { files };
+      } catch (err) {
+        throw new Error('Failed to decompress large ZIP: ' + err.message);
+      }
+    }
     }
 
     function findFile(filesObj, filename) {
