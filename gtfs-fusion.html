@@ -3753,22 +3753,19 @@ function generateAvailableDates(calendar, calendarDates) {
     dateServiceCounts.set(dateStr, services.size);
   });
   
-  // 🆕 KROK 3: Dodaj daty z calendar_dates.txt (exception_type=1)
-  // ✅ OPTIMIZED: Iterate only through unique dates (~few thousand) instead of all records (3.8M)
-  calendarDatesByDate.forEach((exceptions, dateStr) => {
-    if (!dateServiceCounts.has(dateStr)) {
-      // Nowa data nie w calendar.txt - policz serwisy
-      const services = new Set();
-      
-      exceptions.forEach(cd => {
-        if (cd.exception_type === '1') services.add(cd.service_id);
-      });
-      
-      if (services.size > 0) {
-        dateServiceCounts.set(dateStr, services.size);
-      }
+// 🆕 KROK 3: Dodaj daty z calendar_dates.txt (exception_type=1)
+// OPTYMALIZACJA: iteruj przez unikalne daty zamiast wszystkie wiersze
+calendarDatesByDate.forEach((exceptions, dateStr) => {
+  if (!dateServiceCounts.has(dateStr)) {
+    const services = new Set();
+    exceptions.forEach(cd => {
+      if (cd. exception_type === '1') services.add(cd.service_id);
+    });
+    if (services.size > 0) {
+      dateServiceCounts.set(dateStr, services.size);
     }
-  });
+  }
+});
   
   // 🆕 KROK 4: Filtruj - zostaw tylko daty z > 0 serwisów
   const finalDates = Array.from(dateServiceCounts.entries())
