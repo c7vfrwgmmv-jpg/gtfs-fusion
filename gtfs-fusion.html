@@ -2310,8 +2310,17 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
   render();
   
   console.log(`Parsing ${filename}...`);
-  const text = await file.async('string');
-  console.log(`${filename}: text length = ${text.length} characters`);
+  console.log(`${filename}: file object:`, file);
+  console.log(`${filename}: _data exists:`, !!file._data, 'length:', file._data ? file._data.length : 'N/A');
+  
+  let text;
+  try {
+    text = await file.async('string');
+    console.log(`${filename}: text length = ${text.length} characters`);
+  } catch (err) {
+    console.error(`${filename}: Failed to extract text:`, err);
+    throw new Error(`Failed to extract ${filename}: ${err.message}`);
+  }
   
   const rows = parseCSV(text);
   console.log(`${filename}: parseCSV returned ${rows.length} rows`);
