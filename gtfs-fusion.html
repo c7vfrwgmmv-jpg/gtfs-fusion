@@ -956,6 +956,12 @@ let cachedGroupsArray = null;
 let lastStopsDataHash = null;
 let stationNameToIdCache = null;
 
+// Performance optimization: Shape simplification cache (lazy computation)
+const simplifiedShapesCache = {};
+
+// Performance optimization: Time parsing cache
+const TIME_PARSE_CACHE = new Map();
+
 // ═══════════════════════════════════════════════════════════════
 // 3. UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
@@ -1036,12 +1042,48 @@ function debounce(func, wait) {
 // ═══════════════════════════════════════════════════════════════
 // 3.2. TIME AND DATE MODULE (GTFS-specific)
 // ═══════════════════════════════════════════════════════════════
+
+/**
+ * Fast time parser with caching (no string split)
+ * Handles GTFS time format: "HH:MM:SS" (including >24h times like "25:30:00")
+ * @param {string} timeStr - Time string
+ * @returns {number} - Minutes since midnight (can be >1440 for next-day service)
+ */
+function parseTimeFast(timeStr) {
+  if (!timeStr) return 0;
+  
+  // Check cache first (many stop_times share same times like "08:00:00")
+  if (TIME_PARSE_CACHE.has(timeStr)) {
+    return TIME_PARSE_CACHE.get(timeStr);
+  }
+  
+  // Fast parse using charCodeAt (no string allocation)
+  // "08:30:00" → extract HH and MM directly
+  // Handle edge cases for single digit or malformed times
+  let h = 0, m = 0;
+  const len = timeStr.length;
+  
+  if (len >= 5) {
+    // Standard format "HH:MM" or "HH:MM:SS"
+    h = (timeStr.charCodeAt(0) - 48) * 10 + (timeStr.charCodeAt(1) - 48);
+    m = (timeStr.charCodeAt(3) - 48) * 10 + (timeStr.charCodeAt(4) - 48);
+  } else {
+    // Fallback for malformed times
+    const parts = timeStr.split(':');
+    h = parseInt(parts[0] || '0', 10);
+    m = parseInt(parts[1] || '0', 10);
+  }
+  
+  const result = h * 60 + m;
+  
+  // Cache for reuse
+  TIME_PARSE_CACHE.set(timeStr, result);
+  
+  return result;
+}
+
     function timeToMinutes(timeStr) {
-      if (!timeStr) return 0;
-      const parts = timeStr.split(':');
-      const h = parseInt(parts[0] || '0', 10);
-      const m = parseInt(parts[1] || '0', 10);
-      return h * 60 + m;
+      return parseTimeFast(timeStr);
     }
     function minutesToTime(minutes) {
       if (!minutes && minutes !== 0) return '';
@@ -1455,6 +1497,43 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       
       return simplified;
     }
+
+/**
+ * Get simplified shape (lazy computation with cache)
+ * Only simplifies shapes when they're actually needed for rendering
+ * @param {string} shapeId - Shape ID
+ * @param {number} tolerance - Simplification tolerance (default 0.0001)
+ * @returns {Array} - Simplified coordinates [[lat, lon], ...]
+ */
+function getSimplifiedShape(shapeId, tolerance = 0.0001) {
+  const cacheKey = `${shapeId}_${tolerance}`;
+  
+  // Check cache
+  if (simplifiedShapesCache[cacheKey]) {
+    return simplifiedShapesCache[cacheKey];
+  }
+  
+  // Get raw shape
+  const rawShape = state.gtfsData.shapesIndex?.[shapeId];
+  if (!rawShape || rawShape.length === 0) {
+    return [];
+  }
+  
+  // rawShape is already in coordinate array format [[lat, lon], ...]
+  let simplified;
+  
+  // Simplify only if needed (many points)
+  if (rawShape.length > 50) {
+    simplified = simplifyDouglasPeucker(rawShape, tolerance);
+  } else {
+    simplified = rawShape;  // Don't simplify short shapes
+  }
+  
+  // Cache result
+  simplifiedShapesCache[cacheKey] = simplified;
+  
+  return simplified;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 3.5. DATA QUALITY HEURISTICS MODULE
@@ -2407,16 +2486,9 @@ perfTimings.parseEnd = performance.now();
               render();
             });
             
-            let simplifiedShapes = loadCachedShapes(rawShapes);
-            
-            if (!simplifiedShapes) {
-              // Simplify and cache
-              state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
-              simplifiedShapes = simplifyShapes(rawShapes, 0.0001);
-              cacheShapes(rawShapes, simplifiedShapes);
-            }
-            
-            shapesIndex = simplifiedShapes;
+            // OPTIMIZATION: Skip simplification during load - defer to render time
+            // This eliminates the O(n²) Douglas-Peucker bottleneck during loading
+            shapesIndex = rawShapes;
             perfTimings.shapesEnd = performance.now();
           } catch (err) {
             perfTimings.shapesEnd = performance.now();
@@ -2540,6 +2612,10 @@ if (dates.length > 0) {
         if (Object.keys(shapesIndex).length > 0) {
           console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
         }
+        console.log('');
+        console.log('Cache statistics:');
+        console.log(`  Time parse cache: ${TIME_PARSE_CACHE.size} entries`);
+        console.log(`  Simplified shapes cache: ${Object.keys(simplifiedShapesCache).length} entries`);
         console.log('═══════════════════════════════════════════════');
         
         // Store metrics in state for optional display
@@ -4637,7 +4713,7 @@ async function generateHybridLineGeometry(stops, shapeId, routeType) {
     return await generateLineGeometry(stops, routeType);
   }
   
-  const shapePoints = shapesIndex[shapeId];
+  const shapePoints = getSimplifiedShape(shapeId);
   
   const coverage = calculateShapeCoverage(stops, shapePoints);
   
@@ -4729,7 +4805,7 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
       const shapeId = variantTrips[0].shape_id;
       
       if (shapeId && state.gtfsData. shapesIndex[shapeId]) {
-        lineGeometry = state.gtfsData.shapesIndex[shapeId];
+        lineGeometry = getSimplifiedShape(shapeId);
       }
     }
   }
@@ -7744,7 +7820,7 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
         let lineGeometry = null;
         
         if (shapeId && state.gtfsData.shapesIndex && state.gtfsData.shapesIndex[shapeId]) {
-          lineGeometry = state.gtfsData.shapesIndex[shapeId];
+          lineGeometry = getSimplifiedShape(shapeId);
         }
         
         if (!lineGeometry) {
