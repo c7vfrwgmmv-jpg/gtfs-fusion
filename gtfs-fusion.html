@@ -877,9 +877,6 @@ const CANONICAL_CATEGORIES = {
 // 2. STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
 
-let lastRenderTime = 0;
-const RENDER_THROTTLE_MS = 200; // Max 5 FPS
-
 let state = {
   gtfsData: null,
   selectedRoute: null,
@@ -893,16 +890,12 @@ let state = {
   selectedDirection: '0',
   selectedVariant: 1,
   selectedVariantFilter: 0,  // 0 = wszystkie, 1+ = specific variant
-  mapLoaded: false,
   showAllTrips: false,
   threshold: 10,
-  currentWorker: null,
   // UI: group mode for routes list - 'route_id' or 'service_type'
   routeGroupMode: 'service_type',
   routesOptionsOpen: false,
   routesOptionsListenerAttached: false,
-  // custom route type map can be injected/extended
-  customRouteTypeMap: {},
 
   // NOWE:
   selectedRouteGroup: null,   // obecna logiczna grupa linii (dla listy linii)
@@ -917,10 +910,6 @@ let state = {
   expandedStopGroup: null,
   stopsListMapState: null,
   stopsListSearchQuery: '',
-  
-  // Pagination state for stops list
-  stopsListPage: 1,
-  stopsListPageSize: 50,
   
   // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
@@ -949,10 +938,7 @@ let state = {
   columnOrderCache: {},
   
   // Performance metrics from last load
-  lastLoadMetrics: null,
-  
-  // Skip direction_id enrichment when loading GTFS
-  skipDirectionIdEnrichment: false
+  lastLoadMetrics: null
 };
 
 let stopsSearchIndex = null;
@@ -2457,7 +2443,7 @@ agencies.forEach(a => {
 const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
 
 // Clear all caches when loading new GTFS data
-clearStationCache();
+stationNameToIdCache = null;
 clearStopsSearchIndex();
 clearStopToRoutesCache();
 cachedGroupsArray = null;
@@ -3146,10 +3132,6 @@ function buildStationNameCache(stopsIndex) {
   });
   
   return stationNameToIdCache;
-}
-
-function clearStationCache() {
-  stationNameToIdCache = null;
 }
 
 function getStationId(stopId, stopsIndex) {
@@ -4110,6 +4092,49 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
   const masterList = [];
   const masterListMap = new Map(); // String key → index for O(1) lookup
 
+  // === Step 1.5 - Build core stations skeleton FIRST ===
+  // This ensures core stations appear in correct topological order
+  const coreStationGroups = [];
+  const seenCoreStations = new Set();
+
+  coreStops.forEach(stopId => {
+    const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
+    
+    if (!seenCoreStations.has(stationId)) {
+      seenCoreStations.add(stationId);
+      
+      // Determine stopIds based on split requirement
+      const stopIdsForStation = stationRequiresSplit.has(stationId)
+        ? [stopId]
+        : (stationToAllStopIds.get(stationId) || [stopId]);
+      
+      const coreEntry = {
+        id: stopIdsForStation[0],
+        name: getStationDisplayName(stationId, [stopId]),
+        stopIds: stopIdsForStation,
+        stationId,
+        occurrence: 1, // Core stations always occurrence 1
+        nodeType: nodeTypes[stopId] || 'passenger'
+      };
+      
+      masterList.push(coreEntry);
+      
+      // Add to map with both possible keys (split/merge)
+      const mergedKey = `${stationId}::1`;
+      masterListMap.set(mergedKey, masterList.length - 1);
+      
+      // If split required, also add keys for each platform
+      if (stationRequiresSplit.has(stationId)) {
+        stopIdsForStation.forEach(sid => {
+          masterListMap.set(`${stationId}::1::${sid}`, masterList.length - 1);
+        });
+      }
+      
+      coreStationGroups.push({ stationId, stopIds: stopIdsForStation });
+    }
+  });
+
+  // === THEN Step 2: Process trip sequences for branches and loops ===
   tripSequences.forEach((sequence, tripId) => {
     let lastMasterIdx = -1;
     
@@ -5401,23 +5426,6 @@ function clearStopsSearchIndex() {
   stopsSearchIndex = null;
 }
 
-function searchStopsInIndex(query, groupsArray) {
-  if (!query || query.trim() === '') return groupsArray;
-  
-  const index = buildStopsSearchIndex(groupsArray);
-  const lowerQuery = query.toLowerCase().trim();
-  
-  return index
-    .filter(item => item.searchText.includes(lowerQuery))
-    .map(item => ({
-      id: item.id,
-      name: item.name,
-      routeCount: item.routeCount,
-      stops: item.stops,
-      routeSet: item.routeSet
-    }));
-}
-
 // Async search with chunked processing to prevent UI freeze on large datasets
 async function searchStopsInIndexAsync(query, groupsArray, onProgress) {
   if (!query || query.trim() === '') return groupsArray;
@@ -5459,7 +5467,8 @@ async function searchStopsInIndexAsync(query, groupsArray, onProgress) {
 }
 
 function getOrBuildGroupsArray(stopsData) {
-  const currentHash = stopsData.length + '_' + (stopsData[0]?.stop_id || '');
+  // Better hash - includes first AND last stop
+  const currentHash = `${stopsData.length}_${stopsData[0]?.stop_id || ''}_${stopsData[stopsData.length-1]?.stop_id || ''}`;
   
   if (cachedGroupsArray && lastStopsDataHash === currentHash) {
     return cachedGroupsArray;
@@ -7432,10 +7441,6 @@ switch(currentView) {
         Załaduj GTFS
         <input type="file" accept=".zip" id="file-input" class="hidden" />
       </label>
-      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.9rem; color: #374151;">
-        <input type="checkbox" id="skip-direction-enrichment" ${state.skipDirectionIdEnrichment ? 'checked' : ''} style="width: 1.2rem; height: 1.2rem; cursor: pointer;" />
-        <span>Nie konstruuj direction_id</span>
-      </label>
     </div>
   </div>`;
     break;
@@ -7747,16 +7752,6 @@ switch(currentView) {
 
       $('cancel-parse')?.addEventListener('click', cancelParsing);
       
-      // Handle skip direction enrichment checkbox
-      $('skip-direction-enrichment')?.addEventListener('change', (e) => {
-        state.skipDirectionIdEnrichment = e.target.checked;
-        try {
-          localStorage.setItem('gtfs_skip_direction_enrichment', JSON.stringify(state.skipDirectionIdEnrichment));
-        } catch (err) {
-          console.warn('Failed to save skip direction enrichment preference:', err);
-        }
-      });
-      
       const routesOptionsBtn = $('routes-options-btn');
       const routesOptions = $('routes-options');
       if (routesOptionsBtn && routesOptions) {
@@ -7781,16 +7776,15 @@ switch(currentView) {
         }
       }
       $('route-group-select')?.addEventListener('change', (e) => { state.routeGroupMode = e.target.value || 'route_id'; renderRouteTable(); });
-      $('view-mode-select')?.addEventListener('change', (e) => {
-    state.showStopsView = (e.target.value === 'stops');
-    render();
-  });
-
-$('view-mode-select-stops')?.addEventListener('change', (e) => {
-    state.showStopsView = (e.target.value === 'stops');
-    render();
-  });
-$('back-button')?.addEventListener('click', () => {
+      
+      ['view-mode-select', 'view-mode-select-stops'].forEach(id => {
+        $(id)?.addEventListener('change', (e) => {
+          state.showStopsView = (e.target.value === 'stops');
+          render();
+        });
+      });
+      
+      $('back-button')?.addEventListener('click', () => {
     if (state.selectedStop) {
       // Powrót ze STOP_DETAIL do STOPS_LIST
       // Restore expanded group if we had one
