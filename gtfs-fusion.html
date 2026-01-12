@@ -877,6 +877,9 @@ const CANONICAL_CATEGORIES = {
 // 2. STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
 
+let lastRenderTime = 0;
+const RENDER_THROTTLE_MS = 200; // Max 5 FPS
+
 let state = {
   gtfsData: null,
   selectedRoute: null,
@@ -892,10 +895,13 @@ let state = {
   selectedVariantFilter: 0,  // 0 = wszystkie, 1+ = specific variant
   showAllTrips: false,
   threshold: 10,
+  currentWorker: null,
   // UI: group mode for routes list - 'route_id' or 'service_type'
   routeGroupMode: 'service_type',
   routesOptionsOpen: false,
   routesOptionsListenerAttached: false,
+  // custom route type map can be injected/extended
+  customRouteTypeMap: {},
 
   // NOWE:
   selectedRouteGroup: null,   // obecna logiczna grupa linii (dla listy linii)
@@ -910,6 +916,10 @@ let state = {
   expandedStopGroup: null,
   stopsListMapState: null,
   stopsListSearchQuery: '',
+  
+  // Pagination state for stops list
+  stopsListPage: 1,
+  stopsListPageSize: 50,
   
   // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
@@ -2416,21 +2426,15 @@ perfTimings.parseEnd = performance.now();
         perfTimings.indexStart = performance.now();
         const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
         
-        // Generate missing direction_id values with chunked processing (only if not skipped)
-        if (!state.skipDirectionIdEnrichment) {
-          state.loadingStep = 'Generowanie brakujących direction_id...'; render();
-          perfTimings.enrichStart = performance.now();
-          await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
-            state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
-            state.loadingProgressPercent = percent;
+        // Generate missing direction_id values with chunked processing
+        state.loadingStep = 'Generowanie brakujących direction_id...'; render();
+        perfTimings.enrichStart = performance.now();
+        await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
+          state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
+          state.loadingProgressPercent = percent;
             render();
           });
           perfTimings.enrichEnd = performance.now();
-        } else {
-          state.loadingStep = 'Pomijanie generowania direction_id...'; render();
-          perfTimings.enrichStart = performance.now();
-          perfTimings.enrichEnd = performance.now();
-        }
         
         const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
 const agenciesIndex = {};
@@ -8034,15 +8038,6 @@ if (state.gtfsData && state.selectedRoute) {
 // ═══════════════════════════════════════════════════════════════
 // 15. GLOBAL EVENT HANDLERS & INITIALIZATION
 // ═══════════════════════════════════════════════════════════════
-    // Load preferences from localStorage
-    try {
-      const savedSkipPref = localStorage.getItem('gtfs_skip_direction_enrichment');
-      if (savedSkipPref !== null) {
-        state.skipDirectionIdEnrichment = JSON.parse(savedSkipPref);
-      }
-    } catch (err) {
-      console.warn('Failed to load skip direction enrichment preference:', err);
-    }
     
     // global delegated handlers (one-time) ---------------------------------------------------------
     // handle clicks on any .route-link (works for badges in stop detail, modal, lists)
