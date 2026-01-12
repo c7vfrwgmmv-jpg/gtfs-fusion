@@ -2889,6 +2889,15 @@ function findDateForDayOfWeek(targetDayOfWeek) {
   
   return null;
 }
+
+function buildStationNameCache(stopsIndex) {
+  if (stationNameToIdCache) return stationNameToIdCache;
+  
+  stationNameToIdCache = new Map();
+  
+  const parentStationIds = new Set();
+  Object.values(stopsIndex).forEach(stop => {
+    if (stop.parent_station && stop.parent_station.trim()) {
       parentStationIds.add(stop.parent_station.trim());
     }
   });
