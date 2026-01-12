@@ -1749,7 +1749,9 @@ function parseCSV(text) {
   const headerLine = lines[0].replace(/^\uFEFF/, '');
   const headers = parseCSVLine(headerLine).map(h => h.trim());
   
-  const result = [];
+  // Pre-allocate array for better performance
+  const result = new Array(lines.length - 1);
+  let resultIndex = 0;
   
   // Parse data rows - optimized for speed
   for (let i = 1; i < lines.length; i++) {
@@ -1765,8 +1767,11 @@ function parseCSV(text) {
       row[headers[j]] = value.trim();
     }
     
-    result.push(normalizeRecord(row));
+    result[resultIndex++] = normalizeRecord(row);
   }
+  
+  // Trim array to actual size (remove unused slots)
+  result.length = resultIndex;
   
   return result;
 }
@@ -2097,6 +2102,12 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
 
     async function unzipWithFflate(file) {
       return new Promise((resolve, reject) => {
+        // Warn about large files
+        const fileSizeMB = file.size / (1024 * 1024);
+        if (fileSizeMB > 150) {
+          console.warn(`Large GTFS file detected: ${fileSizeMB.toFixed(1)}MB. Decompression may fail or be very slow.`);
+        }
+        
         const reader = new FileReader();
         
         reader.onload = function(e) {
@@ -2107,8 +2118,16 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             // Use fflate.unzip to decompress
             fflate.unzip(uint8Array, (err, unzipped) => {
               if (err) {
-                reject(new Error('Failed to decompress ZIP: ' + (err.message || String(err) || 'Unknown error') + 
-                  '. File might be corrupted, not a valid ZIP, or too large. Try a different GTFS file.'));
+                let errorMsg = 'Failed to decompress ZIP: ' + (err.message || String(err) || 'Unknown error');
+                
+                // Add helpful context for large files
+                if (fileSizeMB > 150) {
+                  errorMsg += `. File is very large (${fileSizeMB.toFixed(1)}MB). Try a smaller GTFS file or split the data.`;
+                } else {
+                  errorMsg += '. File might be corrupted, not a valid ZIP, or too large. Try a different GTFS file.';
+                }
+                
+                reject(new Error(errorMsg));
                 return;
               }
               
@@ -2366,8 +2385,7 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
   
   console.log(`${filename}: ${rows.length.toLocaleString()} rows to insert`);
   
-  const placeholders = columns.map(() => '?').join(', ');
-  const stmt = db.prepare(`INSERT INTO ${tableName} VALUES (${placeholders})`);
+  const BATCH_SIZE = 1000;
   
   try {
     db.run('BEGIN TRANSACTION');
@@ -2376,24 +2394,27 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
     throw new Error(`Database error in ${tableName}: ${err.message}`);
   }
   
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const values = columns.map(col => row[col] || null);
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batchEnd = Math.min(i + BATCH_SIZE, rows.length);
+    const batch = rows.slice(i, batchEnd);
+    
+    // Build multi-row INSERT: INSERT INTO table VALUES (?,?,...), (?,?,...), ...
+    const rowPlaceholders = columns.map(() => '?').join(', ');
+    const batchPlaceholders = batch.map(() => `(${rowPlaceholders})`).join(', ');
+    const sql = `INSERT INTO ${tableName} VALUES ${batchPlaceholders}`;
+    const values = batch.flatMap(row => columns.map(col => row[col] || null));
+    
     try {
-      stmt.run(values);
+      db.run(sql, values);
     } catch (err) {
-      console.error(`Failed to insert row ${i} into ${tableName}:`, err, 'Row data:', row);
+      console.error(`Failed to insert batch starting at row ${i} into ${tableName}:`, err);
       throw new Error(`Database insert error in ${tableName} at row ${i}: ${err.message}`);
     }
     
-    if (showProgress && i % 50000 === 0 && i > 0) {
+    if (showProgress && i % 100000 === 0 && i > 0) {
       state.loadingStep = `${filename}: ${i.toLocaleString()} / ${rows.length.toLocaleString()}`;
       state.loadingProgressPercent = Math.round((i / rows.length) * 100);
       render();
-      
-      // Commit and restart transaction for memory efficiency
-      db.run('COMMIT');
-      db.run('BEGIN TRANSACTION');
       
       // Allow browser to breathe and update UI
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -2401,7 +2422,6 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
   }
   
   db.run('COMMIT');
-  stmt.free();
 }
 
 // Helper to convert SQL results to objects
@@ -2478,18 +2498,36 @@ function createStopsIndexProxy() {
 
 function createStopTimesIndexProxy() {
   const cache = new Map(); // Cache stop_times by trip_id
+  let firstAccessLogged = false;
   return new Proxy({}, {
     get(target, tripId) {
       if (cache.has(tripId)) return cache.get(tripId);
-      if (!db) return [];
-      const result = db.exec(`
-        SELECT * FROM stop_times 
-        WHERE trip_id = ? 
-        ORDER BY stop_sequence
-      `, [tripId]);
-      const stopTimes = result[0] ? convertSQLResultToObjects(result[0]) : [];
-      cache.set(tripId, stopTimes);
-      return stopTimes;
+      if (!db) {
+        console.warn('createStopTimesIndexProxy: db is null for trip', tripId);
+        return [];
+      }
+      
+      try {
+        const result = db.exec(`
+          SELECT * FROM stop_times 
+          WHERE trip_id = ? 
+          ORDER BY stop_sequence
+        `, [tripId]);
+        
+        const stopTimes = result[0] ? convertSQLResultToObjects(result[0]) : [];
+        
+        // Debug: log first access to verify data
+        if (stopTimes.length > 0 && !firstAccessLogged) {
+          console.log(`Loaded ${stopTimes.length} stop_times for trip ${tripId}`);
+          firstAccessLogged = true;
+        }
+        
+        cache.set(tripId, stopTimes);
+        return stopTimes;
+      } catch (err) {
+        console.error(`Error loading stop_times for trip ${tripId}:`, err);
+        return [];
+      }
     }
   });
 }
