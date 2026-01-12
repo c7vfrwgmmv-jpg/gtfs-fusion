@@ -3503,11 +3503,6 @@ function buildRouteProfileForCurrentSelection() {
     const stationIds = sts.map(st => getStationId(st.stop_id, stopsIndex));
     const stopIds = sts.map(st => st.stop_id);
     
-    // Debug: Show trip sequence
-    console.log(`[DEBUG] Trip ${trip.trip_id}:`);
-    console.log(`  stopIds: [${stopIds.join(', ')}]`);
-    console.log(`  stationIds: [${stationIds.map(s => `"${s}"`).join(', ')}]`);
-    
     // Zapisz dane tripu do późniejszego użycia
     allTripStationData.push({
       tripId: trip.trip_id,
@@ -3902,7 +3897,9 @@ function buildRouteProfileForCurrentSelection() {
 
   // Build stationMergeAllowed based on ACTUAL displayed stops (pStops)
   // Rule: If ANY consecutive stops at same station in the displayed sequence → don't merge
+  console.log(`[DEBUG] ========================================`);
   console.log(`[DEBUG] Checking consecutive stops in DISPLAYED sequences (pStops) for merge policy...`);
+  console.log(`[DEBUG] ========================================`);
   
   const stationsWithConsecutiveStops = new Set();
   const allStations = new Set();
@@ -3912,6 +3909,12 @@ function buildRouteProfileForCurrentSelection() {
     
     // Get station IDs for the displayed stops
     const displayedStationIds = pStops.map(st => getStationId(st.stop_id, stopsIndex));
+    const displayedStopIds = pStops.map(st => st.stop_id);
+    
+    // Debug: Show what's actually displayed for this trip
+    console.log(`[DEBUG] Trip ${tripId} DISPLAYED stops (pStops):`);
+    console.log(`  stopIds: [${displayedStopIds.join(', ')}]`);
+    console.log(`  stationIds: [${displayedStationIds.map(s => `"${s}"`).join(', ')}]`);
     
     // Collect all stations
     displayedStationIds.forEach(stationId => allStations.add(stationId));
@@ -3920,12 +3923,15 @@ function buildRouteProfileForCurrentSelection() {
     for (let i = 0; i < displayedStationIds.length - 1; i++) {
       if (displayedStationIds[i] === displayedStationIds[i + 1]) {
         stationsWithConsecutiveStops.add(displayedStationIds[i]);
-        console.log(`[DEBUG] Station "${displayedStationIds[i]}" has consecutive stops in DISPLAYED trip ${tripId}`);
-        console.log(`  stopIds: ${pStops[i].stop_id} → ${pStops[i + 1].stop_id}`);
-        console.log(`  → Will NOT merge (consecutive in displayed table)`);
+        console.log(`  → CONSECUTIVE FOUND: "${displayedStationIds[i]}" at positions ${i} and ${i+1}`);
+        console.log(`     stopIds: ${pStops[i].stop_id} → ${pStops[i + 1].stop_id}`);
       }
     }
   });
+  
+  console.log(`[DEBUG] ========================================`);
+  console.log(`[DEBUG] Stations with consecutive stops in DISPLAYED table: [${Array.from(stationsWithConsecutiveStops).join(', ')}]`);
+  console.log(`[DEBUG] ========================================`);
   
   // Only allow merging for stations without consecutive stops in displayed sequences
   const stationMergeAllowed = new Set();
@@ -3939,8 +3945,9 @@ function buildRouteProfileForCurrentSelection() {
   console.log(`[DEBUG] Station merge policy for route ${key} direction ${dir} (based on DISPLAYED stops):`);
   allStations.forEach(stationId => {
     const allowed = stationMergeAllowed.has(stationId);
-    console.log(`  "${stationId}": ${allowed ? 'MERGE allowed' : 'NO MERGE (consecutive in table)'}`);
+    console.log(`  "${stationId}": ${allowed ? '✓ MERGE allowed' : '✗ NO MERGE (consecutive in table)'}`);
   });
+  console.log(`[DEBUG] ========================================`);
 
   // 11. Save profile to state
   if (!state.routeProfiles[key]) state.routeProfiles[key] = {};
