@@ -1552,7 +1552,12 @@ async function parseStopTimesParallel(text, onProgress) {
   // Decision: Use IndexedDB for large feeds (≥12M rows)
   if (estimatedRowCount >= STOP_TIMES_DB_THRESHOLD) {
     console.log('[Parse] Large feed detected (≥12M rows) - switching to IndexedDB mode');
-    return await parseStopTimesToIndexedDB(text, onProgress);
+    try {
+      return await parseStopTimesToIndexedDB(text, onProgress);
+    } catch (error) {
+      console.error('[IndexedDB] Failed to use IndexedDB:', error);
+      throw new Error('Cache dysku niedostępny - spróbuj mniejszego feedu lub użyj przeglądarki desktopowej');
+    }
   }
   
   // RAM mode for smaller feeds
@@ -8164,9 +8169,22 @@ function openStopTimetable(stopId) {
 
 switch(currentView) {
   case VIEW.LOADING:
+    const progressBarHtml = state.loadingProgressPercent > 0 
+      ? `<div style="width: 300px; background: #e5e7eb; border-radius: 8px; height: 12px; margin: 1rem auto; overflow: hidden;">
+           <div style="width: ${state.loadingProgressPercent}%; height: 100%; background: linear-gradient(90deg,#60a5fa,#3b82f6); border-radius: 8px; transition: width 200ms ease;"></div>
+         </div>
+         <p class="text-sm text-gray-500">${state.loadingProgressPercent}%</p>`
+      : '';
+    
+    const dbModeIndicator = state.loadingStep && state.loadingStep.includes('cache dysku')
+      ? `<p class="text-sm text-blue-600 font-semibold mt-2">💾 Używam cache dysku (feed > 12M wierszy)</p>`
+      : '';
+    
     html += `<div class="flex-1 flex flex-col items-center justify-center bg-gray-50">
     <div class="text-center">
-      <p class="text-gray-600 font-medium animate-ellipsis">Przetwarzanie</p>
+      <p class="text-gray-600 font-medium">${state.loadingStep || 'Przetwarzanie'}</p>
+      ${progressBarHtml}
+      ${dbModeIndicator}
       <div style="margin-top:1rem;">
         <button id="cancel-parse" class="bg-red-500 text-white px-3 py-1 hover:bg-red-600">Anuluj</button>
       </div>
