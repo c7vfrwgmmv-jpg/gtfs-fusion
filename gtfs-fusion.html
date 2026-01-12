@@ -4035,8 +4035,9 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     tripStopMaps[trip.trip_id] = sortedStops;
   });
 
-  // Step 0A: Detect stations that require splitting (any trip uses multiple stop_ids)
+  // Step 0: Detect stations requiring split and collect all platforms (combined for efficiency)
   const stationRequiresSplit = new Set();
+  const stationToAllStopIds = new Map(); // Will store Arrays, not Sets
   
   sortedTrips.forEach(trip => {
     const stationStopsInTrip = new Map(); // stationId → Set(stop_id)
@@ -4045,10 +4046,18 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     stops.forEach(stopTime => {
       const stopId = stopTime.stop_id;
       const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
+      
+      // Track stops per station in this trip
       if (!stationStopsInTrip.has(stationId)) {
         stationStopsInTrip.set(stationId, new Set());
       }
       stationStopsInTrip.get(stationId).add(stopId);
+      
+      // Collect all platforms globally
+      if (!stationToAllStopIds.has(stationId)) {
+        stationToAllStopIds.set(stationId, new Set());
+      }
+      stationToAllStopIds.get(stationId).add(stopId);
     });
     
     // If trip has >1 stop_id for a station → mark for splitting
@@ -4058,19 +4067,10 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
       }
     });
   });
-
-  // Step 0B: Collect all platforms per station
-  const stationToAllStopIds = new Map();
-  sortedTrips.forEach(trip => {
-    const stops = tripStopMaps[trip.trip_id] || [];
-    stops.forEach(stopTime => {
-      const stopId = stopTime.stop_id;
-      const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-      if (!stationToAllStopIds.has(stationId)) {
-        stationToAllStopIds.set(stationId, new Set());
-      }
-      stationToAllStopIds.get(stationId).add(stopId);
-    });
+  
+  // Convert Sets to Arrays once for efficiency
+  stationToAllStopIds.forEach((stopIdsSet, stationId) => {
+    stationToAllStopIds.set(stationId, Array.from(stopIdsSet));
   });
 
   // Step 1: Build trip sequences with occurrence tracking
@@ -4108,36 +4108,20 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
   // Step 2: Build masterlist with conditional merging
   const masterList = [];
-  const masterListKeys = [];
+  const masterListMap = new Map(); // String key → index for O(1) lookup
 
   tripSequences.forEach((sequence, tripId) => {
     let lastMasterIdx = -1;
     
     sequence.forEach(({stopId, stationId, occurrence, requiresSplit}) => {
-      // Search for existing entry with appropriate key
-      let existingIdx = -1;
-      for (let i = 0; i < masterListKeys.length; i++) {
-        const key = masterListKeys[i];
-        
-        if (requiresSplit) {
-          // Key: (stationId, occurrence, stopId)
-          if (key.stationId === stationId && 
-              key.occurrence === occurrence &&
-              key.stopId === stopId) {
-            existingIdx = i;
-            break;
-          }
-        } else {
-          // Key: (stationId, occurrence) - merge platforms
-          if (key.stationId === stationId && 
-              key.occurrence === occurrence) {
-            existingIdx = i;
-            break;
-          }
-        }
-      }
+      // Create lookup key as string for Map efficiency
+      const lookupKey = requiresSplit 
+        ? `${stationId}::${occurrence}::${stopId}` // Key: (stationId, occurrence, stopId)
+        : `${stationId}::${occurrence}`; // Key: (stationId, occurrence) - merge platforms
       
-      if (existingIdx !== -1) {
+      const existingIdx = masterListMap.get(lookupKey);
+      
+      if (existingIdx !== undefined) {
         lastMasterIdx = existingIdx;
       } else {
         // Create new entry
@@ -4149,7 +4133,7 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         // Merge mode: Combine all platforms (multiple stop_ids) when no trip uses multiple platforms
         const stopIdsForEntry = requiresSplit 
           ? [stopId]
-          : Array.from(stationToAllStopIds.get(stationId) || [stopId]);
+          : (stationToAllStopIds.get(stationId) || [stopId]);
         
         const newEntry = {
           id: stopIdsForEntry[0],
@@ -4162,11 +4146,14 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
         
         const insertPos = lastMasterIdx + 1;
         masterList.splice(insertPos, 0, newEntry);
+        masterListMap.set(lookupKey, insertPos);
         
-        const key = requiresSplit 
-          ? {stationId, occurrence, stopId}
-          : {stationId, occurrence};
-        masterListKeys.splice(insertPos, 0, key);
+        // Update all indices in map that are >= insertPos
+        masterListMap.forEach((idx, key) => {
+          if (idx >= insertPos && key !== lookupKey) {
+            masterListMap.set(key, idx + 1);
+          }
+        });
         
         lastMasterIdx = insertPos;
       }
