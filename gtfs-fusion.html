@@ -17,6 +17,7 @@
       window.fflate = exports;
     }
   </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
@@ -880,8 +881,11 @@ const CANONICAL_CATEGORIES = {
 let lastRenderTime = 0;
 const RENDER_THROTTLE_MS = 200; // Max 5 FPS
 
+// SQL.js database instance (replaces in-memory gtfsData structure)
+let db = null;
+
 let state = {
-  gtfsData: null,
+  gtfsData: null, // Will be deprecated - keeping for compatibility during refactoring
   selectedRoute: null,
   loading: false,
   loadingStep: '',
@@ -1259,113 +1263,6 @@ function fillShapeGaps(stops, shapePoints, nearbyStops) {
       return coords;
     }
 
-    function hashShapesData(shapesIndex) {
-      const keys = Object.keys(shapesIndex).sort();
-      const sample = keys.slice(0, 10).join(',') + keys.length;
-      let hash = 0;
-      for (let i = 0; i < sample.length; i++) {
-        const char = sample.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash;
-      }
-      return 'shapes_' + Math.abs(hash).toString(36);
-    }
-
-    function cacheShapes(shapesIndex, simplified) {
-      try {
-        const cacheKey = hashShapesData(shapesIndex);
-        
-        const compressed = {};
-        Object.keys(simplified).forEach(shapeId => {
-          compressed[shapeId] = compressCoordinates(simplified[shapeId]);
-        });
-        
-        const cacheData = {
-          version: 2, // version 2 uses compression
-          timestamp: Date.now(),
-          shapes: compressed
-        };
-        
-        const jsonStr = JSON.stringify(cacheData);
-        const originalSize = jsonStr.length;
-        
-        localStorage.setItem(cacheKey, jsonStr);
-      } catch (e) {
-        // If storage quota exceeded, try to clear old caches
-        if (e.name === 'QuotaExceededError') {
-          try {
-            // Remove old shape caches
-            for (let i = 0; i < localStorage.length; i++) {
-              const key = localStorage.key(i);
-              if (key && key.startsWith('shapes_')) {
-                localStorage.removeItem(key);
-              }
-            }
-          } catch (e2) {
-            // Ignore cache cleanup errors - they don't affect core functionality
-          }
-        }
-      }
-    }
-
-    function loadCachedShapes(shapesIndex) {
-      try {
-        const cacheKey = hashShapesData(shapesIndex);
-        const cached = localStorage.getItem(cacheKey);
-        if (!cached) return null;
-        
-        const data = JSON.parse(cached);
-        
-        const age = Date.now() - data.timestamp;
-        if (age > 30 * 24 * 60 * 60 * 1000) {
-          localStorage.removeItem(cacheKey);
-          return null;
-        }
-        
-        const shapes = {};
-        Object.keys(data.shapes).forEach(shapeId => {
-          if (data.version === 2) {
-            // Version 2 uses compression
-            shapes[shapeId] = decompressCoordinates(data.shapes[shapeId]);
-          } else {
-            // Version 1 or unversioned - direct coordinates
-            shapes[shapeId] = data.shapes[shapeId];
-          }
-        });
-        
-        return shapes;
-      } catch (e) {
-        return null;
-      }
-    }
-
-    function simplifyShapes(shapesIndex, tolerance = 0.0001) {
-      const simplified = {};
-      let totalOriginal = 0;
-      let totalSimplified = 0;
-      
-      Object.keys(shapesIndex).forEach(shapeId => {
-        const points = shapesIndex[shapeId];
-        totalOriginal += points.length;
-        
-        if (points.length <= 2) {
-          simplified[shapeId] = points;
-          totalSimplified += points.length;
-        } else {
-          const simplifiedPoints = simplifyDouglasPeucker(points, tolerance);
-          simplified[shapeId] = simplifiedPoints;
-          totalSimplified += simplifiedPoints.length;
-        }
-      });
-      
-      const reduction = totalOriginal > 0 
-        ? Math.round((1 - totalSimplified / totalOriginal) * 100) 
-        : 0;
-      
-      return simplified;
-    }
-
-// ═══════════════════════════════════════════════════════════════
 // 3.5. DATA QUALITY HEURISTICS MODULE
 // ═══════════════════════════════════════════════════════════════
 function mostCommonString(arr) {
@@ -2210,7 +2107,8 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
             // Use fflate.unzip to decompress
             fflate.unzip(uint8Array, (err, unzipped) => {
               if (err) {
-                reject(new Error('Failed to decompress ZIP: ' + err.message));
+                reject(new Error('Failed to decompress ZIP: ' + (err.message || String(err) || 'Unknown error') + 
+                  '. File might be corrupted, not a valid ZIP, or too large. Try a different GTFS file.'));
                 return;
               }
               
@@ -2248,7 +2146,7 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
               resolve({ files });
             });
           } catch (err) {
-            reject(new Error('Error reading ZIP file: ' + err.message));
+            reject(new Error('Error reading ZIP file: ' + (err.message || err || 'Unknown error')));
           }
         };
         
@@ -2281,6 +2179,356 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
       return null;
     }
 
+// ═══════════════════════════════════════════════════════════════
+// DATABASE INITIALIZATION (sql.js)
+// ═══════════════════════════════════════════════════════════════
+
+async function initDatabase() {
+  try {
+    console.log('Initializing SQL.js...');
+    console.log('Loading WASM from CDN (this may take 10-30 seconds)...');
+    
+    // Add timeout to prevent infinite hang
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('SQL.js initialization timeout after 60 seconds. WASM file may be blocked or too slow to load.')), 60000);
+    });
+    
+    const initPromise = initSqlJs({
+      locateFile: file => {
+        const url = `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`;
+        console.log('Loading:', url);
+        return url;
+      }
+    });
+    
+    const SQL = await Promise.race([initPromise, timeoutPromise]);
+    console.log('SQL.js WASM loaded successfully!');
+    console.log('Creating database...');
+    db = new SQL.Database();
+    console.log('Database created successfully');
+  } catch (err) {
+    console.error('Failed to initialize SQL.js:', err);
+    throw new Error('Failed to initialize database: ' + (err.message || err) + 
+      '. This may be due to slow network, CORS issues, or browser WASM limitations. Try a different browser or check your internet connection.');
+  }
+  
+  db.run(`
+    CREATE TABLE routes (
+      route_id TEXT PRIMARY KEY,
+      route_short_name TEXT,
+      route_long_name TEXT,
+      route_type INTEGER,
+      route_color TEXT,
+      route_text_color TEXT,
+      agency_id TEXT
+    );
+    
+    CREATE TABLE trips (
+      trip_id TEXT PRIMARY KEY,
+      route_id TEXT,
+      service_id TEXT,
+      trip_headsign TEXT,
+      direction_id INTEGER,
+      shape_id TEXT,
+      block_id TEXT
+    );
+    
+    CREATE TABLE stop_times (
+      trip_id TEXT,
+      stop_sequence INTEGER,
+      stop_id TEXT,
+      arrival_time TEXT,
+      departure_time TEXT,
+      pickup_type INTEGER,
+      drop_off_type INTEGER,
+      timepoint INTEGER
+    );
+    
+    CREATE TABLE stops (
+      stop_id TEXT PRIMARY KEY,
+      stop_name TEXT,
+      stop_lat REAL,
+      stop_lon REAL,
+      stop_code TEXT,
+      location_type INTEGER,
+      parent_station TEXT
+    );
+    
+    CREATE TABLE calendar (
+      service_id TEXT PRIMARY KEY,
+      monday INTEGER,
+      tuesday INTEGER,
+      wednesday INTEGER,
+      thursday INTEGER,
+      friday INTEGER,
+      saturday INTEGER,
+      sunday INTEGER,
+      start_date TEXT,
+      end_date TEXT
+    );
+    
+    CREATE TABLE calendar_dates (
+      service_id TEXT,
+      date TEXT,
+      exception_type INTEGER
+    );
+    
+    CREATE TABLE shapes (
+      shape_id TEXT,
+      shape_pt_lat REAL,
+      shape_pt_lon REAL,
+      shape_pt_sequence INTEGER
+    );
+    
+    CREATE TABLE agencies (
+      agency_id TEXT PRIMARY KEY,
+      agency_name TEXT,
+      agency_url TEXT,
+      agency_timezone TEXT
+    );
+  `);
+  
+  // NOTE: Indexes are created AFTER data loading for much better performance
+}
+
+// Create indexes after all data is loaded (10x faster than creating indexes first)
+function createDatabaseIndexes() {
+  if (!db) return;
+  
+  console.log('Creating database indexes...');
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON stop_times(trip_id);
+    CREATE INDEX IF NOT EXISTS idx_stop_times_stop ON stop_times(stop_id);
+    CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
+    CREATE INDEX IF NOT EXISTS idx_trips_service ON trips(service_id);
+    CREATE INDEX IF NOT EXISTS idx_trips_direction ON trips(direction_id);
+    CREATE INDEX IF NOT EXISTS idx_shapes_id ON shapes(shape_id);
+    CREATE INDEX IF NOT EXISTS idx_calendar_dates_service ON calendar_dates(service_id);
+  `);
+  console.log('✓ Database indexes created');
+}
+
+// Helper function for bulk loading CSV to SQL
+async function loadTableFromCSV(zip, filename, tableName, columns, showProgress = false) {
+  const file = findFile(zip, filename);
+  if (!file) {
+    console.log(`Skipping ${filename} (not found)`);
+    return;
+  }
+  
+  state.loadingStep = `Ładowanie ${filename}...`;
+  render();
+  
+  console.log(`Parsing ${filename}...`);
+  console.log(`${filename}: file object:`, file);
+  console.log(`${filename}: _data exists:`, !!file._data, 'length:', file._data ? file._data.length : 'N/A');
+  
+  let text;
+  try {
+    // For large files (> 100MB), use chunked decoding to avoid string size limits
+    if (file._data && file._data.length > 100 * 1024 * 1024) {
+      console.log(`${filename}: Large file detected (${(file._data.length / 1024 / 1024).toFixed(2)} MB), using chunked decoding...`);
+      const decoder = new TextDecoder('utf-8');
+      const chunkSize = 50 * 1024 * 1024; // 50MB chunks
+      const chunks = [];
+      
+      for (let offset = 0; offset < file._data.length; offset += chunkSize) {
+        const end = Math.min(offset + chunkSize, file._data.length);
+        const chunk = file._data.subarray(offset, end);
+        chunks.push(decoder.decode(chunk, { stream: offset + chunkSize < file._data.length }));
+        
+        // Show progress for very large files
+        if (file._data.length > 500 * 1024 * 1024 && offset % (100 * 1024 * 1024) === 0) {
+          console.log(`${filename}: Decoded ${(offset / 1024 / 1024).toFixed(2)} MB / ${(file._data.length / 1024 / 1024).toFixed(2)} MB`);
+        }
+      }
+      
+      text = chunks.join('');
+      console.log(`${filename}: Successfully decoded ${(file._data.length / 1024 / 1024).toFixed(2)} MB to ${text.length.toLocaleString()} characters`);
+    } else {
+      // For small files, use the simple approach
+      text = await file.async('string');
+      console.log(`${filename}: text length = ${text.length.toLocaleString()} characters`);
+    }
+  } catch (err) {
+    console.error(`${filename}: Failed to extract text:`, err);
+    throw new Error(`Failed to extract ${filename}: ${err.message}`);
+  }
+  
+  const rows = parseCSV(text);
+  console.log(`${filename}: parseCSV returned ${rows.length} rows`);
+  
+  if (rows.length === 0) {
+    console.log(`${filename} is empty (0 rows after parsing), skipping`);
+    console.log(`${filename} first 500 chars:`, text.substring(0, 500));
+    return;
+  }
+  
+  console.log(`${filename}: ${rows.length.toLocaleString()} rows to insert`);
+  
+  const placeholders = columns.map(() => '?').join(', ');
+  const stmt = db.prepare(`INSERT INTO ${tableName} VALUES (${placeholders})`);
+  
+  try {
+    db.run('BEGIN TRANSACTION');
+  } catch (err) {
+    console.error(`Failed to begin transaction for ${tableName}:`, err);
+    throw new Error(`Database error in ${tableName}: ${err.message}`);
+  }
+  
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const values = columns.map(col => row[col] || null);
+    try {
+      stmt.run(values);
+    } catch (err) {
+      console.error(`Failed to insert row ${i} into ${tableName}:`, err, 'Row data:', row);
+      throw new Error(`Database insert error in ${tableName} at row ${i}: ${err.message}`);
+    }
+    
+    if (showProgress && i % 50000 === 0 && i > 0) {
+      state.loadingStep = `${filename}: ${i.toLocaleString()} / ${rows.length.toLocaleString()}`;
+      state.loadingProgressPercent = Math.round((i / rows.length) * 100);
+      render();
+      
+      // Commit and restart transaction for memory efficiency
+      db.run('COMMIT');
+      db.run('BEGIN TRANSACTION');
+      
+      // Allow browser to breathe and update UI
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+  
+  db.run('COMMIT');
+  stmt.free();
+}
+
+// Helper to convert SQL results to objects
+function convertSQLResultToObjects(sqlResult) {
+  if (!sqlResult || !sqlResult.columns || !sqlResult.values) {
+    return [];
+  }
+  
+  const columns = sqlResult.columns;
+  const values = sqlResult.values;
+  
+  return values.map(row => {
+    const obj = {};
+    columns.forEach((col, i) => {
+      obj[col] = row[i];
+    });
+    return obj;
+  });
+}
+
+// SQL-backed data accessors (replaces old indexes)
+function getRoutesFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM routes');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+function getTripsFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM trips');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+function getStopsFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM stops');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+function getAgenciesFromDB() {
+  if (!db) return [];
+  const result = db.exec('SELECT * FROM agencies');
+  return result[0] ? convertSQLResultToObjects(result[0]) : [];
+}
+
+// Create lazy-loading proxy for indexes that queries SQL on demand
+function createTripsIndexProxy() {
+  const cache = new Map(); // Cache trips by route_id
+  return new Proxy({}, {
+    get(target, routeId) {
+      if (cache.has(routeId)) return cache.get(routeId);
+      if (!db) return [];
+      const result = db.exec('SELECT * FROM trips WHERE route_id = ?', [routeId]);
+      const trips = result[0] ? convertSQLResultToObjects(result[0]) : [];
+      cache.set(routeId, trips);
+      return trips;
+    }
+  });
+}
+
+function createStopsIndexProxy() {
+  const cache = new Map(); // Cache stops by stop_id
+  return new Proxy({}, {
+    get(target, stopId) {
+      if (cache.has(stopId)) return cache.get(stopId);
+      if (!db) return null;
+      const result = db.exec('SELECT * FROM stops WHERE stop_id = ? LIMIT 1', [stopId]);
+      const stop = result[0] && result[0].values[0] ? convertSQLResultToObjects(result[0])[0] : null;
+      cache.set(stopId, stop);
+      return stop;
+    }
+  });
+}
+
+function createStopTimesIndexProxy() {
+  const cache = new Map(); // Cache stop_times by trip_id
+  return new Proxy({}, {
+    get(target, tripId) {
+      if (cache.has(tripId)) return cache.get(tripId);
+      if (!db) return [];
+      const result = db.exec(`
+        SELECT * FROM stop_times 
+        WHERE trip_id = ? 
+        ORDER BY stop_sequence
+      `, [tripId]);
+      const stopTimes = result[0] ? convertSQLResultToObjects(result[0]) : [];
+      cache.set(tripId, stopTimes);
+      return stopTimes;
+    }
+  });
+}
+
+function createShapesIndexProxy() {
+  // Cache shapes in memory after first query (they're used frequently)
+  const cache = {};
+  return new Proxy({}, {
+    get(target, shapeId) {
+      if (cache[shapeId]) return cache[shapeId];
+      if (!db) return null;
+      
+      const result = db.exec(`
+        SELECT shape_pt_lat, shape_pt_lon, shape_pt_sequence 
+        FROM shapes 
+        WHERE shape_id = ? 
+        ORDER BY shape_pt_sequence
+      `, [shapeId]);
+      
+      if (result[0] && result[0].values.length > 0) {
+        const coords = result[0].values.map(row => [row[0], row[1]]);
+        cache[shapeId] = coords;
+        return coords;
+      }
+      return null;
+    }
+  });
+}
+
+function createAgenciesIndexProxy() {
+  return new Proxy({}, {
+    get(target, agencyId) {
+      if (!db) return null;
+      const result = db.exec('SELECT * FROM agencies WHERE agency_id = ? LIMIT 1', [agencyId]);
+      return result[0] && result[0].values[0] ? convertSQLResultToObjects(result[0])[0] : null;
+    }
+  });
+}
+
     async function handleFileUpload(e) {
       const file = e.target.files[0]; if (!file) return;
       
@@ -2289,241 +2537,244 @@ function parseStopTimesStreamWithWorker(zipFileEntry, onProgress) {
         totalStart: performance.now(),
         unzipStart: 0,
         unzipEnd: 0,
-        parseStart: 0,
-        parseEnd: 0,
-        stopTimesStart: 0,
-        stopTimesEnd: 0,
-        shapesStart: 0,
-        shapesEnd: 0,
-        indexStart: 0,
-        indexEnd: 0,
-        enrichStart: 0,
-        enrichEnd: 0
+        dbInitStart: 0,
+        dbInitEnd: 0,
+        loadStart: 0,
+        loadEnd: 0
       };
       
-      state.loading = true; state.loadingStep = 'Odczytywanie archiwum GTFS...'; state.loadingProgress=0; state.loadingProgressPercent=0; state.error='';
+      state.loading = true; 
+      state.loadingStep = 'Odczytywanie archiwum GTFS...'; 
+      state.loadingProgress=0; 
+      state.loadingProgressPercent=0; 
+      state.error='';
       render();
+      
       try {
         // Use fflate for fast ZIP decompression
-        state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; render();
+        state.loadingStep = 'Rozpakowywanie ZIP (fflate)...'; 
+        render();
         perfTimings.unzipStart = performance.now();
+        console.log('Attempting to unzip file:', file.name, 'Size:', file.size, 'bytes');
         const zip = await unzipWithFflate(file);
         perfTimings.unzipEnd = performance.now();
         
-        state.loadingStep = 'Wyodrębnianie plików...'; render();
+        // Initialize fresh database
+        state.loadingStep = 'Inicjalizacja bazy danych...';
+        render();
+        perfTimings.dbInitStart = performance.now();
+        await initDatabase();
+        perfTimings.dbInitEnd = performance.now();
         
-        const [routesFile, tripsFile, stopTimesFile, stopsFile, calendarFile, calendarDatesFile, agenciesFile, shapesFile] = 
-          ['routes.txt', 'trips.txt', 'stop_times.txt', 'stops.txt', 'calendar.txt', 'calendar_dates.txt', 'agency.txt', 'shapes.txt']
-          .map(filename => findFile(zip.files, filename));
+        // Parse and load each file into SQL
+        perfTimings.loadStart = performance.now();
         
-        // Validate required files
-        if (!routesFile || !tripsFile || !stopTimesFile || !stopsFile) {
-          throw new Error('Brakuje wymaganych plików GTFS (routes.txt, trips.txt, stop_times.txt, stops.txt)');
-        }
-
-// ==========================================
-// PARALLEL LOADING & PARSING - parse CSV files synchronously
-// ==========================================
-state.loadingStep = 'Przetwarzanie plików GTFS...'; render();
-
-perfTimings.parseStart = performance.now();
-
-// Parse all CSV files synchronously (fastest approach)
-const [routes, trips, stops, calendar, calendarDates, agencies] = await Promise.all([
-  routesFile.async('string').then(text => parseCSV(text)),
-  tripsFile.async('string').then(text => parseCSV(text)),
-  stopsFile.async('string').then(text => parseCSV(text)),
-  calendarFile ? calendarFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  calendarDatesFile ? calendarDatesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([]),
-  agenciesFile ? agenciesFile.async('string').then(text => parseCSV(text)) : Promise.resolve([])
-]);
-
-perfTimings.parseEnd = performance.now();
-
-        state.loadingStep = 'Parsowanie stop_times (streaming)...'; render();
-        perfTimings.stopTimesStart = performance.now();
-        const stopTimesIndex = await parseStopTimesStreamWithWorker(stopTimesFile, (rowsProcessed, percent) => {
-          state.loadingStep = `Parsowanie stop_times: ${rowsProcessed.toLocaleString()} wierszy`;
-          state.loadingProgressPercent = percent || state.loadingProgressPercent;
-          render();
-        });
-        perfTimings.stopTimesEnd = performance.now();
+        console.log('Loading routes.txt...');
+        await loadTableFromCSV(zip.files, 'routes.txt', 'routes', [
+          'route_id', 'route_short_name', 'route_long_name', 
+          'route_type', 'route_color', 'route_text_color', 'agency_id'
+        ]);
+        console.log('✓ routes.txt loaded');
         
-        let shapesIndex = {};
-        if (shapesFile) {
-          state.loadingStep = 'Parsowanie shapes.txt (streaming)...'; render();
-          perfTimings.shapesStart = performance.now();
-          try {
-            const rawShapes = await parseShapesWithWorker(shapesFile, (rowsProcessed, percent) => {
-              state.loadingStep = `Parsowanie shapes: ${rowsProcessed.toLocaleString()} punktów`;
-              state.loadingProgressPercent = percent || state.loadingProgressPercent;
-              render();
-            });
-            
-            let simplifiedShapes = loadCachedShapes(rawShapes);
-            
-            if (!simplifiedShapes) {
-              // Simplify and cache
-              state.loadingStep = 'Upraszczanie tras (Douglas-Peucker)...'; render();
-              simplifiedShapes = simplifyShapes(rawShapes, 0.0001);
-              cacheShapes(rawShapes, simplifiedShapes);
-            }
-            
-            shapesIndex = simplifiedShapes;
-            perfTimings.shapesEnd = performance.now();
-          } catch (err) {
-            perfTimings.shapesEnd = performance.now();
-            // Continue without shapes - they're optional
+        console.log('Loading trips.txt...');
+        await loadTableFromCSV(zip.files, 'trips.txt', 'trips', [
+          'trip_id', 'route_id', 'service_id', 'trip_headsign', 
+          'direction_id', 'shape_id', 'block_id'
+        ]);
+        console.log('✓ trips.txt loaded');
+        
+        console.log('Loading stops.txt...');
+        await loadTableFromCSV(zip.files, 'stops.txt', 'stops', [
+          'stop_id', 'stop_name', 'stop_lat', 'stop_lon', 
+          'stop_code', 'location_type', 'parent_station'
+        ]);
+        console.log('✓ stops.txt loaded');
+        
+        console.log('Loading calendar.txt...');
+        await loadTableFromCSV(zip.files, 'calendar.txt', 'calendar', [
+          'service_id', 'monday', 'tuesday', 'wednesday', 'thursday',
+          'friday', 'saturday', 'sunday', 'start_date', 'end_date'
+        ]);
+        console.log('✓ calendar.txt loaded');
+        
+        console.log('Loading calendar_dates.txt...');
+        await loadTableFromCSV(zip.files, 'calendar_dates.txt', 'calendar_dates', [
+          'service_id', 'date', 'exception_type'
+        ]);
+        console.log('✓ calendar_dates.txt loaded');
+        
+        // Large file - show progress
+        console.log('Loading stop_times.txt (this may take a while for large files)...');
+        await loadTableFromCSV(zip.files, 'stop_times.txt', 'stop_times', [
+          'trip_id', 'stop_sequence', 'stop_id', 'arrival_time', 
+          'departure_time', 'pickup_type', 'drop_off_type', 'timepoint'
+        ], true); // progressUpdates = true
+        console.log('✓ stop_times.txt loaded');
+        
+        // Optional files
+        console.log('Loading shapes.txt...');
+        await loadTableFromCSV(zip.files, 'shapes.txt', 'shapes', [
+          'shape_id', 'shape_pt_lat', 'shape_pt_lon', 'shape_pt_sequence'
+        ], true);
+        console.log('✓ shapes.txt loaded');
+        
+        console.log('Loading agency.txt...');
+        await loadTableFromCSV(zip.files, 'agency.txt', 'agencies', [
+          'agency_id', 'agency_name', 'agency_url', 'agency_timezone'
+        ]);
+        console.log('✓ agency.txt loaded');
+        
+        perfTimings.loadEnd = performance.now();
+        
+        // Create indexes AFTER all data is loaded (10x faster!)
+        createDatabaseIndexes();
+        
+        // Get basic stats from database
+        const routesResult = db.exec('SELECT COUNT(*) as count FROM routes');
+        const tripsResult = db.exec('SELECT COUNT(*) as count FROM trips');
+        const stopsResult = db.exec('SELECT COUNT(*) as count FROM stops');
+        const stopTimesResult = db.exec('SELECT COUNT(DISTINCT trip_id) as count FROM stop_times');
+        const shapesResult = db.exec('SELECT COUNT(DISTINCT shape_id) as count FROM shapes');
+        
+        const routesCount = routesResult[0] ? routesResult[0].values[0][0] : 0;
+        const tripsCount = tripsResult[0] ? tripsResult[0].values[0][0] : 0;
+        const stopsCount = stopsResult[0] ? stopsResult[0].values[0][0] : 0;
+        const stopTimesCount = stopTimesResult[0] ? stopTimesResult[0].values[0][0] : 0;
+        const shapesCount = shapesResult[0] ? shapesResult[0].values[0][0] : 0;
+        
+        // Build minimal compatibility structure for existing code
+        // This will be gradually removed as we migrate all queries to SQL
+        const calendarResult = db.exec('SELECT * FROM calendar');
+        const calendarDatesResult = db.exec('SELECT * FROM calendar_dates');
+        const calendar = calendarResult[0] ? convertSQLResultToObjects(calendarResult[0]) : [];
+        const calendarDates = calendarDatesResult[0] ? convertSQLResultToObjects(calendarDatesResult[0]) : [];
+        
+        // Clear all caches when loading new GTFS data
+        clearStationCache();
+        clearStopsSearchIndex();
+        clearStopToRoutesCache();
+        cachedGroupsArray = null;
+        lastStopsDataHash = null;
+        
+        // Temporary: Maintain minimal compatibility structure
+        // Populate state.gtfsData with SQL-backed proxies
+        const routes = getRoutesFromDB();
+        const trips = getTripsFromDB();
+        const stops = getStopsFromDB();
+        const agencies = getAgenciesFromDB();
+        
+        // Build agencies index
+        const agenciesIndex = {};
+        agencies.forEach(a => {
+          if (a && (a.agency_id || a.agency_name)) {
+            agenciesIndex[a.agency_id || a.agency_name] = a;
           }
-        }
+        });
         
-        state.loadingStep = 'Budowanie indeksów...'; render();
-        perfTimings.indexStart = performance.now();
-        const stopsIndex = {}; stops.forEach(s=>{ if (s && s.stop_id) stopsIndex[s.stop_id]=s; });
+        const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
         
-        // Generate missing direction_id values with chunked processing (only if not skipped)
-        if (!state.skipDirectionIdEnrichment) {
-          state.loadingStep = 'Generowanie brakujących direction_id...'; render();
-          perfTimings.enrichStart = performance.now();
-          await enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, (processed, total, percent) => {
-            state.loadingStep = `Generowanie direction_id: ${processed}/${total} tras`;
-            state.loadingProgressPercent = percent;
-            render();
-          });
-          perfTimings.enrichEnd = performance.now();
-        } else {
-          state.loadingStep = 'Pomijanie generowania direction_id...'; render();
-          perfTimings.enrichStart = performance.now();
-          perfTimings.enrichEnd = performance.now();
-        }
+        state.gtfsData = {
+          routes,
+          agencies,
+          agenciesIndex,
+          calendar,
+          calendarDates,
+          stopTimesIndex: createStopTimesIndexProxy(), // SQL-backed proxy
+          stopsIndex: createStopsIndexProxy(), // SQL-backed proxy
+          tripsIndex: createTripsIndexProxy(), // SQL-backed proxy
+          logicalRoutes,
+          trips,
+          stops,
+          shapesIndex: createShapesIndexProxy() // SQL-backed proxy
+        };
         
-        const tripsIndex = {}; trips.forEach(t=>{ if(!t) return; const rid=t.route_id; if(!rid) return; if(!tripsIndex[rid]) tripsIndex[rid]=[]; tripsIndex[rid].push(t); });
-const agenciesIndex = {};
-agencies.forEach(a => {
-  if (a && (a.agency_id || a.agency_name)) {
-    agenciesIndex[a.agency_id || a.agency_name] = a;
-  }
-});
-
-const logicalRoutes = buildLogicalRoutes(routes, agenciesIndex);
-
-// Clear all caches when loading new GTFS data
-clearStationCache();
-clearStopsSearchIndex();
-clearStopToRoutesCache();
-cachedGroupsArray = null;
-lastStopsDataHash = null;
-
-state.gtfsData = {
-  routes,
-  agencies,
-  agenciesIndex,
-  calendar,
-  calendarDates,
-  stopTimesIndex,
-  stopsIndex,
-  tripsIndex,
-  logicalRoutes,
-  trips,
-  stops,
-  shapesIndex
-};
-state.selectedRouteGroup = null;
-// Invalidate canonical master lists and column order cache on new GTFS load
-state.canonicalMasterLists = {};
-state.columnOrderCache = {};
-        if (routes.length === 1) {
-          state.selectedRoute = routes[0];
-          const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-          if (routeTrips.length>0) state.selectedDirection = [...new Set(routeTrips.map(t=>t.direction_id||'0'))][0];
+        state.selectedRouteGroup = null;
+        // Invalidate canonical master lists and column order cache on new GTFS load
+        state.canonicalMasterLists = {};
+        state.columnOrderCache = {};
+        
+        // Generate available dates
+        const dates = generateAvailableDates(calendar, calendarDates);
+        state.availableDates = dates;
+        if (dates.length > 0) {
+          const today = new Date();
+          const todayStr = today.getFullYear() + 
+            String(today.getMonth() + 1).padStart(2, '0') + 
+            String(today.getDate()).padStart(2, '0');
+          
+          let selectedDate = null;
+          
+          // Check if today exists in dates
+          if (dates.some(d => d.value === todayStr)) {
+            selectedDate = todayStr;
+          } else {
+            const earlierDates = dates.filter(d => d.value <= todayStr);
+            if (earlierDates.length > 0) {
+              selectedDate = earlierDates[earlierDates.length - 1].value;
+            } else {
+              // If no earlier dates, use the first available date
+              selectedDate = dates[0].value;
+            }
+          }
+          
+          state.selectedDate = selectedDate;
         }
-const dates = generateAvailableDates(calendar, calendarDates);
-state.availableDates = dates;
-if (dates.length > 0) {
-  const today = new Date();
-  const todayStr = today.getFullYear() + 
-    String(today.getMonth() + 1).padStart(2, '0') + 
-    String(today.getDate()).padStart(2, '0');
-  
-  let selectedDate = null;
-  
-  // Check if today exists in dates
-  if (dates.some(d => d.value === todayStr)) {
-    selectedDate = todayStr;
-  } else {
-    const earlierDates = dates.filter(d => d.value <= todayStr);
-    if (earlierDates.length > 0) {
-      selectedDate = earlierDates[earlierDates.length - 1].value;
-    } else {
-      // If no earlier dates, use the first available date
-      selectedDate = dates[0].value;
-    }
-  }
-  
-  state.selectedDate = selectedDate;
-}
 
         // ═══ PERFORMANCE MEASUREMENT END ═══
-        perfTimings.indexEnd = performance.now();
-        const totalTime = perfTimings.indexEnd - perfTimings.totalStart;
+        const totalTime = performance.now() - perfTimings.totalStart;
         const unzipTime = perfTimings.unzipEnd - perfTimings.unzipStart;
-        const parseTime = perfTimings.parseEnd - perfTimings.parseStart;
-        const stopTimesTime = perfTimings.stopTimesEnd - perfTimings.stopTimesStart;
-        const shapesTime = perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0;
-        const indexTime = perfTimings.indexEnd - perfTimings.indexStart;
-        const enrichTime = perfTimings.enrichEnd - perfTimings.enrichStart;
+        const dbInitTime = perfTimings.dbInitEnd - perfTimings.dbInitStart;
+        const loadTime = perfTimings.loadEnd - perfTimings.loadStart;
         
         // Console performance benchmark
         console.log('═══════════════════════════════════════════════');
-        console.log('GTFS LOADING PERFORMANCE REPORT');
+        console.log('GTFS LOADING PERFORMANCE REPORT (SQL.js)');
         console.log('═══════════════════════════════════════════════');
         console.log(`Total loading time: ${totalTime.toFixed(2)} ms (${(totalTime/1000).toFixed(2)} s)`);
         console.log('');
         console.log('Breakdown by phase:');
         console.log(`  1. Unzip:           ${unzipTime.toFixed(2)} ms (${((unzipTime/totalTime)*100).toFixed(1)}%)`);
-        console.log(`  2. Parse CSV files: ${parseTime.toFixed(2)} ms (${((parseTime/totalTime)*100).toFixed(1)}%)`);
-        console.log(`  3. Parse stop_times:${stopTimesTime.toFixed(2)} ms (${((stopTimesTime/totalTime)*100).toFixed(1)}%)`);
-        if (shapesTime > 0) {
-          console.log(`  4. Parse shapes:    ${shapesTime.toFixed(2)} ms (${((shapesTime/totalTime)*100).toFixed(1)}%)`);
-        }
-        console.log(`  5. Build indexes:   ${indexTime.toFixed(2)} ms (${((indexTime/totalTime)*100).toFixed(1)}%)`);
-        console.log(`  6. Enrich data:     ${enrichTime.toFixed(2)} ms (${((enrichTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  2. DB Init:         ${dbInitTime.toFixed(2)} ms (${((dbInitTime/totalTime)*100).toFixed(1)}%)`);
+        console.log(`  3. Load to SQL:     ${loadTime.toFixed(2)} ms (${((loadTime/totalTime)*100).toFixed(1)}%)`);
         console.log('');
         console.log('Data summary:');
-        console.log(`  Routes: ${routes.length.toLocaleString()}`);
-        console.log(`  Trips: ${trips.length.toLocaleString()}`);
-        console.log(`  Stops: ${stops.length.toLocaleString()}`);
-        console.log(`  Stop times: ${Object.keys(stopTimesIndex).length.toLocaleString()} trips`);
-        if (Object.keys(shapesIndex).length > 0) {
-          console.log(`  Shapes: ${Object.keys(shapesIndex).length.toLocaleString()}`);
+        console.log(`  Routes: ${routesCount.toLocaleString()}`);
+        console.log(`  Trips: ${tripsCount.toLocaleString()}`);
+        console.log(`  Stops: ${stopsCount.toLocaleString()}`);
+        console.log(`  Stop times: ${stopTimesCount.toLocaleString()} trips`);
+        if (shapesCount > 0) {
+          console.log(`  Shapes: ${shapesCount.toLocaleString()}`);
         }
         console.log('═══════════════════════════════════════════════');
         
         // Store metrics in state for optional display
         const perfMetrics = {
-          totalTime: performance.now() - perfTimings.totalStart,
-          unzipTime: perfTimings.unzipEnd - perfTimings.unzipStart,
-          parseTime: perfTimings.parseEnd - perfTimings.parseStart,
-          stopTimesTime: perfTimings.stopTimesEnd - perfTimings.stopTimesStart,
-          shapesTime: perfTimings.shapesEnd > 0 ? perfTimings.shapesEnd - perfTimings.shapesStart : 0,
-          indexTime: perfTimings.indexEnd - perfTimings.indexStart,
-          enrichTime: perfTimings.enrichEnd - perfTimings.enrichStart,
+          totalTime: totalTime,
+          unzipTime: unzipTime,
+          dbInitTime: dbInitTime,
+          loadTime: loadTime,
           dataSummary: {
-            routes: routes.length,
-            trips: trips.length,
-            stops: stops.length,
-            stopTimes: Object.keys(stopTimesIndex).length,
-            shapes: Object.keys(shapesIndex).length
+            routes: routesCount,
+            trips: tripsCount,
+            stops: stopsCount,
+            stopTimes: stopTimesCount,
+            shapes: shapesCount
           }
         };
         state.lastLoadMetrics = perfMetrics;
 
-        state.loading=false; state.loadingStep=''; state.loadingProgress=0; state.loadingProgressPercent=0;
+        state.loading = false; 
+        state.loadingStep = ''; 
+        state.loadingProgress = 0; 
+        state.loadingProgressPercent = 0;
+        state.view = VIEW.ROUTES_LIST;
         render();
       } catch(err) {
         console.error('Error loading GTFS:', err);
         state.error = 'Błąd ładowania pliku GTFS: ' + err.message;
-        state.loading=false; state.loadingProgress=0; state.loadingProgressPercent=0;
+        state.loading = false; 
+        state.loadingProgress = 0; 
+        state.loadingProgressPercent = 0;
         render();
       }
     }
@@ -2746,8 +2997,16 @@ function generateAvailableDates(calendar, calendarDates) {
   });
 }
 	  
+// Memoized version of getServicesForDate to avoid repeated SQL queries
+const servicesCache = new Map(); // Map<dateStr, services[]>
+
 function getServicesForDate(dateStr) {
-  if (!state.gtfsData) return [];
+  // Check cache first
+  if (servicesCache.has(dateStr)) {
+    return servicesCache.get(dateStr);
+  }
+  
+  if (!db) return [];
   
   // Helper: get day of week from GTFS date string (YYYYMMDD)
   const getDayOfWeek = (gtfsDate) => {
@@ -2760,24 +3019,43 @@ function getServicesForDate(dateStr) {
   const dayOfWeek = DAY_NAMES[getDayOfWeek(dateStr)];
   const services = new Set();
   
-  // ✅ String comparison instead of Date
-  state.gtfsData.calendar.forEach(cal => {
-    if (dateStr >= cal.start_date && dateStr <= cal.end_date && cal[dayOfWeek] === '1') {
-      services.add(cal.service_id);
-    }
-  });
+  // Query calendar for regular service
+  const calendarResult = db.exec(`
+    SELECT service_id 
+    FROM calendar 
+    WHERE start_date <= ? 
+      AND end_date >= ? 
+      AND ${dayOfWeek} = '1'
+  `, [dateStr, dateStr]);
   
-  // ✅ String equality check
-  if (state.gtfsData.calendarDates) {
-    state.gtfsData.calendarDates.forEach(cd => {
-      if (cd.date === dateStr) {
-        if (cd.exception_type === '1') services.add(cd.service_id);
-        else if (cd.exception_type === '2') services.delete(cd.service_id);
+  if (calendarResult[0]) {
+    calendarResult[0].values.forEach(row => {
+      services.add(row[0]);
+    });
+  }
+  
+  // Query calendar_dates for exceptions
+  const exceptionsResult = db.exec(`
+    SELECT service_id, exception_type 
+    FROM calendar_dates 
+    WHERE date = ?
+  `, [dateStr]);
+  
+  if (exceptionsResult[0]) {
+    exceptionsResult[0].values.forEach(row => {
+      const serviceId = row[0];
+      const exceptionType = row[1];
+      if (exceptionType === 1 || exceptionType === '1') {
+        services.add(serviceId);
+      } else if (exceptionType === 2 || exceptionType === '2') {
+        services.delete(serviceId);
       }
     });
   }
   
-  return Array.from(services);
+  const result = Array.from(services);
+  servicesCache.set(dateStr, result); // Cache result
+  return result;
 }
 
     /**
