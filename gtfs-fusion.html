@@ -2311,10 +2311,14 @@ async function loadTableFromCSV(zip, filename, tableName, columns, showProgress 
   
   console.log(`Parsing ${filename}...`);
   const text = await file.async('string');
+  console.log(`${filename}: text length = ${text.length} characters`);
+  
   const rows = parseCSV(text);
+  console.log(`${filename}: parseCSV returned ${rows.length} rows`);
   
   if (rows.length === 0) {
-    console.log(`${filename} is empty, skipping`);
+    console.log(`${filename} is empty (0 rows after parsing), skipping`);
+    console.log(`${filename} first 500 chars:`, text.substring(0, 500));
     return;
   }
   
