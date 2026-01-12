@@ -3946,85 +3946,6 @@ function buildRouteProfileForCurrentSelection() {
   return profile;
 }
 
-function buildMasterList(sortedTrips, tripStopMaps, stopsIndex) {
-  const profile = getCurrentRouteProfile();
-  if (!profile || !profile.coreStops) {
-    // This should never happen, but fail gracefully
-    return [];
-  }
-  
-  const coreStops = profile.coreStops;
-  const allowedSet = profile.stationMergeAllowed;
-  
-  const stopsByStation = new Map();
-  
-  coreStops.forEach(stopId => {
-    const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-    if (!stopsByStation.has(stationId)) {
-      stopsByStation.set(stationId, []);
-    }
-    stopsByStation.get(stationId).push(stopId);
-  });
-  
-  const getStationDisplayName = (stationId, stopIds) => {
-    if (stopsIndex[stationId]?.stop_name) {
-      return stopsIndex[stationId].stop_name;
-    }
-    const firstStop = stopsIndex[stopIds[0]];
-    return firstStop?.stop_name || stationId;
-  };
-
-  const masterList = Array.from(stopsByStation.entries()).map(([stationId, stopIds]) => ({
-    id: stopIds[0],
-    name: getStationDisplayName(stationId, stopIds),
-    stopIds: stopIds
-  }));
-  
-  // Step 4: Add branch stops (stops outside core)
-  const masterListStationIds = masterList.map(entry => {
-    return getStationIdWithPolicy(entry.stopIds[0], stopsIndex, allowedSet);
-  });
-  
-  // Process all trips to add stops not in core
-  sortedTrips.forEach(trip => {
-    const tripStops = tripStopMaps[trip.trip_id] || [];
-    let lastMasterIdx = -1;
-    
-    tripStops.forEach(stopTime => {
-      const stopId = stopTime.stop_id;
-      const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-      
-      let existingIdx = -1;
-      for (let i = 0; i < masterListStationIds.length; i++) {
-        if (masterListStationIds[i] === stationId) {
-          existingIdx = i;
-          break;
-        }
-      }
-      
-      if (existingIdx !== -1) {
-        // Station already exists - add stop_id if not present
-        if (!masterList[existingIdx].stopIds.includes(stopId)) {
-          masterList[existingIdx].stopIds.push(stopId);
-        }
-        lastMasterIdx = existingIdx;
-      } else {
-        const newEntry = {
-          id: stopId,
-          name: getStationDisplayName(stationId, [stopId]),
-          stopIds: [stopId]
-        };
-        
-        const insertPos = lastMasterIdx + 1;
-        masterList.splice(insertPos, 0, newEntry);
-        masterListStationIds.splice(insertPos, 0, stationId);
-        lastMasterIdx = insertPos;
-      }
-    });
-  });
-  
-  return masterList;
-}
 
 function createTripMappings(sortedTrips, tripStopMaps, masterList) {
   return sortedTrips.map(trip => {
@@ -4103,336 +4024,143 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
     return firstStop?.stop_name || stationId;
   };
 
-  // Helper function to merge chunks with signature collision handling
-  const mergeChunkStops = (existingChunk, newStops, signature) => {
-    const originalLength = existingChunk.stops.length;
-    if (originalLength !== newStops.length) {
-      console.warn(`Signature collision detected for ${signature}: expected ${originalLength} stops, got ${newStops.length}`);
-      // Extend chunk to accommodate all stops from both versions
-      if (newStops.length > originalLength) {
-        for (let idx = originalLength; idx < newStops.length; idx++) {
-          existingChunk.stops.push({
-            stationId: newStops[idx].stationId,
-            name: newStops[idx].name,
-            stopIds: [newStops[idx].stop_id]
-          });
-        }
-      }
-      // Note: If newStops.length < originalLength, we keep the existing stops
-      // and only merge stopIds up to newStops.length
-    }
-    // Merge stopIds for all available positions in newStops
-    for (let idx = 0; idx < newStops.length; idx++) {
-      if (!existingChunk.stops[idx].stopIds.includes(newStops[idx].stop_id)) {
-        existingChunk.stops[idx].stopIds.push(newStops[idx].stop_id);
-      }
-    }
-  };
-
-  const coreStationGroups = [];
-  const seenStations = new Set();
-  
-  coreStops.forEach(stopId => {
-    const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-    if (!seenStations.has(stationId)) {
-      seenStations.add(stationId);
-      coreStationGroups.push({
-        stationId,
-        stopIds: [stopId],
-        isCore: true
-      });
-    } else {
-      const group = coreStationGroups.find(g => g.stationId === stationId);
-      if (group && !group.stopIds.includes(stopId)) {
-        group.stopIds.push(stopId);
-      }
-    }
-  });
-
-  // Step 2: Build windows between consecutive core stations
-  const windows = [];
-  for (let i = 0; i < coreStationGroups.length - 1; i++) {
-    windows.push({
-      startCore: coreStationGroups[i],
-      endCore: coreStationGroups[i + 1],
-      chunks: new Map() // signature -> { stops: [], positions: [] }
-    });
-  }
-
-  const preCore = new Map(); // signature -> { stops: [], positions: [] }
-  const postCore = new Map(); // signature -> { stops: [], positions: [] }
-
-  // Step 3: Process all trips to collect branch stations and their positions
-  allTrips.forEach(trip => {
+  // Sort and prepare trips
+  const sortedTrips = allTrips.slice();
+  const tripStopMaps = {};
+  sortedTrips.forEach(trip => {
     const stopTimes = stopTimesIndex[trip.trip_id] || [];
     const sortedStops = stopTimes
       .filter(st => st && st.stop_id)
       .sort((a, b) => parseInt(a.stop_sequence || '0') - parseInt(b.stop_sequence || '0'));
-
-    if (sortedStops.length === 0) return;
-
-    const stopPositions = new Map();
-    sortedStops.forEach((st, idx) => {
-      stopPositions.set(st.stop_id, idx);
-    });
-
-    const corePositions = coreStationGroups.map(coreGroup => {
-      for (const stopId of coreGroup.stopIds) {
-        if (stopPositions.has(stopId)) {
-          return { coreGroup, position: stopPositions.get(stopId), stopId };
-        }
-      }
-      return null;
-    }).filter(x => x !== null);
-
-    const firstCorePos = corePositions.length > 0 
-      ? Math.min(...corePositions.map(cp => cp.position))
-      : -1;
-    const lastCorePos = corePositions.length > 0
-      ? Math.max(...corePositions.map(cp => cp.position))
-      : -1;
-
-    if (firstCorePos > 0) {
-      // Collect stops before first core as a chunk
-      const preCoreStops = [];
-      for (let pos = 0; pos < firstCorePos; pos++) {
-        const stopTime = sortedStops[pos];
-        const stopId = stopTime.stop_id;
-        const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-        
-        // Skip if this is a core station
-        if (seenStations.has(stationId)) continue;
-        
-        preCoreStops.push({
-          stop_id: stopId,
-          stationId: stationId,
-          name: (stopsIndex[stopId] || {}).stop_name || stopId,
-          position: pos
-        });
-      }
-      
-      if (preCoreStops.length > 0) {
-        // Create signature for this sub-path
-        const signature = preCoreStops.map(st => st.stationId).join('|');
-        
-        // Calculate normalized position of first stop
-        const firstStopPos = preCoreStops[0].position;
-        const normalizedPos = firstStopPos / firstCorePos;
-        
-        if (!preCore.has(signature)) {
-          // Store stops with arrays for stop_ids (to handle multiple platforms)
-          preCore.set(signature, {
-            stops: preCoreStops.map(st => ({
-              stationId: st.stationId,
-              name: st.name,
-              stopIds: [st.stop_id]
-            })),
-            positions: [normalizedPos]
-          });
-        } else {
-          const chunk = preCore.get(signature);
-          mergeChunkStops(chunk, preCoreStops, signature);
-          chunk.positions.push(normalizedPos);
-        }
-      }
-    }
-
-    if (lastCorePos >= 0 && lastCorePos < sortedStops.length - 1) {
-      const tripLength = sortedStops.length;
-      
-      // Collect stops after last core as a chunk
-      const postCoreStops = [];
-      for (let pos = lastCorePos + 1; pos < tripLength; pos++) {
-        const stopTime = sortedStops[pos];
-        const stopId = stopTime.stop_id;
-        const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-        
-        // Skip if this is a core station
-        if (seenStations.has(stationId)) continue;
-        
-        postCoreStops.push({
-          stop_id: stopId,
-          stationId: stationId,
-          name: (stopsIndex[stopId] || {}).stop_name || stopId,
-          position: pos
-        });
-      }
-      
-      if (postCoreStops.length > 0) {
-        // Create signature for this sub-path
-        const signature = postCoreStops.map(st => st.stationId).join('|');
-        
-        // Calculate normalized position of first stop
-        const firstStopPos = postCoreStops[0].position;
-        const normalizedPos = (firstStopPos - lastCorePos) / (tripLength - lastCorePos);
-        
-        if (!postCore.has(signature)) {
-          // Store stops with arrays for stop_ids (to handle multiple platforms)
-          postCore.set(signature, {
-            stops: postCoreStops.map(st => ({
-              stationId: st.stationId,
-              name: st.name,
-              stopIds: [st.stop_id]
-            })),
-            positions: [normalizedPos]
-          });
-        } else {
-          const chunk = postCore.get(signature);
-          mergeChunkStops(chunk, postCoreStops, signature);
-          chunk.positions.push(normalizedPos);
-        }
-      }
-    }
-
-    // For each window, collect branches as chunks
-    for (let winIdx = 0; winIdx < windows.length; winIdx++) {
-      const window = windows[winIdx];
-      
-      const startPos = corePositions.find(cp => cp.coreGroup === window.startCore);
-      const endPos = corePositions.find(cp => cp.coreGroup === window.endCore);
-      
-      if (!startPos || !endPos || startPos.position >= endPos.position) {
-        continue; // Skip if window not traversed in this trip
-      }
-
-      const windowLength = endPos.position - startPos.position;
-      
-      // Collect stops between cores as a chunk
-      const windowStops = [];
-      for (let pos = startPos.position + 1; pos < endPos.position; pos++) {
-        const stopTime = sortedStops[pos];
-        const stopId = stopTime.stop_id;
-        const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
-        
-        // Skip if this is a core station
-        if (seenStations.has(stationId)) continue;
-        
-        windowStops.push({
-          stop_id: stopId,
-          stationId: stationId,
-          name: (stopsIndex[stopId] || {}).stop_name || stopId,
-          position: pos
-        });
-      }
-      
-      if (windowStops.length > 0) {
-        // Create signature for this sub-path
-        const signature = windowStops.map(st => st.stationId).join('|');
-        
-        // Calculate normalized position of first stop
-        const firstStopPos = windowStops[0].position;
-        const normalizedPos = (firstStopPos - startPos.position) / windowLength;
-        
-        if (!window.chunks.has(signature)) {
-          // Store stops with arrays for stop_ids (to handle multiple platforms)
-          window.chunks.set(signature, {
-            stops: windowStops.map(st => ({
-              stationId: st.stationId,
-              name: st.name,
-              stopIds: [st.stop_id]
-            })),
-            positions: [normalizedPos]
-          });
-        } else {
-          const chunk = window.chunks.get(signature);
-          mergeChunkStops(chunk, windowStops, signature);
-          chunk.positions.push(normalizedPos);
-        }
-      }
-    }
+    tripStopMaps[trip.trip_id] = sortedStops;
   });
 
-  const finalRows = [];
+  // Step 0: Detect stations requiring split and collect all platforms (combined for efficiency)
+  const stationRequiresSplit = new Set();
+  const stationToAllStopIds = new Map(); // Will store Arrays, not Sets
   
-  const createSortedChunkEntries = (chunkMap) => {
-    const chunkEntries = Array.from(chunkMap.entries()).map(([signature, data]) => {
-      const sorted = data.positions.slice().sort((a, b) => a - b);
-      const mid = Math.floor(sorted.length / 2);
-      const median = sorted.length % 2 === 0
-        ? (sorted[mid - 1] + sorted[mid]) / 2
-        : sorted[mid];
+  sortedTrips.forEach(trip => {
+    const stationStopsInTrip = new Map(); // stationId → Set(stop_id)
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    stops.forEach(stopTime => {
+      const stopId = stopTime.stop_id;
+      const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
       
-      // Get the name of the first stop in the chunk for tie-breaking
-      const firstStopName = data.stops[0].name;
+      // Track stops per station in this trip
+      if (!stationStopsInTrip.has(stationId)) {
+        stationStopsInTrip.set(stationId, new Set());
+      }
+      stationStopsInTrip.get(stationId).add(stopId);
+      
+      // Collect all platforms globally
+      if (!stationToAllStopIds.has(stationId)) {
+        stationToAllStopIds.set(stationId, new Set());
+      }
+      stationToAllStopIds.get(stationId).add(stopId);
+    });
+    
+    // If trip has >1 stop_id for a station → mark for splitting
+    stationStopsInTrip.forEach((stopIds, stationId) => {
+      if (stopIds.size > 1) {
+        stationRequiresSplit.add(stationId);
+      }
+    });
+  });
+  
+  // Convert Sets to Arrays once for efficiency
+  stationToAllStopIds.forEach((stopIdsSet, stationId) => {
+    stationToAllStopIds.set(stationId, Array.from(stopIdsSet));
+  });
+
+  // Step 1: Build trip sequences with occurrence tracking
+  const tripSequences = new Map();
+
+  sortedTrips.forEach(trip => {
+    const occurrenceCount = new Map();
+    const stops = tripStopMaps[trip.trip_id] || [];
+    
+    const sequence = stops.map((stopTime, idx) => {
+      const stopId = stopTime.stop_id;
+      const stationId = getStationIdWithPolicy(stopId, stopsIndex, allowedSet);
+      
+      // Determine if we're entering a different station (new or returning after visiting others)
+      // This enables proper occurrence counting for loops (e.g., A→B→A becomes occurrence 1 and 2)
+      const prevStationId = idx > 0 
+        ? getStationIdWithPolicy(stops[idx - 1].stop_id, stopsIndex, allowedSet)
+        : null;
+      
+      // Increment occurrence counter when transitioning to a different station
+      if (prevStationId !== stationId) {
+        occurrenceCount.set(stationId, (occurrenceCount.get(stationId) || 0) + 1);
+      }
       
       return {
-        signature,
-        stops: data.stops,
-        median,
-        name: firstStopName
+        stopId,
+        stationId,
+        occurrence: occurrenceCount.get(stationId),
+        requiresSplit: stationRequiresSplit.has(stationId),
       };
     });
-
-    // Sort chunks by median, then by name, then by signature (stable)
-    chunkEntries.sort((a, b) => {
-      if (a.median !== b.median) return a.median - b.median;
-      if (a.name !== b.name) return a.name.localeCompare(b.name);
-      return a.signature.localeCompare(b.signature);
-    });
-
-    return chunkEntries;
-  };
-
-  const preCoreBranches = createSortedChunkEntries(preCore);
-  preCoreBranches.forEach(chunk => {
-    // Insert all stops from the chunk in order
-    chunk.stops.forEach(stop => {
-      finalRows.push({
-        id: stop.stopIds[0],
-        name: stop.name,
-        stopIds: stop.stopIds,
-        nodeType: nodeTypes[stop.stopIds[0]] || 'passenger'
-      });
-    });
-  });
-  
-  // Add first core station
-  finalRows.push({
-    id: coreStationGroups[0].stopIds[0],
-    name: getStationDisplayName(coreStationGroups[0].stationId, coreStationGroups[0].stopIds),
-    stopIds: coreStationGroups[0].stopIds,
-    nodeType: nodeTypes[coreStationGroups[0].stopIds[0]] || 'core'
+    
+    tripSequences.set(trip.trip_id, sequence);
   });
 
-  // For each window, add sorted chunks, then the next core station
-  windows.forEach((window, winIdx) => {
-    const chunkEntries = createSortedChunkEntries(window.chunks);
+  // Step 2: Build masterlist with conditional merging
+  const masterList = [];
+  const masterListMap = new Map(); // String key → index for O(1) lookup
 
-    // Add chunks to final list (each chunk contains multiple stops in order)
-    chunkEntries.forEach(chunk => {
-      chunk.stops.forEach(stop => {
-        finalRows.push({
-          id: stop.stopIds[0],
-          name: stop.name,
-          stopIds: stop.stopIds,
-          nodeType: nodeTypes[stop.stopIds[0]] || 'passenger'
+  tripSequences.forEach((sequence, tripId) => {
+    let lastMasterIdx = -1;
+    
+    sequence.forEach(({stopId, stationId, occurrence, requiresSplit}) => {
+      // Create lookup key as string for Map efficiency
+      const lookupKey = requiresSplit 
+        ? `${stationId}::${occurrence}::${stopId}` // Key: (stationId, occurrence, stopId)
+        : `${stationId}::${occurrence}`; // Key: (stationId, occurrence) - merge platforms
+      
+      const existingIdx = masterListMap.get(lookupKey);
+      
+      if (existingIdx !== undefined) {
+        lastMasterIdx = existingIdx;
+      } else {
+        // Create new entry
+        const baseName = getStationDisplayName(stationId, [stopId]);
+        const displayName = occurrence > 1 ? `${baseName} (${occurrence})` : baseName;
+        
+        // Determine stopIds based on split requirement
+        // Split mode: Keep platforms separate (one stop_id per row) for trips using multiple platforms
+        // Merge mode: Combine all platforms (multiple stop_ids) when no trip uses multiple platforms
+        const stopIdsForEntry = requiresSplit 
+          ? [stopId]
+          : (stationToAllStopIds.get(stationId) || [stopId]);
+        
+        const newEntry = {
+          id: stopIdsForEntry[0],
+          name: displayName,
+          stopIds: stopIdsForEntry,
+          stationId,
+          occurrence,
+          nodeType: nodeTypes[stopId] || 'passenger'
+        };
+        
+        const insertPos = lastMasterIdx + 1;
+        masterList.splice(insertPos, 0, newEntry);
+        masterListMap.set(lookupKey, insertPos);
+        
+        // Update all indices in map that are >= insertPos
+        masterListMap.forEach((idx, key) => {
+          if (idx >= insertPos && key !== lookupKey) {
+            masterListMap.set(key, idx + 1);
+          }
         });
-      });
-    });
-
-    const nextCore = window.endCore;
-    finalRows.push({
-      id: nextCore.stopIds[0],
-      name: getStationDisplayName(nextCore.stationId, nextCore.stopIds),
-      stopIds: nextCore.stopIds,
-      nodeType: nodeTypes[nextCore.stopIds[0]] || 'core'
+        
+        lastMasterIdx = insertPos;
+      }
     });
   });
 
-  const postCoreBranches = createSortedChunkEntries(postCore);
-  postCoreBranches.forEach(chunk => {
-    // Insert all stops from the chunk in order
-    chunk.stops.forEach(stop => {
-      finalRows.push({
-        id: stop.stopIds[0],
-        name: stop.name,
-        stopIds: stop.stopIds,
-        nodeType: nodeTypes[stop.stopIds[0]] || 'passenger'
-      });
-    });
-  });
-
-  return finalRows;
+  return masterList;
 }
 function ensureCanonicalMasterListForCurrentSelection() {
   const key = getCanonicalKeyForCurrentSelection();
@@ -6654,7 +6382,6 @@ if (variantsData && variantsData.variantDetails) {
 }
 
 let masterList = ensureCanonicalMasterListForCurrentSelection();
-let usingCanonical = !!masterList;
 
 const tripStopMaps = {};
 trips.forEach(trip => {
@@ -6732,12 +6459,6 @@ sortedTrips.forEach(t => {
   }
 });
 
-// === STEP 5: Get master list (canonical or fallback) ===
-if (!usingCanonical) {
-  // Fallback: use old buildMasterList
-  masterList = buildMasterList(sortedTrips, newTripStopMaps, state.gtfsData.stopsIndex);
-}
-
 if (!masterList || masterList.length === 0) {
   tableRoot.innerHTML = "<div class='p-4 text-gray-500'>Unable to build schedule.</div>";
   return;
@@ -6795,7 +6516,7 @@ const dir = state.selectedDirection || '0';
 const columnOrderCacheKey = `${key}::${dir}::${state.selectedDate}::${state.showAllTrips}`;
 
 let orderedServiceTrips = serviceTrips;
-if (usingCanonical && serviceTrips.length > 0) {
+if (serviceTrips.length > 0) {
   const serviceTripMappings = serviceTrips.map(trip => {
     const originalIdx = sortedTrips.findIndex(t => t.trip_id === trip.trip_id);
     return tripMappings[originalIdx];
