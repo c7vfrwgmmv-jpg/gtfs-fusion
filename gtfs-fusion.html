@@ -4098,7 +4098,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
 
   // === Step 1.5 - Build core stations skeleton FIRST ===
   // This ensures core stations appear in correct topological order
-  const coreStationGroups = [];
   const seenCoreStations = new Set();
 
   coreStops.forEach(stopId => {
@@ -4133,8 +4132,6 @@ function buildCanonicalMasterList(profile, allTrips, stopTimesIndex, stopsIndex)
           masterListMap.set(`${stationId}::1::${sid}`, masterList.length - 1);
         });
       }
-      
-      coreStationGroups.push({ stationId, stopIds: stopIdsForStation });
     }
   });
 
@@ -5472,7 +5469,8 @@ async function searchStopsInIndexAsync(query, groupsArray, onProgress) {
 
 function getOrBuildGroupsArray(stopsData) {
   // Better hash - includes first AND last stop
-  const currentHash = `${stopsData.length}_${stopsData[0]?.stop_id || ''}_${stopsData[stopsData.length-1]?.stop_id || ''}`;
+  const len = stopsData.length;
+  const currentHash = `${len}_${stopsData[0]?.stop_id || ''}_${stopsData[len-1]?.stop_id || ''}`;
   
   if (cachedGroupsArray && lastStopsDataHash === currentHash) {
     return cachedGroupsArray;
