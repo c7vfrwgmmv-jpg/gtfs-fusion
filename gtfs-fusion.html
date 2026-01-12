@@ -3155,7 +3155,7 @@ function getStationId(stopId, stopsIndex) {
     const cache = buildStationNameCache(stopsIndex);
     
     if (cache.has(normalizedName)) {
-      return cache. get(normalizedName);
+      return cache.get(normalizedName);
     }
     
     // Fallback: zwróć znormalizowaną nazwę
