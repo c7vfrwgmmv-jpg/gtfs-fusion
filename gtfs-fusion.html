@@ -1360,6 +1360,139 @@ function getWorkerUrl() {
   return workerBlobUrl;
 }
 
+// Main-thread version of parseStopTimesChunk (also exists in worker)
+// Used for small files processed synchronously
+function parseStopTimesChunk(text, headers) {
+  const stopTimesIndex = Object.create(null);
+  
+  const getCol = (cols, idx) => {
+    if (idx === -1 || idx >= cols.length) return '';
+    let val = cols[idx];
+    if (!val) return '';
+    
+    // Remove quotes in-place
+    if (val[0] === '"' && val[val.length-1] === '"') {
+      val = val.substring(1, val.length - 1);
+    }
+    
+    // Trim only if needed
+    if (val[0] === ' ' || val[val.length-1] === ' ') {
+      return val.trim();
+    }
+    
+    return val;
+  };
+  
+  const lines = text.split('\n');
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    const cols = line.split(',');
+    
+    // Skip if required columns are missing or out of bounds
+    if (headers.tripIdx === -1 || headers.stopIdx === -1) continue;
+    if (cols.length <= Math.max(headers.tripIdx, headers.stopIdx)) continue;
+    
+    const tripId = getCol(cols, headers.tripIdx);
+    const stopId = getCol(cols, headers.stopIdx);
+    
+    if (!tripId || !stopId) continue;
+    
+    if (!stopTimesIndex[tripId]) {
+      stopTimesIndex[tripId] = [];
+    }
+    
+    stopTimesIndex[tripId].push({
+      stop_id: stopId,
+      arrival_time: getCol(cols, headers.arrIdx),
+      departure_time: getCol(cols, headers.depIdx),
+      stop_sequence: parseInt(getCol(cols, headers.seqIdx) || '0', 10),
+      pickup_type: getCol(cols, headers.pickupIdx) || '0',
+      drop_off_type: getCol(cols, headers.dropoffIdx) || '0'
+    });
+  }
+  
+  return stopTimesIndex;
+}
+
+// Main-thread version of parseShapesChunk (also exists in worker)
+// Used for small files processed synchronously
+function parseShapesChunk(text) {
+  const shapesIndex = {};
+  const lines = text.split('\n');
+  
+  if (lines.length === 0) return shapesIndex;
+  
+  // Parse header
+  const headerLine = lines[0].replace(/^\uFEFF/, '');
+  const rawHeaders = headerLine.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+  
+  const headers = {
+    shapeIdx: -1,
+    latIdx: -1,
+    lonIdx: -1,
+    seqIdx: -1
+  };
+  
+  rawHeaders.forEach((h, i) => {
+    const normalized = normalizeKey(h);
+    if (normalized === 'shape_id') headers.shapeIdx = i;
+    else if (normalized === 'shape_pt_lat') headers.latIdx = i;
+    else if (normalized === 'shape_pt_lon') headers.lonIdx = i;
+    else if (normalized === 'shape_pt_sequence') headers.seqIdx = i;
+  });
+  
+  if (headers.shapeIdx === -1 || headers.latIdx === -1 || headers.lonIdx === -1) {
+    return shapesIndex;
+  }
+  
+  const getCol = (cols, idx) => {
+    if (idx === -1 || idx >= cols.length) return '';
+    let val = cols[idx];
+    if (!val) return '';
+    if (val[0] === '"' && val[val.length-1] === '"') {
+      val = val.substring(1, val.length - 1);
+    }
+    if (val[0] === ' ' || val[val.length-1] === ' ') {
+      return val.trim();
+    }
+    return val;
+  };
+  
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    const cols = line.split(',');
+    
+    const shapeId = getCol(cols, headers.shapeIdx);
+    if (!shapeId) continue;
+    
+    const lat = parseFloat(getCol(cols, headers.latIdx));
+    const lon = parseFloat(getCol(cols, headers.lonIdx));
+    const seq = headers.seqIdx !== -1 ? parseInt(getCol(cols, headers.seqIdx) || '0', 10) : 0;
+    
+    if (isNaN(lat) || isNaN(lon)) continue;
+    
+    if (!shapesIndex[shapeId]) {
+      shapesIndex[shapeId] = [];
+    }
+    
+    shapesIndex[shapeId].push({ lat, lon, seq });
+  }
+  
+  // Sort by sequence
+  Object.keys(shapesIndex).forEach(shapeId => {
+    shapesIndex[shapeId].sort((a, b) => a.seq - b.seq);
+    // Convert to coordinate pairs
+    shapesIndex[shapeId] = shapesIndex[shapeId].map(p => [p.lat, p.lon]);
+  });
+  
+  return shapesIndex;
+}
+
 // Worker pool manager
 class WorkerPool {
   constructor(size = WORKER_POOL_SIZE) {
