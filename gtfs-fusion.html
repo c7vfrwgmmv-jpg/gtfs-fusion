@@ -3865,6 +3865,7 @@ function getCurrentRouteProfile() {
 }
 
 // Helper function for trip mappings - kept from deleted section 6, needed by section 7
+function createTripMappings(sortedTrips, tripStopMaps, masterList) {
   return sortedTrips.map(trip => {
     const mapping = {}; let lastM = -1;
     const tripStops = tripStopMaps[trip.trip_id] || [];
