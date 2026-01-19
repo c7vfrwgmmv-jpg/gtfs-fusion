@@ -2707,7 +2707,74 @@ function enrichRouteDirections(routeTrips, stopTimesIndex, stopsIndex) {
 
 // Async version with chunked processing to prevent UI freezes
 
+/**
+ * Assign direction_id based on trip_headsign distribution
+ * Use the 2 most common headsigns as direction 0 and 1
+ * @returns {boolean} - true if successful, false if headsigns not usable
+ */
+function tryAssignDirectionByHeadsign(trips) {
+  // Count headsign occurrences
+  const headsignCounts = {};
+  let totalWithHeadsign = 0;
+  
+  trips.forEach(t => {
+    const h = (t.trip_headsign || '').trim();
+    if (h) {
+      headsignCounts[h] = (headsignCounts[h] || 0) + 1;
+      totalWithHeadsign++;
+    }
+  });
+  
+  // Need at least 80% of trips with headsigns to use this method
+  if (totalWithHeadsign < trips.length * 0.8) {
+    return false;
+  }
+  
+  // Get top 2 headsigns
+  const sortedHeadsigns = Object.entries(headsignCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2);
+  
+  if (sortedHeadsigns.length < 2) {
+    return false; // Need at least 2 distinct headsigns
+  }
+  
+  const [headsign0, count0] = sortedHeadsigns[0];
+  const [headsign1, count1] = sortedHeadsigns[1];
+  
+  // Top 2 headsigns should cover at least 60% of trips
+  if ((count0 + count1) < trips.length * 0.6) {
+    return false;
+  }
+  
+  // Assign direction_id based on headsign
+  trips.forEach(t => {
+    const h = (t.trip_headsign || '').trim();
+    if (h === headsign0) {
+      t.direction_id = '0';
+    } else if (h === headsign1) {
+      t.direction_id = '1';
+    }
+    // Leave undefined for other headsigns - will be handled by fallback
+  });
+  
+  console.log('[Enrichment] Used trip_headsign: "' + headsign0 + '" (dir 0), "' + headsign1 + '" (dir 1)');
+  
+  return true;
+}
+
 async function enrichTripsWithDirectionIdUsingWorker(trips, stopTimesIndex, stopsIndex, onProgress) {
+  // PRIORITY 1: Try headsign-based detection (fast, reliable for quality feeds)
+  const headsignSuccess = tryAssignDirectionByHeadsign(trips);
+  if (headsignSuccess) {
+    // Headsign method worked - skip geometry analysis
+    // Report 100% progress (processed=1, total=1, percent=100)
+    if (onProgress) onProgress(1, 1, 100);
+    return;
+  }
+  
+  console.log('[Enrichment] Headsign method failed - falling back to geometry analysis');
+  
   // 1) trips do przetworzenia
   const tripsToProcess = trips.filter(t => t && t.trip_id && (t.direction_id === undefined || t.direction_id === null || String(t.direction_id).trim() === ''));
   if (!tripsToProcess.length) {
@@ -3354,12 +3421,23 @@ lastStopsDataHash = null;
 state.routeProfiles = {};  // Clear cached route profiles
 state.canonicalMasterLists = {};  // Clear cached master lists
 
+// Build calendar_dates index ONCE during load (performance optimization)
+const calendarDatesByDateIndex = new Map();
+calendarDates.forEach(cd => {
+  if (!cd.date) return;
+  if (!calendarDatesByDateIndex.has(cd.date)) {
+    calendarDatesByDateIndex.set(cd.date, []);
+  }
+  calendarDatesByDateIndex.get(cd.date).push(cd);
+});
+	  
 state.gtfsData = {
   routes,
   agencies,
   agenciesIndex,
   calendar,
   calendarDates,
+  calendarDatesByDateIndex,
   stopTimesIndex,
   stopTimesDB,
   stopTimesDbName,
@@ -3622,6 +3700,16 @@ function generateAvailableDates(calendar, calendarDates) {
     return formatDateToGTFS(date);
   };
   
+  // Build index: date -> array of calendar_date records (performance optimization)
+  const calendarDatesByDate = new Map();
+  calendarDates.forEach(cd => {
+    if (!cd.date) return;
+    if (!calendarDatesByDate.has(cd.date)) {
+      calendarDatesByDate.set(cd.date, []);
+    }
+    calendarDatesByDate.get(cd.date).push(cd);
+  });
+  
   // 🆕 KROK 1: Zbierz WSZYSTKIE możliwe daty (z calendar.txt)
   const allPossibleDates = new Set();
   
@@ -3652,33 +3740,32 @@ function generateAvailableDates(calendar, calendarDates) {
       }
     });
     
-    // Zastosuj wyjątki z calendar_dates.txt
-    calendarDates.forEach(cd => {
-      if (cd.date === dateStr) {
+    // Zastosuj wyjątki z calendar_dates.txt (using indexed lookup)
+    const exceptionsForDate = calendarDatesByDate.get(dateStr);
+    if (exceptionsForDate) {
+      exceptionsForDate.forEach(cd => {
         if (cd.exception_type === '1') services.add(cd.service_id);
         else if (cd.exception_type === '2') services.delete(cd.service_id);
-      }
-    });
+      });
+    }
     
     // Zapisz liczbę serwisów
     dateServiceCounts.set(dateStr, services.size);
   });
   
-  // 🆕 KROK 3: Dodaj daty z calendar_dates.txt (exception_type=1)
-  calendarDates.forEach(cd => {
-    if (cd.exception_type === '1' && !dateServiceCounts.has(cd.date)) {
-      // Nowa data nie w calendar.txt - policz serwisy
-      const services = new Set();
-      
-      calendarDates.forEach(cd2 => {
-        if (cd2.date === cd.date) {
-          if (cd2.exception_type === '1') services.add(cd2.service_id);
-        }
-      });
-      
-      dateServiceCounts.set(cd.date, services.size);
+// 🆕 KROK 3: Dodaj daty z calendar_dates.txt (exception_type=1)
+// OPTYMALIZACJA: iteruj przez unikalne daty zamiast wszystkie wiersze
+calendarDatesByDate.forEach((exceptions, dateStr) => {
+  if (!dateServiceCounts.has(dateStr)) {
+    const services = new Set();
+    exceptions.forEach(cd => {
+      if (cd.exception_type === '1') services.add(cd.service_id);
+    });
+    if (services.size > 0) {
+      dateServiceCounts. set(dateStr, services.size);
     }
-  });
+  }
+});
   
   // 🆕 KROK 4: Filtruj - zostaw tylko daty z > 0 serwisów
   const finalDates = Array.from(dateServiceCounts.entries())
@@ -3711,21 +3798,22 @@ function getServicesForDate(dateStr) {
   const dayOfWeek = DAY_NAMES[getDayOfWeek(dateStr)];
   const services = new Set();
   
-  // ✅ String comparison instead of Date
+  // Bazowe serwisy z calendar. txt
   state.gtfsData.calendar.forEach(cal => {
     if (dateStr >= cal.start_date && dateStr <= cal.end_date && cal[dayOfWeek] === '1') {
       services.add(cal.service_id);
     }
   });
   
-  // ✅ String equality check
-  if (state.gtfsData.calendarDates) {
-    state.gtfsData.calendarDates.forEach(cd => {
-      if (cd.date === dateStr) {
+  // ✅ FIXED: Use indexed lookup (requires calendarDatesByDateIndex in state)
+  if (state.gtfsData.calendarDatesByDateIndex) {
+    const exceptionsForDate = state.gtfsData.calendarDatesByDateIndex.get(dateStr);
+    if (exceptionsForDate) {
+      exceptionsForDate.forEach(cd => {
         if (cd.exception_type === '1') services.add(cd.service_id);
         else if (cd.exception_type === '2') services.delete(cd.service_id);
-      }
-    });
+      });
+    }
   }
   
   return Array.from(services);
